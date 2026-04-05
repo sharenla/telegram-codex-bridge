@@ -32,6 +32,9 @@ npm start
 > `npm run discover-chat`
 > 然后给 bot 发一条消息，终端会直接打印可用的 `chat_id`。
 
+> 如果要在群里用 bot，也要把 **群 id** 加进 `TELEGRAM_ALLOWLIST`，例如：
+> `TELEGRAM_ALLOWLIST=123456789,-1003791245514`
+
 3. 在 Telegram 私聊 bot：
    - 直接发文本 = 发起一次 Codex `turn/start`
    - `/new` 新开线程（thread）
@@ -65,6 +68,19 @@ npm run install:launch-agent
 ```bash
 npm run uninstall:launch-agent
 ```
+
+## 多机器注意事项
+
+- 这个 bridge 目前走的是 Telegram `getUpdates` 轮询。
+- **同一个 bot token，同一时刻只应该有一个活跃 bridge 实例。**
+- 如果你把同一个 token 同时跑在两台电脑上，更新会被两边抢，现象通常会变成：
+  - 有时这台回，有时那台回
+  - 某边突然没反应
+  - 新 thread 重复创建
+  - 行为看起来像“上下文跳了”
+- 如果你想两台电脑同时在线，建议：
+  - 每台机器一个独立 bot token；或
+  - 同一时间只保留一台机器在运行 bridge
 
 ## 单账号 / 多账号
 
