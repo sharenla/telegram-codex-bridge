@@ -2,6 +2,17 @@
 
 把 Telegram 里的消息转发到本机 `codex app-server`，并把 Codex 的流式输出、命令输出、diff（预览）回传到 Telegram。
 
+## `codex-cli` 和 `app-server` 的关系
+
+- 安装反馈里写“可用 `codex-cli 0.118.0-alpha.2`”是正常的，因为 bridge 并不是绕过 CLI 单独调用别的程序。
+- 实际上它启动的是本机 `codex` 二进制里的 `app-server` 子命令，也就是类似：
+
+```bash
+codex app-server --listen stdio://
+```
+
+- 所以本机 `codex` / `codex-cli` 的版本，直接决定了 `app-server` 能不能正常握手、支持哪些协议能力。
+
 ## 快速开始
 
 1. 创建 Telegram bot，拿到 `TELEGRAM_BOT_TOKEN`
@@ -61,6 +72,61 @@ npm run uninstall:launch-agent
 - 如果未来那台机器加了更多账号，再把 `CODEX_ACCOUNTS_SOURCE` 指到本机的 OpenClaw `auth-profiles.json`，轮询/切号机制就会自动生效。
 - 建议始终保留 `CODEX_AUTO_ACCOUNT_FAILOVER=1`，这样多账号环境下遇到限流会自动换“电池”。
 
+## 安全档位
+
+- 这个 bridge 里真正影响“危险程度”的，主要是三项：
+  - `CODEX_SANDBOX`
+  - `CODEX_APPROVAL_POLICY`
+  - `AUTO_APPROVE`
+- 它们的职责分别是：
+  - `CODEX_SANDBOX`：Codex **最多能碰到哪里**
+  - `CODEX_APPROVAL_POLICY`：Codex **是否倾向于先发起审批**
+  - `AUTO_APPROVE`：bridge 收到审批请求后，**是自动同意还是在 Telegram 里问你**
+
+### 推荐 1：远程默认安全档
+
+```bash
+CODEX_APPROVAL_POLICY=untrusted
+CODEX_SANDBOX=workspace-write
+AUTO_APPROVE=0
+```
+
+- 适合：第二台电脑、长期常驻、偶尔远程修项目
+- 效果：Codex 只能在你当前工作目录里改东西；命令执行/文件修改需要你在 Telegram 里点批准
+
+### 推荐 2：可信项目高效率档
+
+```bash
+CODEX_APPROVAL_POLICY=never
+CODEX_SANDBOX=workspace-write
+AUTO_APPROVE=1
+```
+
+- 适合：你完全信任这个 bot，只想让它在某个项目目录里快速干活
+- 效果：基本不再弹审批，但活动范围仍然被限制在当前 workspace
+
+### 推荐 3：满权限档
+
+```bash
+CODEX_APPROVAL_POLICY=never
+CODEX_SANDBOX=danger-full-access
+AUTO_APPROVE=1
+```
+
+- 适合：你明确要“像坐在电脑前一样”让它接管整机
+- 效果：Codex 可以读写整机、跑任意命令、改任意路径；Telegram bot 一旦被拿到，风险等同于远程 shell
+- 只建议在：
+  - bot 严格白名单
+  - 机器是你自己的
+  - 重要数据已备份
+  - 你清楚这是“全权放行”
+
+## 我建议你怎么选
+
+- **主力电脑**：如果你就是要复现“Codex GUI 原生能力”，用满权限档。
+- **另一台只有 1 个账号的电脑**：先用“可信项目高效率档”更稳，通常已经够像 GUI 了。
+- 只有当你希望它跨项目、跨家目录、直接动系统脚本时，再切到 `danger-full-access`。
+
 ## 多账号说明
 
 - 建议把 `CODEX_HOME` 指向一个 **bridge 专用目录**，这样 Telegram 侧切账号不会影响本地 Codex GUI。
@@ -72,4 +138,4 @@ npm run uninstall:launch-agent
 
 - **务必配置 `TELEGRAM_ALLOWLIST`**（只允许你的 chat id / 群 id），否则任何人都可能控制你电脑上的 Codex。
 - Telegram bot 对话 **不是端到端加密**；不要把密钥/隐私直接发在群里。
-- `CODEX_SANDBOX=danger-full-access` 等同“完全权限”，建议在独立账号/隔离目录中运行，并备份重要文件。
+- `CODEX_SANDBOX=danger-full-access` 等同“完全权限”，建议只在你明确要整机接管时启用，并备份重要文件。
