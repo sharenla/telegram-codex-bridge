@@ -484,6 +484,10 @@ function parseBooleanEnv(value, defaultValue = false) {
   return defaultValue;
 }
 
+function uniqueStrings(values) {
+  return [...new Set((values || []).filter((value) => typeof value === "string" && value))];
+}
+
 function buildHelpText() {
   return [
     "Telegram Codex Bridge commands:",
@@ -918,6 +922,23 @@ async function main() {
     return ACCOUNT_FAILOVER_PATTERNS.some((pattern) => pattern.test(text));
   }
 
+  function extractTurnErrorText(turn) {
+    const parts = [];
+    if (turn?.error?.message) parts.push(String(turn.error.message));
+    if (turn?.error?.codexErrorInfo) parts.push(String(turn.error.codexErrorInfo));
+    if (turn?.error?.additionalDetails) parts.push(String(turn.error.additionalDetails));
+    return parts.filter(Boolean).join(" | ");
+  }
+
+  function isUsageLimitTurn(turn) {
+    if (!autoAccountFailover || accountProfiles.length < 2) return false;
+    const codexErrorInfo = turn?.error?.codexErrorInfo;
+    if (typeof codexErrorInfo === "string" && codexErrorInfo === "usageLimitExceeded") return true;
+    const text = extractTurnErrorText(turn);
+    if (!text) return false;
+    return ACCOUNT_FAILOVER_PATTERNS.some((pattern) => pattern.test(text));
+  }
+
   function listFallbackProfiles(currentProfileId, attemptedProfileIds = new Set()) {
     const startIndex = accountProfiles.findIndex((profile) => profile.profileId === currentProfileId);
     if (startIndex < 0) {
@@ -982,6 +1003,48 @@ async function main() {
 
   const codexBin = resolveCodexBin();
 
+  async function retryTurnAfterUsageLimit({ chatId, session, rt, turn }) {
+    if (!isUsageLimitTurn(turn) || rt.failoverInProgress) return false;
+
+    const inputMeta = rt.turnInputMetaByTurnId?.[turn?.id];
+    if (!inputMeta?.text) return false;
+
+    const currentProfile = getCurrentAccountProfile();
+    const attempted = new Set(uniqueStrings([
+      ...(inputMeta.attemptedProfileIds || []),
+      currentProfile?.profileId || null,
+    ]));
+    const nextProfile = listFallbackProfiles(currentProfile?.profileId, attempted)[0] || null;
+    if (!nextProfile) return false;
+
+    rt.failoverInProgress = true;
+    delete rt.turnInputMetaByTurnId[turn.id];
+
+    try {
+      const nextNumber = accountNumber(nextProfile);
+      const numberLabel = nextNumber ? `#${nextNumber}` : "next";
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: `Current account hit a usage limit during the turn. Switching to account ${numberLabel} and retrying…`,
+      });
+
+      await switchAccountProfile(nextProfile);
+      startTyping(chatId);
+      await startOrSteerTurn({
+        chatId,
+        session,
+        text: inputMeta.text,
+        attemptedProfileIds: uniqueStrings([
+          ...attempted,
+          nextProfile.profileId,
+        ]),
+      });
+      return true;
+    } finally {
+      rt.failoverInProgress = false;
+    }
+  }
+
   async function startCodexServer() {
     const server = new CodexAppServer({ codexBin, env: codexEnv });
     server.onNotification(async (msg) => {
@@ -994,6 +1057,10 @@ async function main() {
         if (!chatId) return;
         const rt = getRuntime(chatId);
         rt.activeTurnId = turn?.id || null;
+        if (turn?.id && rt.pendingInputMeta) {
+          rt.turnInputMetaByTurnId[turn.id] = { ...rt.pendingInputMeta };
+          rt.pendingInputMeta = null;
+        }
         return;
       }
 
@@ -1001,6 +1068,7 @@ async function main() {
         const { threadId, turn } = params;
         const chatId = chatIdForThread(threadId);
         if (!chatId) return;
+        const session = getOrCreateSession(chatId);
         const rt = getRuntime(chatId);
         rt.activeTurnId = null;
         stopTyping(chatId);
@@ -1008,8 +1076,17 @@ async function main() {
 
         const status = turn?.status || "completed";
         if (status !== "completed") {
-          await telegram.sendMessage({ chat_id: chatId, text: `Turn ${status}.` });
+          const retried = await retryTurnAfterUsageLimit({ chatId, session, rt, turn });
+          if (!retried) {
+            const detail = extractTurnErrorText(turn);
+            const text = detail
+              ? `Turn ${status}: ${truncateMiddle(detail, 1200)}`
+              : `Turn ${status}.`;
+            await telegram.sendMessage({ chat_id: chatId, text });
+          }
         }
+
+        if (turn?.id) delete rt.turnInputMetaByTurnId[turn.id];
 
         const diff = rt.turnDiffByTurnId?.[turn?.id];
         if (diff && typeof diff === "string" && diff.trim()) {
@@ -1312,9 +1389,12 @@ async function main() {
     if (existing) return existing;
     const created = {
       activeTurnId: null,
+      pendingInputMeta: null,
+      turnInputMetaByTurnId: {},
       items: {},
       turnDiffByTurnId: {},
       editTimers: new Map(),
+      failoverInProgress: false,
       typingTimer: null,
       menuPage: MENU_PAGES.MAIN,
     };
@@ -1522,47 +1602,66 @@ async function main() {
     });
   }
 
-  async function startOrSteerTurn({ chatId, session, text }) {
-    const threadId = await ensureThread(session, chatId);
+  async function startOrSteerTurn({ chatId, session, text, attemptedProfileIds = null }) {
     const rt = getRuntime(chatId);
-    startTyping(chatId);
+    const currentProfile = getCurrentAccountProfile();
+    rt.pendingInputMeta = {
+      text,
+      attemptedProfileIds: uniqueStrings([
+        ...(attemptedProfileIds || []),
+        currentProfile?.profileId || null,
+      ]),
+    };
 
-    if (rt.activeTurnId) {
-      await codex.request("turn/steer", {
-        threadId,
-        expectedTurnId: rt.activeTurnId,
-        input: [{ type: "text", text }],
+    try {
+      const threadId = await ensureThread(session, chatId);
+      startTyping(chatId);
+
+      if (rt.activeTurnId) {
+        rt.turnInputMetaByTurnId[rt.activeTurnId] = { ...rt.pendingInputMeta };
+        rt.pendingInputMeta = null;
+
+        await codex.request("turn/steer", {
+          threadId,
+          expectedTurnId: rt.activeTurnId,
+          input: [{ type: "text", text }],
+        });
+        await telegram.sendMessage({ chat_id: chatId, text: "Steering active turn…" });
+        return;
+      }
+
+      rt.items = {};
+      rt.turnDiffByTurnId = {};
+      session.updatedAt = nowIso();
+      store.markDirty();
+      store.saveThrottled();
+
+      await requestWithAccountFailover({
+        chatId,
+        failureLabel: "turn start",
+        run: async () => codex.request("turn/start", {
+          threadId,
+          input: [{ type: "text", text }],
+          cwd: session.cwd,
+          model: session.model,
+          effort: session.effort,
+          summary: session.summary,
+          personality: session.personality,
+          approvalPolicy: session.approvalPolicy,
+          sandboxPolicy:
+            session.sandboxMode === "danger-full-access"
+              ? { type: "dangerFullAccess" }
+              : session.sandboxMode === "read-only"
+                ? { type: "readOnly" }
+                : { type: "workspaceWrite" },
+        }),
       });
-      await telegram.sendMessage({ chat_id: chatId, text: "Steering active turn…" });
-      return;
+    } catch (err) {
+      if (rt.pendingInputMeta?.text === text) {
+        rt.pendingInputMeta = null;
+      }
+      throw err;
     }
-
-    rt.items = {};
-    rt.turnDiffByTurnId = {};
-    session.updatedAt = nowIso();
-    store.markDirty();
-    store.saveThrottled();
-
-    await requestWithAccountFailover({
-      chatId,
-      failureLabel: "turn start",
-      run: async () => codex.request("turn/start", {
-        threadId,
-        input: [{ type: "text", text }],
-        cwd: session.cwd,
-        model: session.model,
-        effort: session.effort,
-        summary: session.summary,
-        personality: session.personality,
-        approvalPolicy: session.approvalPolicy,
-        sandboxPolicy:
-          session.sandboxMode === "danger-full-access"
-            ? { type: "dangerFullAccess" }
-            : session.sandboxMode === "read-only"
-              ? { type: "readOnly" }
-              : { type: "workspaceWrite" },
-      }),
-    });
   }
 
   async function interruptTurn({ chatId, session }) {
