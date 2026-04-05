@@ -38,6 +38,23 @@ npm start
    - `/status` 查看 thread/turn 状态
    - 当 Codex 需要你输入时：按按钮或用 `/answer <token> ...`
 
+## 开机 / 跟随 Codex 启动
+
+- **当前默认行为**：如果只是重启电脑然后打开 Codex，bridge **不会**自己起来，除非你手动 `npm start`。
+- 如果你想要“打开 Codex 就自动带起 Telegram bridge，关闭 Codex 就停掉 bridge”，运行：
+
+```bash
+npm run install:launch-agent
+```
+
+- 它会在 macOS 里安装一个 `launchd` agent，常驻监听 `Codex.app` 进程；当 Codex 打开时自动启动 bridge，当 Codex 退出时自动停掉 bridge。
+- 为了避开 macOS 对 `Documents` 目录的后台访问限制，安装时会把运行副本同步到 `~/Library/Application Support/telegram-codex-bridge-service`，仓库本身仍然保留在你的开发目录里。
+- 卸载自动启动：
+
+```bash
+npm run uninstall:launch-agent
+```
+
 ## 单账号 / 多账号
 
 - 如果另一台电脑现在只有 **1 个账号**，完全没问题：把 `.env` 里的 `CODEX_ACCOUNTS_SOURCE` 留空，bridge 仍然正常工作。

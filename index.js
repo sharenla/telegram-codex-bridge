@@ -44,6 +44,16 @@ function resolveUserPath(inputPath) {
   return inputPath;
 }
 
+function resolveCodexBin() {
+  const fromEnv = resolveUserPath(process.env.CODEX_BIN || "");
+  if (fromEnv) return fromEnv;
+
+  const appBundleBin = "/Applications/Codex.app/Contents/Resources/codex";
+  if (fs.existsSync(appBundleBin)) return appBundleBin;
+
+  return "codex";
+}
+
 function safeBase64UrlDecode(value) {
   try {
     const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
@@ -970,8 +980,10 @@ async function main() {
   let codex = null;
   const codexEnv = { ...process.env, CODEX_HOME: codexHome };
 
+  const codexBin = resolveCodexBin();
+
   async function startCodexServer() {
-    const server = new CodexAppServer({ env: codexEnv });
+    const server = new CodexAppServer({ codexBin, env: codexEnv });
     server.onNotification(async (msg) => {
       const { method, params } = msg;
       if (!method || !params) return;

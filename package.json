@@ -5,8 +5,10 @@
   "main": "index.js",
   "scripts": {
     "discover-chat": "node index.js --discover-chat-id",
+    "install:launch-agent": "zsh ./scripts/install-launch-agent.sh",
     "start": "node index.js",
-    "test": "node -c index.js"
+    "test": "node -c index.js && zsh -n ./scripts/codex-launch-supervisor.sh && zsh -n ./scripts/install-launch-agent.sh && zsh -n ./scripts/uninstall-launch-agent.sh",
+    "uninstall:launch-agent": "zsh ./scripts/uninstall-launch-agent.sh"
   },
   "keywords": [],
   "author": "",
