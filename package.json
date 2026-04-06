@@ -1,7 +1,7 @@
 {
   "name": "telegram-codex-bridge",
   "version": "0.1.0",
-  "description": "",
+  "description": "Self-hosted Telegram bridge for Codex app-server with GUI-like continuity, account failover, and group-safe controls",
   "main": "index.js",
   "scripts": {
     "discover-chat": "node index.js --discover-chat-id",
@@ -10,9 +10,24 @@
     "test": "node -c index.js && zsh -n ./scripts/codex-launch-supervisor.sh && zsh -n ./scripts/install-launch-agent.sh && zsh -n ./scripts/uninstall-launch-agent.sh",
     "uninstall:launch-agent": "zsh ./scripts/uninstall-launch-agent.sh"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "codex",
+    "telegram",
+    "bridge",
+    "app-server",
+    "automation",
+    "chatops"
+  ],
+  "author": "sharenla",
   "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sharenla/telegram-codex-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sharenla/telegram-codex-bridge/issues"
+  },
+  "homepage": "https://github.com/sharenla/telegram-codex-bridge#readme",
   "type": "commonjs",
   "dependencies": {
     "dotenv": "^17.4.0"

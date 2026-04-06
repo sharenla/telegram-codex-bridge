@@ -2,6 +2,9 @@
 
 把 Telegram 里的消息转发到本机 `codex app-server`，并把 Codex 的流式输出、命令输出、diff（预览）回传到 Telegram。
 
+> 非官方项目：这是一个基于 `codex app-server` 的自托管 bridge，不隶属于 OpenAI。  
+> 它适合你自己控制的机器和 Telegram bot；如果你开启高权限模式，本质上等同于给 bot 远程执行能力。
+
 ## `codex-cli` 和 `app-server` 的关系
 
 - 安装反馈里写“可用 `codex-cli 0.118.0-alpha.2`”是正常的，因为 bridge 并不是绕过 CLI 单独调用别的程序。
@@ -19,7 +22,7 @@ codex app-server --listen stdio://
 2. 安装依赖并配置环境变量：
 
 ```bash
-git clone <your-private-repo-url>
+git clone https://github.com/sharenla/telegram-codex-bridge.git
 cd telegram-codex-bridge
 cp .env.example .env
 nano .env  # 填上 TELEGRAM_BOT_TOKEN 和 TELEGRAM_ALLOWLIST
@@ -158,3 +161,7 @@ AUTO_APPROVE=1
 - **务必配置 `TELEGRAM_ALLOWLIST`**（只允许你的 chat id / 群 id），否则任何人都可能控制你电脑上的 Codex。
 - Telegram bot 对话 **不是端到端加密**；不要把密钥/隐私直接发在群里。
 - `CODEX_SANDBOX=danger-full-access` 等同“完全权限”，建议只在你明确要整机接管时启用，并备份重要文件。
+
+## License
+
+- ISC — 见 `LICENSE`
