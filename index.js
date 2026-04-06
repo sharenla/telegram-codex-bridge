@@ -292,6 +292,24 @@ function shouldSuppressDuplicateGroupProgress(rt, text, bucket = "general") {
   return false;
 }
 
+function normalizeGroupVisibleText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function hasSeenGroupVisibleText(rt, text) {
+  const normalized = normalizeGroupVisibleText(text);
+  if (!rt || !normalized) return false;
+  if (!rt.sentGroupVisibleTexts) rt.sentGroupVisibleTexts = new Set();
+  return rt.sentGroupVisibleTexts.has(normalized);
+}
+
+function rememberGroupVisibleText(rt, text) {
+  const normalized = normalizeGroupVisibleText(text);
+  if (!rt || !normalized) return;
+  if (!rt.sentGroupVisibleTexts) rt.sentGroupVisibleTexts = new Set();
+  rt.sentGroupVisibleTexts.add(normalized);
+}
+
 class Store {
   constructor(storePath) {
     this.storePath = storePath;
@@ -1180,6 +1198,7 @@ async function main() {
         const rt = getRuntime(chatId);
         rt.activeTurnId = turn?.id || null;
         rt.lastGroupProgressByBucket = {};
+        rt.sentGroupVisibleTexts = new Set();
         if (turn?.id && rt.pendingInputMeta) {
           rt.turnInputMetaByTurnId[turn.id] = { ...rt.pendingInputMeta };
           rt.pendingInputMeta = null;
@@ -1197,6 +1216,10 @@ async function main() {
         stopTyping(chatId);
         await flushBufferedAgentMessages(chatId, rt);
 
+        if (isGroupChat(chatId) && turn?.status === "completed") {
+          await revealFinalGroupAgentMessage(chatId, rt, turn?.id);
+        }
+
         const status = turn?.status || "completed";
         if (status !== "completed") {
           const retried = await retryTurnAfterUsageLimit({ chatId, session, rt, turn });
@@ -1206,18 +1229,28 @@ async function main() {
             const text = detail
               ? `Turn ${status}: ${truncateMiddle(detail, 1200)}`
               : `Turn ${status}.`;
-            await telegram.sendMessage({ chat_id: chatId, text });
+            if (!(isGroupChat(chatId) && hasSeenGroupVisibleText(rt, text))) {
+              await telegram.sendMessage({ chat_id: chatId, text });
+              if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
+            }
           }
         }
 
-        if (turn?.id) delete rt.turnInputMetaByTurnId[turn.id];
+        if (turn?.id) {
+          delete rt.turnInputMetaByTurnId[turn.id];
+          delete rt.lastAgentMessageIdByTurnId[turn.id];
+          delete rt.groupAgentMessageByTurnId[turn.id];
+        }
 
         const diff = rt.turnDiffByTurnId?.[turn?.id];
         if (diff && typeof diff === "string" && diff.trim()) {
           const text = isGroupChat(chatId)
             ? "本轮包含代码改动，具体 diff 已在群里隐藏。"
             : `Turn diff (preview):\n\n${truncateMiddle(diff, 3500)}`;
-          await telegram.sendMessage({ chat_id: chatId, text });
+          if (!(isGroupChat(chatId) && hasSeenGroupVisibleText(rt, text))) {
+            await telegram.sendMessage({ chat_id: chatId, text });
+            if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
+          }
         }
         return;
       }
@@ -1232,7 +1265,7 @@ async function main() {
       }
 
       if (method === "item/started") {
-        const { threadId, item } = params;
+        const { threadId, turnId, item } = params;
         const chatId = chatIdForThread(threadId);
         if (!chatId) return;
         const session = getOrCreateSession(chatId);
@@ -1250,7 +1283,12 @@ async function main() {
             rt.items[item.id] = { kind: "command", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
             return;
           }
+          if (redacted && hasSeenGroupVisibleText(rt, text)) {
+            rt.items[item.id] = { kind: "command", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
+            return;
+          }
           const sent = await telegram.sendMessage({ chat_id: chatId, text });
+          if (redacted) rememberGroupVisibleText(rt, text);
           rt.items[item.id] = { kind: "command", messageId: sent.message_id, header: text, buffer: "", redacted };
           return;
         }
@@ -1263,40 +1301,61 @@ async function main() {
             rt.items[item.id] = { kind: "fileChange", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
             return;
           }
+          if (redacted && hasSeenGroupVisibleText(rt, text)) {
+            rt.items[item.id] = { kind: "fileChange", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
+            return;
+          }
           const sent = await telegram.sendMessage({ chat_id: chatId, text });
+          if (redacted) rememberGroupVisibleText(rt, text);
           rt.items[item.id] = { kind: "fileChange", messageId: sent.message_id, header: text, buffer: "", redacted };
           return;
         }
 
         if (item.type === "agentMessage") {
+          if (turnId) rt.lastAgentMessageIdByTurnId[turnId] = item.id;
+          if (!rt.items[item.id]) {
+            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
+          } else {
+            rt.items[item.id].turnId = turnId || rt.items[item.id].turnId || null;
+          }
           if (item.text && item.text.trim()) {
             await upsertAgentMessage({ chatId, item, rt });
           } else {
-            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "" };
+            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
           }
           return;
         }
       }
 
       if (method === "item/completed") {
-        const { threadId, item } = params;
+        const { threadId, turnId, item } = params;
         const chatId = chatIdForThread(threadId);
         if (!chatId || !item || !item.id) return;
         const rt = getRuntime(chatId);
 
         if (item.type === "agentMessage") {
+          if (turnId) rt.lastAgentMessageIdByTurnId[turnId] = item.id;
+          if (!rt.items[item.id]) {
+            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
+          } else {
+            rt.items[item.id].turnId = turnId || rt.items[item.id].turnId || null;
+          }
           await upsertAgentMessage({ chatId, item, rt });
         }
         return;
       }
 
       if (method === "item/agentMessage/delta") {
-        const { threadId, itemId, delta } = params;
+        const { threadId, turnId, itemId, delta } = params;
         const chatId = chatIdForThread(threadId);
         if (!chatId) return;
         const rt = getRuntime(chatId);
         if (!rt.items?.[itemId]) {
-          rt.items[itemId] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "" };
+          rt.items[itemId] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
+        }
+        if (turnId) {
+          rt.items[itemId].turnId = turnId;
+          rt.lastAgentMessageIdByTurnId[turnId] = itemId;
         }
         rt.items[itemId].buffer += delta;
         return;
@@ -1532,9 +1591,12 @@ async function main() {
       activeTurnId: null,
       pendingInputMeta: null,
       turnInputMetaByTurnId: {},
+      lastAgentMessageIdByTurnId: {},
+      groupAgentMessageByTurnId: {},
       items: {},
       turnDiffByTurnId: {},
       lastGroupProgressByBucket: {},
+      sentGroupVisibleTexts: new Set(),
       editTimers: new Map(),
       failoverInProgress: false,
       typingTimer: null,
@@ -1599,7 +1661,10 @@ async function main() {
     rt.activeTurnId = null;
     rt.items = {};
     rt.turnDiffByTurnId = {};
+    rt.lastAgentMessageIdByTurnId = {};
+    rt.groupAgentMessageByTurnId = {};
     rt.lastGroupProgressByBucket = {};
+    rt.sentGroupVisibleTexts = new Set();
     stopTyping(chatId);
     session.updatedAt = nowIso();
     store.markDirty();
@@ -1819,21 +1884,36 @@ async function main() {
 
   function scheduleEdit({ chatId, messageId, getText, rt, itemId }) {
     const key = `${chatId}:${messageId}`;
-    if (rt.editTimers.has(key)) return;
+    const existing = rt.editTimers.get(key);
+    if (existing) {
+      existing.getText = getText;
+      existing.itemId = itemId;
+      return;
+    }
     const timer = setTimeout(async () => {
+      const pending = rt.editTimers.get(key);
       rt.editTimers.delete(key);
-      const text = getText();
+      if (!pending) return;
+      const text = pending.getText();
       try {
         await telegram.editMessageText({ chat_id: chatId, message_id: messageId, text });
       } catch (err) {
         // Ignore "message is not modified" and transient rate limits.
         const desc = err && err.message ? err.message : String(err);
         if (!desc.includes("message is not modified")) {
-          console.warn(`editMessageText failed (item=${itemId}):`, desc);
+          console.warn(`editMessageText failed (item=${pending.itemId}):`, desc);
         }
       }
     }, 800);
-    rt.editTimers.set(key, timer);
+    rt.editTimers.set(key, { timer, getText, itemId });
+  }
+
+  function cancelPendingEdit({ chatId, messageId, rt }) {
+    const key = `${chatId}:${messageId}`;
+    const pending = rt.editTimers.get(key);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    rt.editTimers.delete(key);
   }
 
   async function upsertAgentMessage({ chatId, item, rt }) {
@@ -1841,15 +1921,55 @@ async function main() {
     const existing = item?.id ? rt.items?.[item.id] : null;
     const groupChat = isGroupChat(chatId);
     const renderedBuffer = groupChat ? sanitizeGroupAgentText(buffer) : buffer;
+    const turnId = existing?.turnId || item?.turnId || null;
 
     if (!renderedBuffer.trim()) {
       if (item?.id && !existing) {
-        rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "" };
+        rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId };
       }
       return;
     }
 
     const text = truncateMiddle(renderedBuffer, 3900);
+
+    if (groupChat && turnId) {
+      let entry = existing;
+      if (!entry && item?.id) {
+        entry = {
+          kind: "agentMessage",
+          messageId: null,
+          buffer,
+          renderedBuffer,
+          turnId,
+        };
+        rt.items[item.id] = entry;
+      }
+      if (!entry) return;
+
+      entry.buffer = buffer;
+      entry.renderedBuffer = renderedBuffer;
+      entry.turnId = turnId;
+
+      const sharedMessageId = rt.groupAgentMessageByTurnId?.[turnId] || entry.messageId || null;
+      if (sharedMessageId) {
+        entry.messageId = sharedMessageId;
+        rt.groupAgentMessageByTurnId[turnId] = sharedMessageId;
+        scheduleEdit({
+          chatId,
+          messageId: sharedMessageId,
+          rt,
+          itemId: item.id,
+          getText: () => truncateMiddle(entry.renderedBuffer || "", 3900),
+        });
+      } else {
+        const sent = await telegram.sendMessage({ chat_id: chatId, text });
+        entry.messageId = sent.message_id;
+        rt.groupAgentMessageByTurnId[turnId] = sent.message_id;
+        rememberGroupVisibleText(rt, text);
+      }
+      rt.lastGroupProgressByBucket.agentMessage = text;
+      return;
+    }
 
     if (!existing) {
       if (groupChat && shouldSuppressDuplicateGroupProgress(rt, text, "agentMessage")) {
@@ -1864,7 +1984,20 @@ async function main() {
         }
         return;
       }
+      if (groupChat && hasSeenGroupVisibleText(rt, text)) {
+        if (item?.id) {
+          rt.items[item.id] = {
+            kind: "agentMessage",
+            messageId: null,
+            buffer,
+            renderedBuffer,
+            suppressedDuplicate: true,
+          };
+        }
+        return;
+      }
       const sent = await telegram.sendMessage({ chat_id: chatId, text });
+      if (groupChat) rememberGroupVisibleText(rt, text);
       if (item?.id) {
         rt.items[item.id] = { kind: "agentMessage", messageId: sent.message_id, buffer, renderedBuffer };
       }
@@ -1878,9 +2011,14 @@ async function main() {
         existing.suppressedDuplicate = true;
         return;
       }
+      if (groupChat && hasSeenGroupVisibleText(rt, text)) {
+        existing.suppressedDuplicate = true;
+        return;
+      }
       const sent = await telegram.sendMessage({ chat_id: chatId, text });
       existing.messageId = sent.message_id;
       existing.suppressedDuplicate = false;
+      if (groupChat) rememberGroupVisibleText(rt, text);
       return;
     }
     scheduleEdit({
@@ -1890,6 +2028,7 @@ async function main() {
       itemId: item.id,
       getText: () => truncateMiddle(existing.renderedBuffer || "", 3900),
     });
+    if (groupChat) rememberGroupVisibleText(rt, text);
     if (groupChat) {
       rt.lastGroupProgressByBucket.agentMessage = text;
     }
@@ -1910,6 +2049,39 @@ async function main() {
         rt,
       });
     }
+  }
+
+  async function revealFinalGroupAgentMessage(chatId, rt, turnId) {
+    if (!isGroupChat(chatId) || !turnId) return;
+    const itemId = rt.lastAgentMessageIdByTurnId?.[turnId];
+    if (!itemId) return;
+    const entry = rt.items?.[itemId];
+    if (!entry || entry.kind !== "agentMessage") return;
+
+    const rawText = truncateMiddle(entry.buffer || "", 3900);
+    if (!rawText.trim()) return;
+
+    if (entry.messageId) {
+      cancelPendingEdit({ chatId, messageId: entry.messageId, rt });
+      try {
+        await telegram.editMessageText({ chat_id: chatId, message_id: entry.messageId, text: rawText });
+      } catch (err) {
+        const desc = err && err.message ? err.message : String(err);
+        if (!desc.includes("message is not modified")) {
+          console.warn(`revealFinalGroupAgentMessage edit failed (item=${itemId}):`, desc);
+        }
+      }
+      entry.renderedBuffer = entry.buffer || rawText;
+      rememberGroupVisibleText(rt, rawText);
+      return;
+    }
+
+    if (hasSeenGroupVisibleText(rt, rawText)) return;
+
+    const sent = await telegram.sendMessage({ chat_id: chatId, text: rawText });
+    entry.messageId = sent.message_id;
+    entry.renderedBuffer = entry.buffer || rawText;
+    rememberGroupVisibleText(rt, rawText);
   }
 
   function waitForTelegramAction({ kind, chatId, timeoutMs = 10 * 60 * 1000 }) {
