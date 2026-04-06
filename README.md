@@ -1,5 +1,9 @@
 # Telegram Codex Bridge (Codex GUI-like, via `codex app-server`)
 
+[![Release](https://img.shields.io/github/v/release/sharenla/telegram-codex-bridge)](https://github.com/sharenla/telegram-codex-bridge/releases)
+[![License](https://img.shields.io/github/license/sharenla/telegram-codex-bridge)](https://github.com/sharenla/telegram-codex-bridge/blob/main/LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS-black)](https://github.com/sharenla/telegram-codex-bridge)
+
 把 Telegram 里的消息转发到本机 `codex app-server`，并把 Codex 的流式输出、命令输出、diff（预览）回传到 Telegram。
 
 > 非官方项目：这是一个基于 `codex app-server` 的自托管 bridge，不隶属于 OpenAI。  
