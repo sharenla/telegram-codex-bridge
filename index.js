@@ -179,6 +179,119 @@ function truncateMiddle(text, maxLen) {
   return `${text.slice(0, headLen)}\n…(truncated)…\n${text.slice(-tailLen)}`;
 }
 
+function isGroupChat(chatId) {
+  return Number(chatId) < 0;
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeIncomingText(text, botUsername) {
+  const source = String(text || "").trim();
+  if (!source || !botUsername) return source;
+  const mentionPattern = new RegExp(`@${escapeRegExp(botUsername)}\\b`, "ig");
+  return source.replace(mentionPattern, "").replace(/\s{2,}/g, " ").trim();
+}
+
+function isReplyToBot(message, botId) {
+  return Number(message?.reply_to_message?.from?.id) === Number(botId);
+}
+
+function shouldHandleTelegramMessage(message, botIdentity) {
+  const chatType = message?.chat?.type;
+  if (!chatType || chatType === "private") return true;
+
+  const text = String(message?.text || "").trim();
+  if (!text) return false;
+
+  if (botIdentity?.username && text.toLowerCase().includes(`@${botIdentity.username.toLowerCase()}`)) {
+    return true;
+  }
+
+  if (botIdentity?.id && isReplyToBot(message, botIdentity.id)) {
+    return true;
+  }
+
+  return false;
+}
+
+function summarizeGroupCommand(command) {
+  const lowered = String(command || "").toLowerCase();
+  if (/\b(rg|grep|find|ls|tree|cat|sed|awk|head|tail|stat|wc)\b/.test(lowered)) {
+    return "正在查看项目文件和内容，具体命令已在群里隐藏。";
+  }
+  if (/\b(git|diff)\b/.test(lowered)) {
+    return "正在检查仓库状态，具体命令已在群里隐藏。";
+  }
+  if (/\b(npm|pnpm|yarn|bun|node|python|pytest|jest|vitest|cargo|go test|make|uv)\b/.test(lowered)) {
+    return "正在运行脚本或验证步骤，具体命令已在群里隐藏。";
+  }
+  return "正在执行一步命令，具体命令已在群里隐藏。";
+}
+
+function summarizeGroupFileChange(title) {
+  const lowered = String(title || "").toLowerCase();
+  if (/\b(readme|docs?|guide|manual)\b/.test(lowered)) {
+    return "正在整理说明文档，具体文件名已在群里隐藏。";
+  }
+  return "正在整理文件改动，具体文件名已在群里隐藏。";
+}
+
+function sanitizeGroupAgentLine(line) {
+  let value = String(line || "");
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  if (/^(diff --git|index [0-9a-f]+\.\.[0-9a-f]+|@@|--- |\+\+\+ )/.test(trimmed)) return "";
+  if (/^\$ /.test(trimmed)) return "正在执行命令，具体命令已在群里隐藏。";
+  if (/^cwd:\s+/i.test(trimmed)) return "";
+
+  value = value.replace(/`[^`\n]+`/g, "（代码或路径细节已隐藏）");
+  value = value.replace(/(^|[\s(（\[])(?:~\/|\/)[^\s)）\],，；;]+/g, "$1（路径已隐藏）");
+  value = value.replace(
+    /\b(?:[A-Za-z]:\\|\.{0,2}\/|\/)?[\w.-]+(?:\/[\w.-]+)*\/?[\w.-]*\.(?:c|cc|cpp|cs|css|go|h|hpp|html|ini|java|js|json|kt|md|mjs|php|py|rb|rs|sh|sql|swift|toml|ts|tsx|txt|xml|yaml|yml)(?::\d+(?::\d+)?)?\b/gi,
+    "（文件已隐藏）",
+  );
+  value = value.replace(/(?:（(?:代码或路径细节|路径|文件)已隐藏）\s*){2,}/g, "（细节已隐藏） ");
+  value = value.replace(/\s+/g, " ").trim();
+
+  if (!value) return "";
+  const visibleChars = value
+    .replace(/（(?:代码片段|代码或路径细节|路径|文件|细节)已隐藏）/g, "")
+    .replace(/\s+/g, "");
+  if (!visibleChars) return "";
+  return value;
+}
+
+function sanitizeGroupAgentText(text) {
+  const source = String(text || "");
+  if (!source.trim()) return "";
+
+  const normalized = source.replace(/```[\s\S]*?```/g, "\n（代码片段已隐藏）\n");
+  const lines = normalized
+    .split(/\r?\n/)
+    .map((line) => sanitizeGroupAgentLine(line))
+    .filter(Boolean);
+
+  const deduped = [];
+  for (const line of lines) {
+    if (line === deduped[deduped.length - 1] && line.includes("已隐藏")) continue;
+    deduped.push(line);
+  }
+
+  const result = deduped.join("\n").trim();
+  if (result) return result;
+  return "正在继续处理，代码和路径细节已在群里隐藏。";
+}
+
+function shouldSuppressDuplicateGroupProgress(rt, text, bucket = "general") {
+  if (!rt || !text) return false;
+  if (!rt.lastGroupProgressByBucket) rt.lastGroupProgressByBucket = {};
+  if (rt.lastGroupProgressByBucket[bucket] === text) return true;
+  rt.lastGroupProgressByBucket[bucket] = text;
+  return false;
+}
+
 class Store {
   constructor(storePath) {
     this.storePath = storePath;
@@ -504,6 +617,9 @@ function buildHelpText() {
     "/menu - open the quick settings panel",
     "/stop - interrupt current turn",
     "",
+    "群聊里只有 @bot 或直接回复 bot 的消息才会触发；私聊不受影响。",
+    "群聊会自动隐藏代码、路径、命令输出和 diff，只保留进度描述；私聊保持完整。",
+    "",
     "Tip: just send plain text to talk to Codex.",
   ].join("\n");
 }
@@ -768,6 +884,12 @@ async function main() {
     await discoverChatIds(telegram);
     return;
   }
+
+  const me = await telegram.getMe();
+  const botIdentity = {
+    id: me?.id || null,
+    username: typeof me?.username === "string" ? me.username : null,
+  };
 
   const allowlist = parseCsvIds(process.env.TELEGRAM_ALLOWLIST);
   if (!allowlist) {
@@ -1057,6 +1179,7 @@ async function main() {
         if (!chatId) return;
         const rt = getRuntime(chatId);
         rt.activeTurnId = turn?.id || null;
+        rt.lastGroupProgressByBucket = {};
         if (turn?.id && rt.pendingInputMeta) {
           rt.turnInputMetaByTurnId[turn.id] = { ...rt.pendingInputMeta };
           rt.pendingInputMeta = null;
@@ -1078,7 +1201,8 @@ async function main() {
         if (status !== "completed") {
           const retried = await retryTurnAfterUsageLimit({ chatId, session, rt, turn });
           if (!retried) {
-            const detail = extractTurnErrorText(turn);
+            const rawDetail = extractTurnErrorText(turn);
+            const detail = isGroupChat(chatId) ? sanitizeGroupAgentText(rawDetail) : rawDetail;
             const text = detail
               ? `Turn ${status}: ${truncateMiddle(detail, 1200)}`
               : `Turn ${status}.`;
@@ -1090,8 +1214,10 @@ async function main() {
 
         const diff = rt.turnDiffByTurnId?.[turn?.id];
         if (diff && typeof diff === "string" && diff.trim()) {
-          const preview = truncateMiddle(diff, 3500);
-          await telegram.sendMessage({ chat_id: chatId, text: `Turn diff (preview):\n\n${preview}` });
+          const text = isGroupChat(chatId)
+            ? "本轮包含代码改动，具体 diff 已在群里隐藏。"
+            : `Turn diff (preview):\n\n${truncateMiddle(diff, 3500)}`;
+          await telegram.sendMessage({ chat_id: chatId, text });
         }
         return;
       }
@@ -1114,18 +1240,31 @@ async function main() {
         if (!item || !item.id) return;
 
         if (item.type === "commandExecution") {
+          const redacted = isGroupChat(chatId);
           const header = item.command ? `$ ${item.command}` : "[commandExecution]";
           const cwdLine = item.cwd ? `cwd: ${item.cwd}` : session.cwd ? `cwd: ${session.cwd}` : null;
-          const text = [header, cwdLine].filter(Boolean).join("\n");
+          const text = redacted
+            ? summarizeGroupCommand(item.command)
+            : [header, cwdLine].filter(Boolean).join("\n");
+          if (redacted && shouldSuppressDuplicateGroupProgress(rt, text, "command")) {
+            rt.items[item.id] = { kind: "command", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
+            return;
+          }
           const sent = await telegram.sendMessage({ chat_id: chatId, text });
-          rt.items[item.id] = { kind: "command", messageId: sent.message_id, header: text, buffer: "" };
+          rt.items[item.id] = { kind: "command", messageId: sent.message_id, header: text, buffer: "", redacted };
           return;
         }
 
         if (item.type === "fileChange") {
           const title = item.title || "[fileChange]";
-          const sent = await telegram.sendMessage({ chat_id: chatId, text: title });
-          rt.items[item.id] = { kind: "fileChange", messageId: sent.message_id, header: title, buffer: "" };
+          const redacted = isGroupChat(chatId);
+          const text = redacted ? summarizeGroupFileChange(title) : title;
+          if (redacted && shouldSuppressDuplicateGroupProgress(rt, text, "fileChange")) {
+            rt.items[item.id] = { kind: "fileChange", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
+            return;
+          }
+          const sent = await telegram.sendMessage({ chat_id: chatId, text });
+          rt.items[item.id] = { kind: "fileChange", messageId: sent.message_id, header: text, buffer: "", redacted };
           return;
         }
 
@@ -1133,7 +1272,7 @@ async function main() {
           if (item.text && item.text.trim()) {
             await upsertAgentMessage({ chatId, item, rt });
           } else {
-            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "" };
+            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "" };
           }
           return;
         }
@@ -1157,7 +1296,7 @@ async function main() {
         if (!chatId) return;
         const rt = getRuntime(chatId);
         if (!rt.items?.[itemId]) {
-          rt.items[itemId] = { kind: "agentMessage", messageId: null, buffer: "" };
+          rt.items[itemId] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "" };
         }
         rt.items[itemId].buffer += delta;
         return;
@@ -1170,6 +1309,7 @@ async function main() {
         const rt = getRuntime(chatId);
         const entry = rt.items?.[itemId];
         if (!entry) return;
+        if (entry.redacted) return;
         entry.buffer += delta;
         scheduleEdit({
           chatId,
@@ -1191,6 +1331,7 @@ async function main() {
         const rt = getRuntime(chatId);
         const entry = rt.items?.[itemId];
         if (!entry) return;
+        if (entry.redacted) return;
         entry.buffer += delta;
         scheduleEdit({
           chatId,
@@ -1393,6 +1534,7 @@ async function main() {
       turnInputMetaByTurnId: {},
       items: {},
       turnDiffByTurnId: {},
+      lastGroupProgressByBucket: {},
       editTimers: new Map(),
       failoverInProgress: false,
       typingTimer: null,
@@ -1457,6 +1599,7 @@ async function main() {
     rt.activeTurnId = null;
     rt.items = {};
     rt.turnDiffByTurnId = {};
+    rt.lastGroupProgressByBucket = {};
     stopTyping(chatId);
     session.updatedAt = nowIso();
     store.markDirty();
@@ -1696,28 +1839,48 @@ async function main() {
   async function upsertAgentMessage({ chatId, item, rt }) {
     const buffer = item?.text || rt.items?.[item?.id]?.buffer || "";
     const existing = item?.id ? rt.items?.[item.id] : null;
+    const groupChat = isGroupChat(chatId);
+    const renderedBuffer = groupChat ? sanitizeGroupAgentText(buffer) : buffer;
 
-    if (!buffer.trim()) {
+    if (!renderedBuffer.trim()) {
       if (item?.id && !existing) {
-        rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "" };
+        rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "" };
       }
       return;
     }
 
-    const text = truncateMiddle(buffer, 3900);
+    const text = truncateMiddle(renderedBuffer, 3900);
 
     if (!existing) {
+      if (groupChat && shouldSuppressDuplicateGroupProgress(rt, text, "agentMessage")) {
+        if (item?.id) {
+          rt.items[item.id] = {
+            kind: "agentMessage",
+            messageId: null,
+            buffer,
+            renderedBuffer,
+            suppressedDuplicate: true,
+          };
+        }
+        return;
+      }
       const sent = await telegram.sendMessage({ chat_id: chatId, text });
       if (item?.id) {
-        rt.items[item.id] = { kind: "agentMessage", messageId: sent.message_id, buffer };
+        rt.items[item.id] = { kind: "agentMessage", messageId: sent.message_id, buffer, renderedBuffer };
       }
       return;
     }
 
     existing.buffer = buffer;
+    existing.renderedBuffer = renderedBuffer;
     if (!existing.messageId) {
+      if (groupChat && shouldSuppressDuplicateGroupProgress(rt, text, "agentMessage")) {
+        existing.suppressedDuplicate = true;
+        return;
+      }
       const sent = await telegram.sendMessage({ chat_id: chatId, text });
       existing.messageId = sent.message_id;
+      existing.suppressedDuplicate = false;
       return;
     }
     scheduleEdit({
@@ -1725,8 +1888,11 @@ async function main() {
       messageId: existing.messageId,
       rt,
       itemId: item.id,
-      getText: () => truncateMiddle(existing.buffer || "", 3900),
+      getText: () => truncateMiddle(existing.renderedBuffer || "", 3900),
     });
+    if (groupChat) {
+      rt.lastGroupProgressByBucket.agentMessage = text;
+    }
   }
 
   async function flushBufferedAgentMessages(chatId, rt) {
@@ -1772,14 +1938,22 @@ async function main() {
     return { token, promise };
   }
 
-  async function handleMessage({ chatId, text }) {
+  async function handleMessage({ chatId, text, message }) {
     if (allowlist && !allowlist.has(chatId)) {
       await notifyUnauthorizedChat(chatId);
       return;
     }
 
+    if (!shouldHandleTelegramMessage(message, botIdentity)) {
+      return;
+    }
+
     const session = getOrCreateSession(chatId);
-    const trimmed = (text || "").trim();
+    const normalizedText = message?.chat?.type === "private"
+      ? text
+      : normalizeIncomingText(text, botIdentity.username);
+    const trimmed = (normalizedText || "").trim();
+    if (!trimmed) return;
 
     if (trimmed === "/start" || trimmed === "/help") {
       await telegram.sendMessage({ chat_id: chatId, text: buildHelpText() });
@@ -2068,7 +2242,11 @@ async function main() {
           store.saveThrottled();
 
           if (u.message && u.message.text) {
-            Promise.resolve(handleMessage({ chatId: u.message.chat.id, text: u.message.text })).catch((err) => {
+            Promise.resolve(handleMessage({
+              chatId: u.message.chat.id,
+              text: u.message.text,
+              message: u.message,
+            })).catch((err) => {
               console.error("handleMessage failed:", err);
             });
           } else if (u.callback_query) {
