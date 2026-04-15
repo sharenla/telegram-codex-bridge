@@ -102,9 +102,10 @@ codex app-server --listen stdio://
 
 - 直接发送文本：发起一次 Codex `turn/start`
 - `/menu`：打开快捷按钮面板
-- `/status`：查看当前 `thread / model / effort / cwd`
+- `/status`：查看当前 `thread / model / effort / cwd`，以及最近一次上下文占用观测
 - `/new`：新开线程
-- `/stop`：中断当前 turn
+- `/compact`：把当前 thread 压缩成摘要，并切到一个新的 thread
+- `/stop`：中断当前 turn；在群聊里还会清空已排队的新任务
 - `/cwd /abs/path`：切换工作目录
 - `/project /abs/path`：切换项目并重置 thread
 - `/models`：查看推荐模型
@@ -119,6 +120,8 @@ codex app-server --listen stdio://
 
 - 群里只有 **@bot** 或 **直接回复 bot** 的消息才会触发
 - 普通群消息会被忽略
+- 如果当前 turn 还在运行，新的群聊任务会进入队列，不会直接改写当前任务
+- 如果你想临时调转方向，先发 `/stop`，再发新任务
 - 群里的过程消息默认会脱敏：
   - 保留文字性的处理进度
   - 隐藏代码、路径、命令输出和 diff
@@ -140,6 +143,23 @@ npm run install:launch-agent
 
 ```bash
 npm run uninstall:launch-agent
+```
+
+### Telegram 网络 / 代理
+
+如果 Telegram 在你当前网络环境里不稳定，可以让 bridge 的 Telegram 请求显式走本机代理：
+
+```bash
+TELEGRAM_PROXY_URL=http://127.0.0.1:1082
+TELEGRAM_POLL_TIMEOUT_SECONDS=5
+```
+
+- `TELEGRAM_PROXY_URL` 一般填本机 Clash / Mihomo 的 `mixed-port`
+- 留空时，bridge 会优先直连；如果发现本机 Clash Verge 配置，也会自动尝试它的 `mixed-port`
+- 如果你明确不想走代理，可以设成：
+
+```bash
+TELEGRAM_PROXY_URL=direct
 ```
 
 ### 多机器注意事项
@@ -167,6 +187,28 @@ CODEX_AUTO_ACCOUNT_FAILOVER=1
 ```
 
 这样遇到 429 / quota / rate-limit 这类账号层错误时，会自动切到下一个账号再重试
+
+### 上下文占用与手动压缩
+
+- bridge 会记录最近一次 `token_count`，并在 `/status` 里显示 `contextUsage / contextWindow / lastTurnTokens`
+- 当占用率接近阈值时，`/status` 会标记 `compactionPending`
+- 默认只观测，不会自动压缩
+- 你可以在空闲时手动执行 `/compact`
+- `/compact` 会先让旧 thread 生成 5 段摘要，再切到新 thread
+- 老 thread 会保留；新 thread 的第一条真实用户消息会自动带上摘要包继续
+- 如果你想启用自动压缩，可以设置：
+
+```bash
+AUTO_COMPACT=1
+CONTEXT_SOFT_RATIO=0.70
+CONTEXT_HARD_RATIO=0.82
+CONTEXT_EMERGENCY_RATIO=0.90
+```
+
+- `soft` 只标记待压缩
+- `hard` 会在当前 turn 结束后优先自动压缩
+- `emergency` 会暂停继续接收新任务，优先自动压缩
+- 遇到明显的上下文相关失败时，bridge 会尝试“压缩后自动重试一次”，普通错误不会触发这条链路
 
 ### 安全档位
 
@@ -246,9 +288,10 @@ codex app-server --listen stdio://
 
 - Send plain text: start a Codex `turn/start`
 - `/menu`: open the shortcut button panel
-- `/status`: show current `thread / model / effort / cwd`
+- `/status`: show current `thread / model / effort / cwd` plus the latest context-usage snapshot
 - `/new`: start a new thread
-- `/stop`: interrupt the current turn
+- `/compact`: compact the current thread into a fresh thread with a summary bootstrap
+- `/stop`: interrupt the current turn; in groups it also clears queued follow-up tasks
 - `/cwd /abs/path`: switch working directory
 - `/project /abs/path`: switch project and reset the thread
 - `/models`: show recommended models
@@ -263,6 +306,8 @@ codex app-server --listen stdio://
 
 - In groups, the bot only responds when it is **mentioned** or when someone **replies directly to the bot**
 - Normal group chatter is ignored
+- If a group turn is already running, new group tasks are queued instead of steering the active turn
+- If you want to change direction immediately, send `/stop` first and then send the new task
 - Group progress messages are redacted by default:
   - textual progress is kept
   - code, file paths, command output, and diffs are hidden
@@ -284,6 +329,23 @@ To uninstall:
 
 ```bash
 npm run uninstall:launch-agent
+```
+
+### Telegram transport / proxy
+
+If Telegram is unstable on your network, you can force bridge-side Telegram requests through a local proxy:
+
+```bash
+TELEGRAM_PROXY_URL=http://127.0.0.1:1082
+TELEGRAM_POLL_TIMEOUT_SECONDS=5
+```
+
+- `TELEGRAM_PROXY_URL` usually points to your local Clash / Mihomo `mixed-port`
+- When left empty, the bridge prefers direct access; if it detects a local Clash Verge config, it will also try that `mixed-port`
+- If you explicitly want direct mode, set:
+
+```bash
+TELEGRAM_PROXY_URL=direct
 ```
 
 ### Multi-machine note
@@ -311,6 +373,28 @@ CODEX_AUTO_ACCOUNT_FAILOVER=1
 ```
 
 That allows the bridge to switch to the next account and retry when it hits account-level failures such as 429, quota, or rate-limit errors.
+
+### Context Usage And Manual Compaction
+
+- the bridge records the latest `token_count` snapshot and exposes it in `/status`
+- `/status` shows `contextUsage / contextWindow / lastTurnTokens` and whether compaction is pending
+- automatic compaction is still off by default
+- you can trigger manual compaction with `/compact` only when the chat is idle
+- `/compact` asks the old thread for a fixed 5-section summary, then switches the chat to a fresh thread
+- the old thread is kept intact, and the first real user message on the new thread automatically carries the summary bootstrap
+- to enable automatic compaction, set:
+
+```bash
+AUTO_COMPACT=1
+CONTEXT_SOFT_RATIO=0.70
+CONTEXT_HARD_RATIO=0.82
+CONTEXT_EMERGENCY_RATIO=0.90
+```
+
+- `soft` only marks the thread as pending compaction
+- `hard` auto-compacts after the current turn finishes
+- `emergency` stops accepting new work and prioritizes compaction first
+- when the failure clearly looks context-related, the bridge attempts one compact-and-retry cycle; ordinary errors do not trigger this path
 
 ### Security profiles
 
