@@ -15,6 +15,18 @@ const argv = new Set(process.argv.slice(2));
 const VALID_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 const QUICK_MODELS = ["gpt-5.4", "gpt-5.4-mini"];
 const QUICK_EFFORTS = ["high", "xhigh"];
+const DEFAULT_CONTEXT_SOFT_RATIO = 0.70;
+const DEFAULT_CONTEXT_HARD_RATIO = 0.82;
+const DEFAULT_CONTEXT_EMERGENCY_RATIO = 0.90;
+const COMPACTION_SUMMARY_FORMAT = "five-section-markdown";
+const COMPACTION_SUMMARY_VERSION = 1;
+const COMPACTION_SECTION_TITLES = [
+  "当前目标",
+  "已完成进展",
+  "关键约束",
+  "关键文件/路径",
+  "下一步待办",
+];
 const MENU_PAGES = {
   MAIN: "main",
   THREAD: "thread",
@@ -36,12 +48,136 @@ const ACCOUNT_FAILOVER_PATTERNS = [
   /overloaded/i,
   /billing/i,
 ];
+const CONTEXT_FAILURE_PATTERNS = [
+  /\bcontext(?:ual)?\s+(?:window|length)\b/i,
+  /\bmaximum context length\b/i,
+  /\bconversation too long\b/i,
+  /\bthread too long\b/i,
+  /\btoo many tokens\b/i,
+  /\btoken limit\b/i,
+  /\binput .*too long\b/i,
+  /\bprompt .*too long\b/i,
+  /\brequest .*too large\b/i,
+  /\bexceeds?.*(?:context|token)\b/i,
+  /\bover(?:flow| limit).*(?:context|token)\b/i,
+  /\bcontext .*full\b/i,
+  /\bmodel_context_window\b/i,
+  /\bmax[_ ]?input[_ ]?tokens\b/i,
+];
+const ACCOUNT_AUTH_FAILURE_PATTERNS = [
+  /refresh_token_reused/i,
+  /token_expired/i,
+  /401\s+Unauthorized/i,
+  /could not be refreshed/i,
+  /failed to refresh token/i,
+  /failed to load configuration/i,
+  /cloudRequirements/i,
+  /timed out waiting for cloud requirements/i,
+];
+const ACCOUNT_HEALTH_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const ACCOUNT_LIMIT_COOLDOWN_MS = 60 * 60 * 1000;
+const TELEGRAM_POLLING_STALL_THRESHOLD_MS = 3 * 60 * 1000;
+const TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD = 6;
+const TELEGRAM_POLL_TIMEOUT_SECONDS = 5;
+const AUTH_RECOVERY_HANDOFF = Symbol("AUTH_RECOVERY_HANDOFF");
+const CLASH_CONFIG_CANDIDATES = [
+  path.join(os.homedir(), "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
+  path.join(os.homedir(), ".config", "mihomo", "config.yaml"),
+  path.join(os.homedir(), ".config", "clash", "config.yaml"),
+];
 
 function resolveUserPath(inputPath) {
   if (!inputPath || typeof inputPath !== "string") return inputPath;
   if (inputPath === "~") return os.homedir();
   if (inputPath.startsWith("~/")) return path.join(os.homedir(), inputPath.slice(2));
   return inputPath;
+}
+
+function readTextFile(filePath) {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function maskProxyUrl(proxyUrl) {
+  try {
+    const parsed = new URL(proxyUrl);
+    if (parsed.username) parsed.username = "***";
+    if (parsed.password) parsed.password = "***";
+    return parsed.toString();
+  } catch {
+    return String(proxyUrl).replace(/\/\/[^/@]+@/, "//***:***@");
+  }
+}
+
+function detectLocalTelegramProxy() {
+  for (const candidate of CLASH_CONFIG_CANDIDATES) {
+    const text = readTextFile(candidate);
+    if (!text) continue;
+
+    const mixedPort = text.match(/^\s*mixed-port:\s*(\d+)\s*$/m);
+    if (mixedPort) {
+      return {
+        url: `http://127.0.0.1:${mixedPort[1]}`,
+        source: `${candidate}#mixed-port`,
+      };
+    }
+
+    const httpPort = text.match(/^\s*port:\s*(\d+)\s*$/m);
+    if (httpPort) {
+      return {
+        url: `http://127.0.0.1:${httpPort[1]}`,
+        source: `${candidate}#port`,
+      };
+    }
+
+    const socksPort = text.match(/^\s*socks-port:\s*(\d+)\s*$/m);
+    if (socksPort) {
+      return {
+        url: `socks5h://127.0.0.1:${socksPort[1]}`,
+        source: `${candidate}#socks-port`,
+      };
+    }
+  }
+
+  return { url: null, source: null };
+}
+
+function resolveTelegramProxyConfig() {
+  const explicit = String(process.env.TELEGRAM_PROXY_URL || "").trim();
+  if (explicit) {
+    if (["0", "false", "off", "none", "direct"].includes(explicit.toLowerCase())) {
+      return { url: null, source: "TELEGRAM_PROXY_URL=direct" };
+    }
+    return {
+      url: resolveUserPath(explicit),
+      source: "TELEGRAM_PROXY_URL",
+    };
+  }
+
+  const envProxy = String(
+    process.env.HTTPS_PROXY
+      || process.env.https_proxy
+      || process.env.HTTP_PROXY
+      || process.env.http_proxy
+      || process.env.ALL_PROXY
+      || process.env.all_proxy
+      || "",
+  ).trim();
+  if (envProxy) {
+    return {
+      url: envProxy,
+      source: "HTTPS_PROXY/HTTP_PROXY/ALL_PROXY",
+    };
+  }
+
+  if (!parseBooleanEnv(process.env.TELEGRAM_PROXY_AUTO, true)) {
+    return { url: null, source: null };
+  }
+
+  return detectLocalTelegramProxy();
 }
 
 function resolveCodexBin() {
@@ -71,6 +207,11 @@ function parseJwtPayload(token) {
   const decoded = safeBase64UrlDecode(parts[1]);
   if (!decoded) return null;
   return safeJsonParse(decoded);
+}
+
+function getJwtExpiryMs(token) {
+  const payload = parseJwtPayload(token);
+  return typeof payload?.exp === "number" ? payload.exp * 1000 : 0;
 }
 
 function truncateLabel(text, maxLen = 28) {
@@ -134,6 +275,7 @@ function loadCodexAccountProfiles(sourcePath) {
       shortLabel: truncateLabel(email || accountId || profileId, 24),
       access: profile.access,
       refresh: profile.refresh,
+      expires: Number.isFinite(profile.expires) ? profile.expires : getJwtExpiryMs(profile.access),
       sourcePath: resolved,
     });
   }
@@ -177,6 +319,31 @@ function truncateMiddle(text, maxLen) {
   const headLen = Math.floor((maxLen - 10) / 2);
   const tailLen = maxLen - 10 - headLen;
   return `${text.slice(0, headLen)}\n…(truncated)…\n${text.slice(-tailLen)}`;
+}
+
+function formatRelativeAge(ms) {
+  const value = Number(ms || 0);
+  if (!value) return "n/a";
+  const delta = Math.max(0, Date.now() - value);
+  if (delta < 1000) return "just now";
+  const seconds = Math.floor(delta / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function formatTimestamp(ms) {
+  const value = Number(ms || 0);
+  if (!value) return "(never)";
+  try {
+    return new Date(value).toISOString();
+  } catch {
+    return "(invalid)";
+  }
 }
 
 function isGroupChat(chatId) {
@@ -314,8 +481,19 @@ class Store {
   constructor(storePath) {
     this.storePath = storePath;
     this.data = {
-      telegram: { offset: 0 },
-      bridge: { currentAccountProfileId: null },
+      telegram: {
+        offset: 0,
+        botIdentity: null,
+        health: {
+          lastPollSuccessAt: 0,
+          lastPollErrorAt: 0,
+          consecutivePollErrors: 0,
+          lastPollError: null,
+          restartRequestedAt: 0,
+          restartReason: null,
+        },
+      },
+      bridge: { currentAccountProfileId: null, lastGoodAccountProfileId: null, accountHealth: {} },
       sessions: {},
     };
     this._dirty = false;
@@ -327,8 +505,34 @@ class Store {
       const raw = fs.readFileSync(this.storePath, "utf8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object") {
-        this.data.telegram = parsed.telegram || { offset: 0 };
-        this.data.bridge = parsed.bridge || { currentAccountProfileId: null };
+        const parsedTelegram = parsed.telegram && typeof parsed.telegram === "object" ? parsed.telegram : {};
+        const parsedTelegramHealth =
+          parsedTelegram.health && typeof parsedTelegram.health === "object"
+            ? parsedTelegram.health
+            : {};
+        this.data.telegram = {
+          offset: 0,
+          botIdentity: null,
+          ...parsedTelegram,
+          health: {
+            lastPollSuccessAt: 0,
+            lastPollErrorAt: 0,
+            consecutivePollErrors: 0,
+            lastPollError: null,
+            restartRequestedAt: 0,
+            restartReason: null,
+            ...parsedTelegramHealth,
+          },
+        };
+        this.data.bridge = {
+          currentAccountProfileId: null,
+          lastGoodAccountProfileId: null,
+          accountHealth: {},
+          ...(parsed.bridge || {}),
+        };
+        if (!this.data.bridge.accountHealth || typeof this.data.bridge.accountHealth !== "object") {
+          this.data.bridge.accountHealth = {};
+        }
         this.data.sessions = parsed.sessions || {};
       }
     } catch {
@@ -355,8 +559,13 @@ class Store {
 }
 
 class TelegramApi {
-  constructor(token) {
+  constructor(token, { proxyUrl = null, proxySource = null } = {}) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
+    this.proxyUrl = proxyUrl || null;
+    this.proxySource = proxySource || null;
+    this.transportLabel = this.proxyUrl
+      ? `proxy ${maskProxyUrl(this.proxyUrl)}`
+      : "direct";
     this.writeQueue = Promise.resolve();
   }
 
@@ -393,24 +602,38 @@ class TelegramApi {
 
   async callOnce(method, params) {
     const body = JSON.stringify(params ?? {});
+    const longPollSeconds =
+      method === "getUpdates"
+        ? Math.max(0, Number(params?.timeout || 0))
+        : 0;
+    const curlMaxTimeSeconds = longPollSeconds > 0
+      ? Math.max(45, longPollSeconds + 15)
+      : 20;
+    const childTimeoutMs = (curlMaxTimeSeconds + 10) * 1000;
+    const curlArgs = [
+      "-sS",
+      "-4",
+      "--http1.1",
+      "--connect-timeout",
+      "10",
+      "--max-time",
+      String(curlMaxTimeSeconds),
+    ];
+    if (this.proxyUrl) {
+      curlArgs.push("--proxy", this.proxyUrl);
+    }
+    curlArgs.push(
+      "-X",
+      "POST",
+      `${this.baseUrl}/${method}`,
+      "-H",
+      "content-type: application/json",
+      "-d",
+      body,
+    );
     const stdout = await new Promise((resolve, reject) => {
-      execFile("curl", [
-        "-sS",
-        "-4",
-        "--http1.1",
-        "--connect-timeout",
-        "10",
-        "--max-time",
-        "45",
-        "-X",
-        "POST",
-        `${this.baseUrl}/${method}`,
-        "-H",
-        "content-type: application/json",
-        "-d",
-        body,
-      ], {
-        timeout: 30000,
+      execFile("curl", curlArgs, {
+        timeout: childTimeoutMs,
         maxBuffer: 1024 * 1024,
       }, (error, out, stderr) => {
         if (error) {
@@ -482,10 +705,17 @@ class CodexAppServer {
     this.codexBin = codexBin;
     this.env = env;
     this.proc = null;
+    this._stdoutRl = null;
+    this._stderrRl = null;
     this._nextId = 1;
     this._pending = new Map(); // id -> {resolve,reject}
     this._onNotification = () => {};
     this._onServerRequest = async () => ({ ok: false, error: { code: -32601, message: "Method not found" } });
+    this._onAuthWatchdog = async () => {};
+    this._onProcessExit = async () => {};
+    this._expectedStop = false;
+    this._latestAuthFailure = null;
+    this._watchdogNotified = false;
   }
 
   onNotification(handler) {
@@ -496,30 +726,67 @@ class CodexAppServer {
     this._onServerRequest = handler;
   }
 
+  onAuthWatchdog(handler) {
+    this._onAuthWatchdog = handler;
+  }
+
+  onProcessExit(handler) {
+    this._onProcessExit = handler;
+  }
+
   async start() {
     if (this.proc) return;
+    this._expectedStop = false;
+    this._latestAuthFailure = null;
+    this._watchdogNotified = false;
     this.proc = spawn(this.codexBin, ["app-server", "--listen", "stdio://"], {
-      stdio: ["pipe", "pipe", "inherit"],
+      stdio: ["pipe", "pipe", "pipe"],
       env: this.env,
     });
 
-    const rl = readline.createInterface({ input: this.proc.stdout });
-    rl.on("line", (line) => this._handleLine(line));
+    this._stdoutRl = readline.createInterface({ input: this.proc.stdout });
+    this._stdoutRl.on("line", (line) => this._handleLine(line));
+    this._stderrRl = readline.createInterface({ input: this.proc.stderr });
+    this._stderrRl.on("line", (line) => this._handleStderrLine(line));
 
     this.proc.on("exit", (code, signal) => {
       console.error(`codex app-server exited (code=${code}, signal=${signal})`);
+      const exitAuthFailure = this._latestAuthFailure;
+      const expectedStop = this._expectedStop;
+      this._closePipes();
       this.proc = null;
+      this._expectedStop = false;
+      if (!expectedStop && exitAuthFailure) {
+        this._emitAuthWatchdog({
+          source: "exit",
+          reason: exitAuthFailure.reason,
+          matchedText: exitAuthFailure.matchedText,
+          code,
+          signal,
+        });
+      }
+      Promise.resolve(this._onProcessExit({
+        code,
+        signal,
+        expected: expectedStop,
+        authFailure: exitAuthFailure,
+      })).catch((err) => {
+        console.error("Failed handling app-server exit:", err);
+      });
+      const exitMessage = exitAuthFailure?.reason || "codex app-server exited";
       for (const { reject } of this._pending.values()) {
-        reject(new Error("codex app-server exited"));
+        const error = new Error(exitMessage);
+        if (exitAuthFailure) error.authWatchdog = exitAuthFailure;
+        reject(error);
       }
       this._pending.clear();
     });
   }
 
-  stop() {
+  stop({ expected = true } = {}) {
     if (!this.proc) return;
+    this._expectedStop = expected;
     this.proc.kill("SIGTERM");
-    this.proc = null;
   }
 
   _send(msg) {
@@ -555,6 +822,42 @@ class CodexAppServer {
         console.error("Failed handling notification:", err);
       });
     }
+  }
+
+  _closePipes() {
+    if (this._stdoutRl) {
+      this._stdoutRl.close();
+      this._stdoutRl = null;
+    }
+    if (this._stderrRl) {
+      this._stderrRl.close();
+      this._stderrRl = null;
+    }
+  }
+
+  _handleStderrLine(line) {
+    const text = String(line || "").trim();
+    if (!text) return;
+    console.error(`[codex app-server stderr] ${text}`);
+    if (!isAccountAuthFailureText(text)) return;
+    this._latestAuthFailure = {
+      reason: text,
+      matchedText: text,
+      observedAt: Date.now(),
+    };
+    this._emitAuthWatchdog({
+      source: "stderr",
+      reason: text,
+      matchedText: text,
+    });
+  }
+
+  _emitAuthWatchdog(event) {
+    if (this._expectedStop || this._watchdogNotified) return;
+    this._watchdogNotified = true;
+    Promise.resolve(this._onAuthWatchdog(event)).catch((err) => {
+      console.error("Failed handling auth watchdog event:", err);
+    });
   }
 
   async _handleServerRequest(req) {
@@ -615,14 +918,249 @@ function parseBooleanEnv(value, defaultValue = false) {
   return defaultValue;
 }
 
+function parseRatioEnv(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
+  return numeric;
+}
+
 function uniqueStrings(values) {
   return [...new Set((values || []).filter((value) => typeof value === "string" && value))];
+}
+
+function countQueuedTasks(rt) {
+  return Array.isArray(rt?.pendingTasks) ? rt.pendingTasks.length : 0;
+}
+
+function formatPercent(ratio) {
+  if (!Number.isFinite(ratio)) return "(unknown)";
+  return `${(ratio * 100).toFixed(1)}%`;
+}
+
+function classifyContextUsageRatio(ratio, thresholds) {
+  if (!Number.isFinite(ratio)) return null;
+  if (ratio >= thresholds.emergency) return "emergency";
+  if (ratio >= thresholds.hard) return "hard";
+  if (ratio >= thresholds.soft) return "soft";
+  return null;
+}
+
+function extractContextUsageSnapshotPayload(params) {
+  if (!params || typeof params !== "object") return null;
+  const totalCandidates = [
+    params?.last_token_usage?.total_tokens,
+    params?.lastTokenUsage?.totalTokens,
+    params?.token_count?.last_token_usage?.total_tokens,
+    params?.tokenCount?.lastTokenUsage?.totalTokens,
+  ];
+  const windowCandidates = [
+    params?.model_context_window,
+    params?.modelContextWindow,
+    params?.token_count?.model_context_window,
+    params?.tokenCount?.modelContextWindow,
+  ];
+  const totalTokens = totalCandidates.find((value) => Number.isFinite(Number(value)));
+  const contextWindow = windowCandidates.find((value) => Number.isFinite(Number(value)));
+  if (!Number.isFinite(Number(totalTokens)) && !Number.isFinite(Number(contextWindow))) return null;
+  return {
+    totalTokens: Number.isFinite(Number(totalTokens)) ? Number(totalTokens) : null,
+    contextWindow: Number.isFinite(Number(contextWindow)) ? Number(contextWindow) : null,
+  };
+}
+
+function applyContextUsageSnapshot(session, snapshot, thresholds, observedAt = nowIso()) {
+  if (!session || typeof session !== "object" || !snapshot) return false;
+  if (Number.isFinite(snapshot.totalTokens)) {
+    session.lastTurnTokens = snapshot.totalTokens;
+  }
+  if (Number.isFinite(snapshot.contextWindow) && snapshot.contextWindow > 0) {
+    session.contextWindow = snapshot.contextWindow;
+  }
+  if (Number.isFinite(session.lastTurnTokens) && Number.isFinite(session.contextWindow) && session.contextWindow > 0) {
+    session.contextUsageRatio = session.lastTurnTokens / session.contextWindow;
+  } else {
+    session.contextUsageRatio = null;
+  }
+  session.lastTokenObservedAt = observedAt;
+  const pendingReason = classifyContextUsageRatio(session.contextUsageRatio, thresholds);
+  session.compactionPending = Boolean(pendingReason);
+  session.compactionPendingReason = pendingReason;
+  return true;
+}
+
+function shouldAutoCompactDecision({ autoCompactEnabled, session, rt, allowDuringIdle = true } = {}) {
+  if (!autoCompactEnabled) return null;
+  if (!session?.compactionPending) return null;
+  if (!["hard", "emergency"].includes(session.compactionPendingReason || "")) return null;
+  if (rt?.compactionInProgress) return null;
+  if (session?.pendingSummaryBootstrap?.text) return null;
+  if (!allowDuringIdle && !rt?.activeTurnId) return null;
+  return session.compactionPendingReason;
+}
+
+function isContextFailurePatternMatch(text) {
+  if (!text) return false;
+  return CONTEXT_FAILURE_PATTERNS.some((pattern) => pattern.test(String(text)));
+}
+
+function shouldTreatTextAsContextFailure(text, compactionPendingReason = null) {
+  if (isContextFailurePatternMatch(text)) return true;
+  if (compactionPendingReason === "emergency" && text && /input|request|prompt/i.test(String(text))) {
+    return true;
+  }
+  return false;
+}
+
+function isAccountAuthFailureText(text) {
+  if (!text) return false;
+  return ACCOUNT_AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(String(text)));
+}
+
+function buildAuthRecoveryReplayTask(inputMeta, source = "auth_failure", createdAt = nowIso()) {
+  if (!inputMeta?.text) return null;
+  const authReplayCount = Number(inputMeta.authReplayCount || 0);
+  if (authReplayCount >= 1) return null;
+  return {
+    text: inputMeta.text,
+    attemptedProfileIds: inputMeta.attemptedProfileIds || [],
+    kind: inputMeta.kind || "user",
+    silent: Boolean(inputMeta.silent),
+    contextRetryCount: Number(inputMeta.contextRetryCount || 0),
+    authReplayCount: authReplayCount + 1,
+    source,
+    createdAt,
+  };
+}
+
+function summarizeCodexBackendHealth(health) {
+  const parts = [health?.state || "starting"];
+  if (health?.lastOkAt) {
+    parts.push(`last ok ${formatRelativeAge(health.lastOkAt)}`);
+  }
+  if (health?.lastErrorAt) {
+    parts.push(`last err ${formatRelativeAge(health.lastErrorAt)}`);
+  }
+  if (health?.recoveryInProgress && health?.recoveryReason) {
+    parts.push(`recovering: ${health.recoveryReason}`);
+  } else if (health?.lastError) {
+    parts.push(health.lastError);
+  }
+  return parts.join(", ");
+}
+
+function normalizeSessionState(session, defaults) {
+  if (!session || typeof session !== "object") return session;
+  session.threadId = session.threadId || null;
+  session.cwd = session.cwd || defaults.cwd;
+  session.model = session.model || defaults.model;
+  session.effort = session.effort || defaults.effort;
+  session.summary = session.summary || defaults.summary;
+  session.personality = session.personality || defaults.personality;
+  session.approvalPolicy = session.approvalPolicy || defaults.approvalPolicy;
+  session.sandboxMode = session.sandboxMode || defaults.sandboxMode;
+  session.updatedAt = session.updatedAt || nowIso();
+  session.contextWindow = Number.isFinite(Number(session.contextWindow))
+    ? Number(session.contextWindow)
+    : null;
+  session.lastTurnTokens = Number.isFinite(Number(session.lastTurnTokens))
+    ? Number(session.lastTurnTokens)
+    : null;
+  session.lastTokenObservedAt = typeof session.lastTokenObservedAt === "string"
+    ? session.lastTokenObservedAt
+    : null;
+  session.contextUsageRatio = Number.isFinite(Number(session.contextUsageRatio))
+    ? Number(session.contextUsageRatio)
+    : null;
+  session.compactionPending = Boolean(session.compactionPending);
+  session.compactionPendingReason = typeof session.compactionPendingReason === "string"
+    ? session.compactionPendingReason
+    : null;
+  session.lastCompactionAt = typeof session.lastCompactionAt === "string"
+    ? session.lastCompactionAt
+    : null;
+  session.compactionGeneration = Number.isFinite(Number(session.compactionGeneration))
+    ? Number(session.compactionGeneration)
+    : 0;
+  session.compactionSummary = session.compactionSummary && typeof session.compactionSummary === "object"
+    ? session.compactionSummary
+    : null;
+  session.preCompactionThreadId = typeof session.preCompactionThreadId === "string"
+    ? session.preCompactionThreadId
+    : null;
+  session.pendingSummaryBootstrap = session.pendingSummaryBootstrap && typeof session.pendingSummaryBootstrap === "object"
+    ? session.pendingSummaryBootstrap
+    : null;
+  return session;
+}
+
+function clearSessionContextTracking(session, {
+  clearSummary = true,
+  clearHistory = false,
+} = {}) {
+  if (!session || typeof session !== "object") return;
+  session.contextWindow = null;
+  session.lastTurnTokens = null;
+  session.lastTokenObservedAt = null;
+  session.contextUsageRatio = null;
+  session.compactionPending = false;
+  session.compactionPendingReason = null;
+  if (clearSummary) {
+    session.compactionSummary = null;
+    session.pendingSummaryBootstrap = null;
+    session.preCompactionThreadId = null;
+  }
+  if (clearHistory) {
+    session.lastCompactionAt = null;
+    session.compactionGeneration = 0;
+  }
+}
+
+function formatContextUsageLine(session) {
+  if (!Number.isFinite(session?.lastTurnTokens) || !Number.isFinite(session?.contextWindow)) {
+    return "(unknown)";
+  }
+  const ratio = Number.isFinite(session?.contextUsageRatio)
+    ? `, ${formatPercent(session.contextUsageRatio)}`
+    : "";
+  return `${session.lastTurnTokens}/${session.contextWindow}${ratio}`;
+}
+
+function buildCompactionPrompt() {
+  return [
+    "请把当前 thread 的工作上下文压缩成严格固定的 5 段 Markdown 摘要。",
+    "",
+    "输出要求：",
+    "- 只输出以下 5 个二级标题，顺序必须完全一致：",
+    ...COMPACTION_SECTION_TITLES.map((title) => `- ${title}`),
+    "- 每段只写 1 到 5 条要点。",
+    "- 总长度控制在 1200 到 1800 个中文字符以内。",
+    "- 不要寒暄，不要代码块，不要补充额外章节。",
+    "- 保留主线任务、已经完成的工作、重要约束、关键路径与下一步。",
+    "",
+    "如果某段信息很少，也必须保留该标题，并写出最关键的一条。",
+  ].join("\n");
+}
+
+function buildCompactionBootstrapText(bootstrap, userText) {
+  const summaryText = String(bootstrap?.text || "").trim();
+  return [
+    "以下是上一个 thread 的压缩摘要。请把它视为当前继续工作的唯一上下文基线。",
+    "",
+    summaryText,
+    "",
+    `用户新消息：${userText}`,
+  ].join("\n");
+}
+
+function isCompactionTurnKind(kind) {
+  return kind === "manualCompaction" || kind === "autoCompaction";
 }
 
 function buildHelpText() {
   return [
     "Telegram Codex Bridge commands:",
     "/new - start a new Codex thread",
+    "/compact - compact the current thread into a fresh thread",
     "/status - show current thread/turn",
     "/cwd <path> - set working dir for this chat",
     "/project <path> - set cwd and start a fresh thread",
@@ -633,9 +1171,11 @@ function buildHelpText() {
     "/accounts - show available Codex accounts",
     "/account <id|index> - switch Codex account without dropping the thread",
     "/menu - open the quick settings panel",
-    "/stop - interrupt current turn",
+    "/stop - interrupt current turn (and clear queued group tasks)",
     "",
     "群聊里只有 @bot 或直接回复 bot 的消息才会触发；私聊不受影响。",
+    "群聊中如果当前任务还在跑，新任务会排队，不会直接改写当前任务。",
+    "如果你想临时改方向，先发 /stop，再发新任务。",
     "群聊会自动隐藏代码、路径、命令输出和 diff，只保留进度描述；私聊保持完整。",
     "",
     "Tip: just send plain text to talk to Codex.",
@@ -697,6 +1237,10 @@ function buildMenuText(session, rt, page = MENU_PAGES.MAIN, meta = {}) {
     accountLine,
     `thread: ${session.threadId || "(none)"}`,
     `turn: ${rt.activeTurnId || "(none)"}`,
+    `queued: ${countQueuedTasks(rt)}`,
+    `context: ${formatContextUsageLine(session)}`,
+    `compact: ${session.compactionPending ? `pending${session.compactionPendingReason ? ` (${session.compactionPendingReason})` : ""}` : "idle"}`,
+    `auto: ${meta.autoCompact ? "on" : "off"}`,
     "",
   ];
 
@@ -704,7 +1248,8 @@ function buildMenuText(session, rt, page = MENU_PAGES.MAIN, meta = {}) {
     return header.concat([
       "线程管理",
       "- New Thread：清掉当前上下文，重新开一个 thread",
-      "- Stop Turn：中断当前正在运行的 turn",
+      "- Compact：提炼当前上下文摘要，切到一个带摘要包的新 thread",
+      "- Stop Turn：中断当前正在运行的 turn，并清空群聊待排队任务",
       "",
       "想保留上下文的话，不要点 New Thread。",
     ]).join("\n");
@@ -757,6 +1302,9 @@ function buildMenuKeyboard(page = MENU_PAGES.MAIN, meta = {}) {
       inline_keyboard: [
         [
           { text: "New Thread", callback_data: "menu|new" },
+          { text: "Compact", callback_data: "menu|compact" },
+        ],
+        [
           { text: "Stop Turn", callback_data: "menu|stop" },
         ],
         [
@@ -890,6 +1438,7 @@ async function discoverChatIds(telegram) {
 }
 
 async function main() {
+  const processStartedAt = Date.now();
   const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   if (!BOT_TOKEN) {
     console.error("Missing TELEGRAM_BOT_TOKEN");
@@ -897,17 +1446,43 @@ async function main() {
     return;
   }
 
-  const telegram = new TelegramApi(BOT_TOKEN);
+  const telegramProxy = resolveTelegramProxyConfig();
+  const telegram = new TelegramApi(BOT_TOKEN, {
+    proxyUrl: telegramProxy.url,
+    proxySource: telegramProxy.source,
+  });
   if (argv.has("--discover-chat-id") || argv.has("discover-chat-id")) {
     await discoverChatIds(telegram);
     return;
   }
 
-  const me = await telegram.getMe();
-  const botIdentity = {
-    id: me?.id || null,
-    username: typeof me?.username === "string" ? me.username : null,
-  };
+  const storePath =
+    process.env.STORE_PATH || path.join(__dirname, "data", "store.json");
+  const store = new Store(storePath);
+  store.load();
+
+  async function resolveBotIdentity() {
+    const cached = store.data.telegram?.botIdentity;
+    try {
+      const me = await telegram.getMe();
+      const identity = {
+        id: me?.id || null,
+        username: typeof me?.username === "string" ? me.username : null,
+      };
+      store.data.telegram.botIdentity = identity;
+      store.markDirty();
+      store.saveThrottled();
+      return identity;
+    } catch (err) {
+      if (cached?.id && cached?.username) {
+        console.warn(`Telegram getMe failed at startup, falling back to cached bot identity: ${err.message}`);
+        return cached;
+      }
+      throw err;
+    }
+  }
+
+  const botIdentity = await resolveBotIdentity();
 
   const allowlist = parseCsvIds(process.env.TELEGRAM_ALLOWLIST);
   if (!allowlist) {
@@ -918,10 +1493,162 @@ async function main() {
     return;
   }
 
-  const storePath =
-    process.env.STORE_PATH || path.join(__dirname, "data", "store.json");
-  const store = new Store(storePath);
-  store.load();
+  function ensureTelegramHealthState() {
+    if (!store.data.telegram || typeof store.data.telegram !== "object") {
+      store.data.telegram = { offset: 0 };
+    }
+    if (!store.data.telegram.health || typeof store.data.telegram.health !== "object") {
+      store.data.telegram.health = {
+        lastPollSuccessAt: 0,
+        lastPollErrorAt: 0,
+        consecutivePollErrors: 0,
+        lastPollError: null,
+        restartRequestedAt: 0,
+        restartReason: null,
+      };
+    }
+    return store.data.telegram.health;
+  }
+
+  function recordTelegramPollSuccess() {
+    const health = ensureTelegramHealthState();
+    health.lastPollSuccessAt = Date.now();
+    health.lastPollErrorAt = 0;
+    health.consecutivePollErrors = 0;
+    health.lastPollError = null;
+    health.restartRequestedAt = 0;
+    health.restartReason = null;
+    store.markDirty();
+    store.saveThrottled();
+  }
+
+  function recordTelegramPollError(error) {
+    const health = ensureTelegramHealthState();
+    health.lastPollErrorAt = Date.now();
+    health.consecutivePollErrors = Number(health.consecutivePollErrors || 0) + 1;
+    health.lastPollError = truncateMiddle(error?.message || String(error), 220);
+    store.markDirty();
+    store.saveThrottled();
+    return health;
+  }
+
+  function buildPollingStatusLine() {
+    const health = ensureTelegramHealthState();
+    const state = health.consecutivePollErrors > 0 ? "degraded" : "ok";
+    const parts = [state, `last ok ${formatRelativeAge(health.lastPollSuccessAt)}`];
+    if (health.consecutivePollErrors) {
+      parts.push(`${health.consecutivePollErrors} consecutive errors`);
+    }
+    if (health.lastPollErrorAt) {
+      parts.push(`last err ${formatRelativeAge(health.lastPollErrorAt)}`);
+    }
+    return parts.join(", ");
+  }
+
+  const initialTelegramHealth = ensureTelegramHealthState();
+  if (!initialTelegramHealth.lastPollSuccessAt) {
+    initialTelegramHealth.lastPollSuccessAt = Date.now();
+    store.markDirty();
+    store.saveThrottled();
+  }
+
+  function ensureCodexBackendHealthState() {
+    if (!store.data.bridge || typeof store.data.bridge !== "object") {
+      store.data.bridge = { currentAccountProfileId: null, lastGoodAccountProfileId: null, accountHealth: {} };
+    }
+    if (!store.data.bridge.codexBackend || typeof store.data.bridge.codexBackend !== "object") {
+      store.data.bridge.codexBackend = {
+        state: "starting",
+        lastOkAt: 0,
+        lastErrorAt: 0,
+        lastError: null,
+        lastAuthFailureAt: 0,
+        lastAuthFailure: null,
+        lastExitAt: 0,
+        lastExitCode: null,
+        lastExitSignal: null,
+        recoveryInProgress: false,
+        recoveryReason: null,
+        lastRecoveryStartedAt: 0,
+        lastRecoverySucceededAt: 0,
+        lastRecoveryFailedAt: 0,
+        lastRecoveryResult: null,
+        lastRecoveredProfileId: null,
+      };
+    }
+    return store.data.bridge.codexBackend;
+  }
+
+  function recordCodexBackendHealthy({ recoveredProfileId = null } = {}) {
+    const health = ensureCodexBackendHealthState();
+    health.state = "ok";
+    health.lastOkAt = Date.now();
+    health.recoveryInProgress = false;
+    health.recoveryReason = null;
+    if (recoveredProfileId) {
+      health.lastRecoveredProfileId = recoveredProfileId;
+      health.lastRecoverySucceededAt = Date.now();
+      health.lastRecoveryResult = `success:${recoveredProfileId}`;
+    }
+    store.markDirty();
+    store.saveThrottled();
+    return health;
+  }
+
+  function recordCodexBackendFailure(reason, {
+    auth = false,
+    code = null,
+    signal = null,
+    state = null,
+  } = {}) {
+    const health = ensureCodexBackendHealthState();
+    const normalizedReason = truncateMiddle(String(reason || "unknown backend error"), 400);
+    health.state = state || (health.recoveryInProgress ? "recovering" : "unhealthy");
+    health.lastErrorAt = Date.now();
+    health.lastError = normalizedReason;
+    if (auth) {
+      health.lastAuthFailureAt = Date.now();
+      health.lastAuthFailure = normalizedReason;
+    }
+    if (code !== null || signal !== null) {
+      health.lastExitAt = Date.now();
+      health.lastExitCode = code;
+      health.lastExitSignal = signal;
+    }
+    store.markDirty();
+    store.saveThrottled();
+    return health;
+  }
+
+  function markCodexBackendRecovering(reason) {
+    const health = ensureCodexBackendHealthState();
+    health.state = "recovering";
+    health.recoveryInProgress = true;
+    health.recoveryReason = truncateMiddle(String(reason || "backend recovery"), 220);
+    health.lastRecoveryStartedAt = Date.now();
+    health.lastRecoveryResult = "in_progress";
+    store.markDirty();
+    store.saveThrottled();
+    return health;
+  }
+
+  function markCodexBackendRecoveryFailed(reason) {
+    const health = ensureCodexBackendHealthState();
+    health.state = "unhealthy";
+    health.recoveryInProgress = false;
+    health.recoveryReason = truncateMiddle(String(reason || "backend recovery failed"), 220);
+    health.lastRecoveryFailedAt = Date.now();
+    health.lastRecoveryResult = `failed:${health.recoveryReason}`;
+    health.lastErrorAt = Date.now();
+    health.lastError = health.recoveryReason;
+    store.markDirty();
+    store.saveThrottled();
+    return health;
+  }
+
+  function buildCodexBackendStatusLine() {
+    return summarizeCodexBackendHealth(ensureCodexBackendHealthState());
+  }
 
   const codexHome = resolveUserPath(
     process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
@@ -944,13 +1671,201 @@ async function main() {
     sandboxMode: process.env.CODEX_SANDBOX || "workspace-write",
     autoApprove: process.env.AUTO_APPROVE === "1" || process.env.AUTO_APPROVE === "true",
   };
+  const contextThresholds = {
+    soft: parseRatioEnv(process.env.CONTEXT_SOFT_RATIO, DEFAULT_CONTEXT_SOFT_RATIO),
+    hard: parseRatioEnv(process.env.CONTEXT_HARD_RATIO, DEFAULT_CONTEXT_HARD_RATIO),
+    emergency: parseRatioEnv(process.env.CONTEXT_EMERGENCY_RATIO, DEFAULT_CONTEXT_EMERGENCY_RATIO),
+  };
+  const autoCompact = parseBooleanEnv(process.env.AUTO_COMPACT, false);
+  for (const session of Object.values(store.data.sessions || {})) {
+    normalizeSessionState(session, defaults);
+  }
+  const pollTimeoutSeconds = Math.max(
+    1,
+    Math.min(
+      30,
+      Number(process.env.TELEGRAM_POLL_TIMEOUT_SECONDS || TELEGRAM_POLL_TIMEOUT_SECONDS) || TELEGRAM_POLL_TIMEOUT_SECONDS,
+    ),
+  );
+  console.log(
+    `Telegram transport: ${telegram.transportLabel}${telegram.proxySource ? ` (${telegram.proxySource})` : ""}; poll timeout ${pollTimeoutSeconds}s`,
+  );
   const autoAccountFailover = accountProfiles.length > 1
     && parseBooleanEnv(process.env.CODEX_AUTO_ACCOUNT_FAILOVER, true);
+
+  function getAccountHealthMap() {
+    if (!store.data.bridge || typeof store.data.bridge !== "object") {
+      store.data.bridge = { currentAccountProfileId: null, lastGoodAccountProfileId: null, accountHealth: {} };
+    }
+    if (!store.data.bridge.accountHealth || typeof store.data.bridge.accountHealth !== "object") {
+      store.data.bridge.accountHealth = {};
+    }
+    return store.data.bridge.accountHealth;
+  }
+
+  function clearExpiredAccountHealth() {
+    const map = getAccountHealthMap();
+    const now = Date.now();
+    let changed = false;
+    for (const [profileId, health] of Object.entries(map)) {
+      if (!health || typeof health !== "object" || (health.badUntil && health.badUntil <= now)) {
+        delete map[profileId];
+        changed = true;
+      }
+    }
+    if (changed) {
+      store.markDirty();
+      store.saveThrottled();
+    }
+  }
+
+  function getAccountHealth(profileId) {
+    if (!profileId) return null;
+    clearExpiredAccountHealth();
+    return getAccountHealthMap()[profileId] || null;
+  }
+
+  function markAccountProfileHealthy(profile) {
+    if (!profile?.profileId) return;
+    const map = getAccountHealthMap();
+    if (map[profile.profileId]) delete map[profile.profileId];
+    store.data.bridge.lastGoodAccountProfileId = profile.profileId;
+    store.markDirty();
+    store.saveThrottled();
+  }
+
+  function markAccountProfileUnhealthy(profile, reason, cooldownMs = ACCOUNT_HEALTH_COOLDOWN_MS) {
+    if (!profile?.profileId) return;
+    const map = getAccountHealthMap();
+    map[profile.profileId] = {
+      reason: reason || "unknown",
+      lastFailedAt: nowIso(),
+      badUntil: Date.now() + cooldownMs,
+    };
+    store.markDirty();
+    store.saveThrottled();
+  }
+
+  function isAccountProfileTemporarilyBlocked(profile) {
+    const health = getAccountHealth(profile?.profileId);
+    return Boolean(health?.badUntil && health.badUntil > Date.now());
+  }
+
+  function saveAccountProfileSnapshot(profile, auth) {
+    if (!profile?.sourcePath || !profile?.profileId || !auth?.tokens) return;
+    const parsed = loadJsonFile(profile.sourcePath);
+    if (!parsed || typeof parsed !== "object") return;
+    const profileMap =
+      parsed.profiles && typeof parsed.profiles === "object" ? parsed.profiles : parsed;
+    if (!profileMap || typeof profileMap !== "object") return;
+    const existing = profileMap[profile.profileId];
+    if (!existing || typeof existing !== "object") return;
+    profileMap[profile.profileId] = {
+      ...existing,
+      type: "oauth",
+      provider: "openai-codex",
+      access: auth.tokens.access_token,
+      refresh: auth.tokens.refresh_token,
+      expires: getJwtExpiryMs(auth.tokens.access_token),
+      accountId: auth.tokens.account_id || profile.accountId || "",
+    };
+    atomicWriteJson(profile.sourcePath, parsed);
+    profile.access = auth.tokens.access_token;
+    profile.refresh = auth.tokens.refresh_token;
+    profile.accountId = auth.tokens.account_id || profile.accountId || null;
+    profile.expires = getJwtExpiryMs(auth.tokens.access_token);
+  }
+
+  function selectFreshAuthForProfile(profile) {
+    const candidates = [readCodexAuth(runtimeAuthPath), readCodexAuth(fallbackAuthPath)]
+      .filter((auth) => auth?.tokens?.account_id && auth.tokens.account_id === profile.accountId);
+    if (!candidates.length) return null;
+    return candidates
+      .sort((left, right) => getJwtExpiryMs(right.tokens?.access_token) - getJwtExpiryMs(left.tokens?.access_token))[0];
+  }
 
   function readRuntimeAccountId() {
     const auth = readCodexAuth(runtimeAuthPath);
     const accountId = auth?.tokens?.account_id;
     return typeof accountId === "string" && accountId ? accountId : null;
+  }
+
+  function extractAuthRuntimeIdentity(auth) {
+    if (!auth?.tokens) return null;
+    const payload = parseJwtPayload(auth.tokens.access_token) || {};
+    const authInfo = payload?.["https://api.openai.com/auth"] || {};
+    const profileInfo = payload?.["https://api.openai.com/profile"] || {};
+    const accountId =
+      (typeof auth.tokens.account_id === "string" && auth.tokens.account_id) ||
+      (typeof authInfo.chatgpt_account_id === "string" && authInfo.chatgpt_account_id) ||
+      null;
+    const email =
+      (typeof profileInfo.email === "string" && profileInfo.email) ||
+      (typeof payload.email === "string" && payload.email) ||
+      null;
+    const refreshToken =
+      typeof auth.tokens.refresh_token === "string" && auth.tokens.refresh_token
+        ? auth.tokens.refresh_token
+        : null;
+    return {
+      accountId,
+      email,
+      refreshToken,
+    };
+  }
+
+  function findAccountProfileForRuntimeIdentity(identity) {
+    if (!identity) return null;
+    if (identity.refreshToken) {
+      const directRefreshMatch = accountProfiles.find((profile) => profile.refresh === identity.refreshToken);
+      if (directRefreshMatch) return directRefreshMatch;
+    }
+    if (identity.accountId) {
+      const directAccountMatch = accountProfiles.find((profile) => profile.accountId === identity.accountId);
+      if (directAccountMatch) return directAccountMatch;
+    }
+    return null;
+  }
+
+  function getRuntimeAccountBinding() {
+    const auth = readCodexAuth(runtimeAuthPath);
+    const identity = extractAuthRuntimeIdentity(auth);
+    const matchedProfile = findAccountProfileForRuntimeIdentity(identity);
+    return {
+      auth,
+      accountId: identity?.accountId || null,
+      email: identity?.email || null,
+      profileId: matchedProfile?.profileId || null,
+      profileLabel: matchedProfile?.label || null,
+    };
+  }
+
+  function reconcileRuntimeAccountBinding({ expectedProfile = null, strict = false } = {}) {
+    const runtime = getRuntimeAccountBinding();
+    const actualProfile = runtime.profileId ? findAccountProfile(runtime.profileId) : null;
+    if (actualProfile?.profileId && store.data.bridge.currentAccountProfileId !== actualProfile.profileId) {
+      store.data.bridge.currentAccountProfileId = actualProfile.profileId;
+      store.markDirty();
+      store.saveThrottled();
+    }
+    if (!strict || !expectedProfile) return runtime;
+
+    const mismatchReasons = [];
+    if (expectedProfile.accountId && runtime.accountId && expectedProfile.accountId !== runtime.accountId) {
+      mismatchReasons.push(`runtime accountId=${runtime.accountId}, expected=${expectedProfile.accountId}`);
+    }
+    if (actualProfile?.profileId && actualProfile.profileId !== expectedProfile.profileId) {
+      mismatchReasons.push(`runtime profileId=${actualProfile.profileId}, expected=${expectedProfile.profileId}`);
+    }
+    if (!runtime.accountId && !actualProfile?.profileId) {
+      mismatchReasons.push("runtime auth identity could not be resolved");
+    }
+    if (mismatchReasons.length) {
+      const err = new Error(`Runtime account drift detected after switch: ${mismatchReasons.join("; ")}`);
+      err.runtimeBinding = runtime;
+      throw err;
+    }
+    return runtime;
   }
 
   function findAccountProfile(selector) {
@@ -984,6 +1899,12 @@ async function main() {
       if (found) return found;
     }
 
+    const lastGood = store.data.bridge?.lastGoodAccountProfileId;
+    if (lastGood) {
+      const found = findAccountProfile(lastGood);
+      if (found) return found;
+    }
+
     const runtimeAccountId = readRuntimeAccountId();
     if (runtimeAccountId) {
       const found = accountProfiles.find((profile) => profile.accountId === runtimeAccountId);
@@ -998,26 +1919,34 @@ async function main() {
     if (!authTemplate) {
       throw new Error("No auth template available. Seed CODEX_HOME with a working Codex auth.json first.");
     }
+    const freshestAuth = selectFreshAuthForProfile(profile);
     const next = {
-      auth_mode: authTemplate.auth_mode || "chatgpt",
-      OPENAI_API_KEY: authTemplate.OPENAI_API_KEY ?? null,
+      auth_mode: freshestAuth?.auth_mode || authTemplate.auth_mode || "chatgpt",
+      OPENAI_API_KEY: freshestAuth?.OPENAI_API_KEY ?? authTemplate.OPENAI_API_KEY ?? null,
       tokens: {
-        id_token: authTemplate.tokens?.id_token || "",
-        access_token: profile.access,
-        refresh_token: profile.refresh,
-        account_id: profile.accountId || "",
+        id_token: freshestAuth?.tokens?.id_token || authTemplate.tokens?.id_token || "",
+        access_token: freshestAuth?.tokens?.access_token || profile.access,
+        refresh_token: freshestAuth?.tokens?.refresh_token || profile.refresh,
+        account_id: freshestAuth?.tokens?.account_id || profile.accountId || "",
       },
       last_refresh: new Date().toISOString(),
     };
     fs.writeFileSync(runtimeAuthPath, JSON.stringify(next, null, 2));
+    saveAccountProfileSnapshot(profile, next);
   }
 
   function buildAccountMeta() {
     const currentProfileId = store.data.bridge?.currentAccountProfileId || null;
     const currentProfile = findAccountProfile(currentProfileId) || resolveInitialAccountProfile();
+    const runtime = reconcileRuntimeAccountBinding();
     return {
       currentAccountProfileId: currentProfile?.profileId || null,
       currentAccountLabel: currentProfile?.label || null,
+      runtimeAccountProfileId: runtime.profileId || null,
+      runtimeAccountLabel: runtime.profileLabel || null,
+      runtimeAccountEmail: runtime.email || null,
+      runtimeAccountId: runtime.accountId || null,
+      accountSourcePath: accountsSource || null,
       accountProfiles,
       autoAccountFailover,
     };
@@ -1062,12 +1991,42 @@ async function main() {
     return ACCOUNT_FAILOVER_PATTERNS.some((pattern) => pattern.test(text));
   }
 
+  function isAccountAuthFailure(err) {
+    const text = extractCodexErrorText(err);
+    return isAccountAuthFailureText(text);
+  }
+
+  function isRuntimeAccountDriftError(err) {
+    const text = extractCodexErrorText(err) || err?.message || "";
+    return /runtime account drift detected/i.test(String(text));
+  }
+
+  function isAccountRecoveryError(err) {
+    return isAccountFailoverError(err) || isAccountAuthFailure(err) || isRuntimeAccountDriftError(err);
+  }
+
+  function markProfileForRecoveryError(profile, err) {
+    if (!profile) return;
+    const cooldownMs = (isAccountAuthFailure(err) || isRuntimeAccountDriftError(err))
+      ? ACCOUNT_HEALTH_COOLDOWN_MS
+      : ACCOUNT_LIMIT_COOLDOWN_MS;
+    markAccountProfileUnhealthy(profile, extractCodexErrorText(err), cooldownMs);
+  }
+
   function extractTurnErrorText(turn) {
     const parts = [];
     if (turn?.error?.message) parts.push(String(turn.error.message));
     if (turn?.error?.codexErrorInfo) parts.push(String(turn.error.codexErrorInfo));
     if (turn?.error?.additionalDetails) parts.push(String(turn.error.additionalDetails));
     return parts.filter(Boolean).join(" | ");
+  }
+
+  function isAccountAuthFailureTurn(turn) {
+    const codexErrorInfo = turn?.error?.codexErrorInfo;
+    if (typeof codexErrorInfo === "string" && /unauthorized|auth/i.test(codexErrorInfo)) {
+      return true;
+    }
+    return isAccountAuthFailureText(extractTurnErrorText(turn));
   }
 
   function isUsageLimitTurn(turn) {
@@ -1079,26 +2038,100 @@ async function main() {
     return ACCOUNT_FAILOVER_PATTERNS.some((pattern) => pattern.test(text));
   }
 
+  function isLikelyContextTurnFailure(turn, session) {
+    const text = extractTurnErrorText(turn);
+    return shouldTreatTextAsContextFailure(text, session?.compactionPendingReason || null);
+  }
+
+  function isLikelyContextRequestError(err, session) {
+    const text = extractCodexErrorText(err);
+    return shouldTreatTextAsContextFailure(text, session?.compactionPendingReason || null);
+  }
+
   function listFallbackProfiles(currentProfileId, attemptedProfileIds = new Set()) {
     const startIndex = accountProfiles.findIndex((profile) => profile.profileId === currentProfileId);
+    const filterProfiles = (profiles) => profiles.filter((profile) => !attemptedProfileIds.has(profile.profileId));
+    const skipBlocked = (profiles) => profiles.filter((profile) => !isAccountProfileTemporarilyBlocked(profile));
     if (startIndex < 0) {
-      return accountProfiles.filter((profile) => !attemptedProfileIds.has(profile.profileId));
+      const available = skipBlocked(filterProfiles(accountProfiles));
+      return available.length ? available : filterProfiles(accountProfiles);
     }
     const rotated = [
       ...accountProfiles.slice(startIndex + 1),
       ...accountProfiles.slice(0, startIndex),
     ];
-    return rotated.filter((profile) => !attemptedProfileIds.has(profile.profileId));
+    const available = skipBlocked(filterProfiles(rotated));
+    return available.length ? available : filterProfiles(rotated);
   }
 
-  async function requestWithAccountFailover({ chatId, run, failureLabel = "request" }) {
+  async function verifySwitchedAccount(profile) {
+    const started = await codex.request("thread/start", {
+      cwd: defaults.cwd,
+      model: defaults.model,
+      personality: defaults.personality,
+      approvalPolicy: defaults.approvalPolicy,
+      sandbox: defaults.sandboxMode,
+    });
+    const threadId = started?.thread?.id || started?.threadId || started?.thread?.threadId;
+    if (!threadId) throw new Error(`thread/start did not return a thread id for account ${profile?.profileId || "unknown"}`);
+    return threadId;
+  }
+
+  async function requestWithAccountFailover({
+    chatId,
+    run,
+    failureLabel = "request",
+    authRecoveryAttempted = false,
+    allowAuthReplayHandoff = true,
+  }) {
+    await waitForCodexBackendRecovery();
     try {
       return await run();
     } catch (err) {
+      if (isAccountAuthFailure(err)) {
+        if (authRecoveryAttempted) throw err;
+        const replayHandoff = allowAuthReplayHandoff && shouldHandoffAuthRecoveryToReplay(chatId);
+        const recovered = await ensureCodexBackendRecovered({
+          source: "request_failure",
+          chatId,
+          reason: extractCodexErrorText(err),
+          failureLabel,
+        });
+        if (!recovered) {
+          if (chatId && !replayHandoff) {
+            await telegram.sendMessage({
+              chat_id: chatId,
+              text: "Codex backend auth recovery failed after trying every spare account once.",
+            });
+          }
+          throw err;
+        }
+        if (replayHandoff) {
+          return AUTH_RECOVERY_HANDOFF;
+        }
+        return requestWithAccountFailover({
+          chatId,
+          run,
+          failureLabel,
+          authRecoveryAttempted: true,
+          allowAuthReplayHandoff,
+        });
+      }
+      if (codexBackendRecoveryPromise && isAccountRecoveryError(err)) {
+        await waitForCodexBackendRecovery();
+        return requestWithAccountFailover({
+          chatId,
+          run,
+          failureLabel,
+          authRecoveryAttempted,
+          allowAuthReplayHandoff,
+        });
+      }
       if (!isAccountFailoverError(err)) throw err;
 
       let lastError = err;
       let currentProfile = getCurrentAccountProfile();
+      markProfileForRecoveryError(currentProfile, err);
       const attempted = new Set(currentProfile ? [currentProfile.profileId] : []);
       const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
 
@@ -1115,18 +2148,29 @@ async function main() {
         const numberLabel = nextNumber ? `#${nextNumber}` : "next";
         await telegram.sendMessage({
           chat_id: chatId,
-          text: `Detected a quota/rate limit during ${failureLabel}. Switching to account ${numberLabel} and retrying…`,
+          text: `Detected an account problem during ${failureLabel}. Switching to account ${numberLabel} and retrying…`,
         });
 
-        await switchAccountProfile(nextProfile);
+        try {
+          await switchAccountProfile(nextProfile);
+        } catch (switchErr) {
+          lastError = switchErr;
+          attempted.add(nextProfile.profileId);
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: `Account ${numberLabel} failed its health check. Trying the next spare account…`,
+          });
+          continue;
+        }
         currentProfile = nextProfile;
         startTyping(chatId);
 
         try {
           return await run();
         } catch (retryErr) {
-          if (!isAccountFailoverError(retryErr)) throw retryErr;
+          if (!isAccountRecoveryError(retryErr)) throw retryErr;
           lastError = retryErr;
+          markProfileForRecoveryError(currentProfile, retryErr);
         }
       }
 
@@ -1139,9 +2183,30 @@ async function main() {
   }
 
   let codex = null;
+  let restartRequested = false;
+  let codexBackendRecoveryPromise = null;
+  let codexBackendRecoveryBypassDepth = 0;
+  let codexBackendTransitionDepth = 0;
   const codexEnv = { ...process.env, CODEX_HOME: codexHome };
 
   const codexBin = resolveCodexBin();
+
+  async function requestSupervisorRestart(reason) {
+    if (restartRequested) return;
+    restartRequested = true;
+
+    const health = ensureTelegramHealthState();
+    health.restartRequestedAt = Date.now();
+    health.restartReason = truncateMiddle(reason, 220);
+    store.markDirty();
+    store.save({ force: true });
+
+    console.error(`Bridge self-recovery restart requested: ${reason}`);
+    stopTypingForAllChats();
+    if (codex) codex.stop({ expected: true });
+    await sleep(100);
+    process.exit(1);
+  }
 
   async function retryTurnAfterUsageLimit({ chatId, session, rt, turn }) {
     if (!isUsageLimitTurn(turn) || rt.failoverInProgress) return false;
@@ -1150,46 +2215,422 @@ async function main() {
     if (!inputMeta?.text) return false;
 
     const currentProfile = getCurrentAccountProfile();
+    markProfileForRecoveryError(currentProfile, { message: extractTurnErrorText(turn) || "usage limit" });
     const attempted = new Set(uniqueStrings([
       ...(inputMeta.attemptedProfileIds || []),
       currentProfile?.profileId || null,
     ]));
-    const nextProfile = listFallbackProfiles(currentProfile?.profileId, attempted)[0] || null;
-    if (!nextProfile) return false;
+    const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
+    if (!fallbackProfiles.length) return false;
 
     rt.failoverInProgress = true;
     delete rt.turnInputMetaByTurnId[turn.id];
 
     try {
-      const nextNumber = accountNumber(nextProfile);
-      const numberLabel = nextNumber ? `#${nextNumber}` : "next";
-      await telegram.sendMessage({
-        chat_id: chatId,
-        text: `Current account hit a usage limit during the turn. Switching to account ${numberLabel} and retrying…`,
-      });
+      for (const nextProfile of fallbackProfiles) {
+        const nextNumber = accountNumber(nextProfile);
+        const numberLabel = nextNumber ? `#${nextNumber}` : "next";
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `Current account hit a usage limit during the turn. Switching to account ${numberLabel} and retrying…`,
+        });
 
-      await switchAccountProfile(nextProfile);
-      startTyping(chatId);
-      await startOrSteerTurn({
-        chatId,
-        session,
-        text: inputMeta.text,
-        attemptedProfileIds: uniqueStrings([
-          ...attempted,
-          nextProfile.profileId,
-        ]),
-      });
-      return true;
+        try {
+          await switchAccountProfile(nextProfile);
+        } catch (switchErr) {
+          attempted.add(nextProfile.profileId);
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: `Account ${numberLabel} failed its health check. Trying the next spare account…`,
+          });
+          continue;
+        }
+
+        startTyping(chatId);
+        await startOrSteerTurn({
+          chatId,
+          session,
+          text: inputMeta.text,
+          kind: inputMeta.kind || "user",
+          silent: Boolean(inputMeta.silent),
+          contextRetryCount: Number(inputMeta.contextRetryCount || 0),
+          attemptedProfileIds: uniqueStrings([
+            ...attempted,
+            nextProfile.profileId,
+          ]),
+        });
+        return true;
+      }
+      return false;
     } finally {
       rt.failoverInProgress = false;
     }
   }
 
+  async function retryTurnAfterAuthFailure({ chatId, rt, turn }) {
+    if (rt.failoverInProgress) return false;
+    if (!isAccountAuthFailureTurn(turn)) return false;
+
+    const turnMeta = getTurnInputMeta(rt, turn?.id);
+    const replayTask = buildAuthRecoveryReplayTask(
+      turnMeta,
+      isCompactionTurnKind(turnMeta?.kind) ? "compaction_auth_failure" : "turn_auth_failure",
+    );
+    if (replayTask) {
+      queueAuthRecoveryReplayTask(rt, replayTask);
+    }
+
+    const recovered = await ensureCodexBackendRecovered({
+      source: "turn_failure",
+      chatId,
+      reason: extractTurnErrorText(turn) || "Codex backend auth failure",
+      turnId: turn?.id || null,
+    });
+    if (!recovered && !replayTask && chatId) {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: "Codex backend auth recovery failed after trying every spare account once.",
+      });
+    }
+    return true;
+  }
+
+  async function retryTurnAfterContextFailure({ chatId, session, rt, turn }) {
+    if (rt.failoverInProgress || rt.compactionInProgress) return false;
+    if (!isLikelyContextTurnFailure(turn, session)) return false;
+
+    const inputMeta = rt.turnInputMetaByTurnId?.[turn?.id];
+    if (!inputMeta?.text) return false;
+    if (Number(inputMeta.contextRetryCount || 0) >= 1) return false;
+
+    delete rt.turnInputMetaByTurnId[turn.id];
+    return retryAfterContextCompaction({
+      chatId,
+      session,
+      rt,
+      text: inputMeta.text,
+      attemptedProfileIds: inputMeta.attemptedProfileIds || [],
+      contextRetryCount: Number(inputMeta.contextRetryCount || 0),
+      source: "turn_failure",
+      detail: extractTurnErrorText(turn),
+    });
+  }
+
+  async function ensureHealthyStartupAccount() {
+    if (!autoAccountFailover || accountProfiles.length < 2) return;
+    const currentProfile = getCurrentAccountProfile();
+    if (!currentProfile) return;
+
+    try {
+      await verifySwitchedAccount(currentProfile);
+      reconcileRuntimeAccountBinding({ expectedProfile: currentProfile, strict: true });
+      store.data.bridge.currentAccountProfileId = currentProfile.profileId;
+      markAccountProfileHealthy(currentProfile);
+      store.markDirty();
+      store.saveThrottled();
+      return;
+    } catch (err) {
+      if (!isAccountRecoveryError(err)) {
+        console.warn("Initial account health check failed, but not with a recognized account error:", err.message);
+        return;
+      }
+      markProfileForRecoveryError(currentProfile, err);
+      console.warn(`Initial account ${currentProfile.profileId} failed health check:`, err.message);
+    }
+
+    const attempted = new Set(currentProfile?.profileId ? [currentProfile.profileId] : []);
+    const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
+    for (const nextProfile of fallbackProfiles) {
+      try {
+        await switchAccountProfile(nextProfile);
+        console.warn(`Recovered bridge startup onto ${nextProfile.profileId}`);
+        return;
+      } catch (err) {
+        markProfileForRecoveryError(nextProfile, err);
+        console.warn(`Fallback startup account ${nextProfile.profileId} failed health check:`, err.message);
+      }
+    }
+  }
+
+  function recordContextUsageForSession(session, params) {
+    const snapshot = extractContextUsageSnapshotPayload(params);
+    if (!applyContextUsageSnapshot(session, snapshot, contextThresholds, nowIso())) return false;
+    session.updatedAt = nowIso();
+    store.markDirty();
+    store.saveThrottled();
+    return true;
+  }
+
+  function getCompactionBlockReason(session, rt, { allowQueuedTasks = false } = {}) {
+    if (!session.threadId) return "No existing thread to compact yet.";
+    if (rt.activeTurnId) return "A turn is still running. Wait for it to finish or use /stop first.";
+    if (rt.failoverInProgress) return "Account failover is in progress. Try again after it settles.";
+    if (rt.compactionInProgress) return "Context compaction is already in progress.";
+    if (!allowQueuedTasks && getQueuedTaskCount(rt) > 0) {
+      return "There are queued tasks. Clear them first with /stop, then compact.";
+    }
+    return null;
+  }
+
+  function shouldAutoCompact(session, rt, { allowDuringIdle = true } = {}) {
+    return shouldAutoCompactDecision({
+      autoCompactEnabled: autoCompact,
+      session,
+      rt,
+      allowDuringIdle,
+    });
+  }
+
+  async function finishCompaction({ chatId, session, rt, turnId, mode = "manual" }) {
+    const summaryText = extractFinalTurnAgentText(rt, turnId);
+    if (!summaryText) {
+      rt.compactionInProgress = false;
+      rt.postCompactionRetryTask = null;
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: mode === "auto"
+          ? "自动压缩未生成可用摘要，仍停留在当前 thread。"
+          : "Context compaction finished without a usable summary. Staying on the current thread.",
+      });
+      return false;
+    }
+
+    const oldThreadId = session.threadId;
+    const nextGeneration = Number(session.compactionGeneration || 0) + 1;
+    const generatedAt = nowIso();
+    const summary = {
+      version: COMPACTION_SUMMARY_VERSION,
+      format: COMPACTION_SUMMARY_FORMAT,
+      text: summaryText,
+      sourceThreadId: oldThreadId,
+      generatedAt,
+    };
+
+    try {
+      await startFreshThread(session, chatId, { announceText: null });
+    } catch (err) {
+      rt.compactionInProgress = false;
+      rt.postCompactionRetryTask = null;
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: mode === "auto"
+          ? `自动压缩已生成摘要，但创建新 thread 失败：${truncateMiddle(err.message || String(err), 800)}`
+          : `Context summary was generated, but creating a fresh thread failed: ${truncateMiddle(err.message || String(err), 800)}`,
+      });
+      return false;
+    }
+
+    const newThreadId = session.threadId;
+    session.compactionSummary = summary;
+    session.pendingSummaryBootstrap = {
+      text: summaryText,
+      sourceThreadId: oldThreadId,
+      generation: nextGeneration,
+      generatedAt,
+    };
+    session.preCompactionThreadId = oldThreadId;
+    session.lastCompactionAt = generatedAt;
+    session.compactionGeneration = nextGeneration;
+    session.compactionPending = false;
+    session.compactionPendingReason = null;
+    session.updatedAt = generatedAt;
+    store.markDirty();
+    store.saveThrottled();
+    rt.compactionInProgress = false;
+
+    const text = isGroupChat(chatId)
+      ? mode === "auto"
+        ? "上下文已自动压缩并切到新 thread。"
+        : "上下文已压缩并切到新 thread。"
+      : [
+          mode === "auto" ? "Context auto-compacted into a fresh thread." : "Context compacted into a fresh thread.",
+          `oldThreadId: ${oldThreadId}`,
+          `newThreadId: ${newThreadId}`,
+          `generation: ${nextGeneration}`,
+        ].join("\n");
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text,
+      disable_web_page_preview: true,
+    });
+    if (rt.postCompactionRetryTask) {
+      const retryTask = rt.postCompactionRetryTask;
+      rt.postCompactionRetryTask = null;
+      try {
+        await startOrSteerTurn({
+          chatId,
+          session,
+          text: retryTask.text,
+          attemptedProfileIds: retryTask.attemptedProfileIds || null,
+          kind: retryTask.kind || "user",
+          silent: Boolean(retryTask.silent),
+          contextRetryCount: Number(retryTask.contextRetryCount || 0),
+        });
+      } catch (err) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `压缩后的自动重试失败：${truncateMiddle(err.message || String(err), 1200)}`,
+        });
+      }
+    } else if (mode === "auto" && getQueuedTaskCount(rt) > 0) {
+      await maybeStartQueuedTask({ chatId, session });
+    }
+    return true;
+  }
+
+  async function retryAfterContextCompaction({
+    chatId,
+    session,
+    rt,
+    text,
+    attemptedProfileIds = null,
+    contextRetryCount = 0,
+    source = "turn",
+    detail = "",
+  }) {
+    if (!text || contextRetryCount >= 1 || rt.compactionInProgress) return false;
+    rt.postCompactionRetryTask = {
+      text,
+      attemptedProfileIds: attemptedProfileIds || [],
+      kind: "user",
+      silent: false,
+      contextRetryCount: contextRetryCount + 1,
+      source,
+      createdAt: nowIso(),
+    };
+    const started = await startCompaction({
+      chatId,
+      session,
+      mode: "auto",
+      reason: "context_failure_retry",
+      allowQueuedTasks: true,
+    });
+    if (!started) {
+      rt.postCompactionRetryTask = null;
+      return true;
+    }
+    const retryText = isGroupChat(chatId)
+      ? "检测到上下文相关失败，正在压缩后自动重试一次。"
+      : detail
+        ? `Detected a context-related failure. Compacting the thread and retrying once.\n\n${truncateMiddle(detail, 600)}`
+        : "Detected a context-related failure. Compacting the thread and retrying once.";
+    await telegram.sendMessage({ chat_id: chatId, text: retryText });
+    return true;
+  }
+
+  async function startCompaction({
+    chatId,
+    session,
+    mode = "manual",
+    reason = null,
+    allowQueuedTasks = false,
+  }) {
+    const rt = getRuntime(chatId);
+    const blockedReason = getCompactionBlockReason(session, rt, { allowQueuedTasks });
+    if (blockedReason) {
+      if (mode === "manual") {
+        await telegram.sendMessage({ chat_id: chatId, text: blockedReason });
+      }
+      return false;
+    }
+
+    try {
+      await requestWithAccountFailover({
+        chatId,
+        failureLabel: "thread resume for compaction",
+        run: async () => codex.request("thread/resume", {
+          threadId: session.threadId,
+          cwd: session.cwd,
+          model: session.model,
+          personality: session.personality,
+          approvalPolicy: session.approvalPolicy,
+          sandbox: session.sandboxMode,
+        }),
+      });
+    } catch (err) {
+      const text = mode === "auto"
+        ? `自动压缩无法恢复当前 thread：${truncateMiddle(err.message || String(err), 800)}`
+        : `Failed to resume the current thread for compaction: ${truncateMiddle(err.message || String(err), 800)}`;
+      await telegram.sendMessage({ chat_id: chatId, text });
+      return false;
+    }
+
+    rt.compactionInProgress = true;
+    const startText = mode === "auto"
+      ? isGroupChat(chatId)
+        ? "上下文接近窗口上限，正在自动压缩…"
+        : `当前上下文占用已到 ${formatPercent(session.contextUsageRatio)}，正在自动压缩当前 thread…`
+      : "正在压缩当前上下文，请稍候…";
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: startText,
+    });
+
+    try {
+      await startOrSteerTurn({
+        chatId,
+        session,
+        text: buildCompactionPrompt(),
+        kind: mode === "auto" ? "autoCompaction" : "manualCompaction",
+        silent: true,
+      });
+      return true;
+    } catch (err) {
+      rt.compactionInProgress = false;
+      throw err;
+    }
+  }
+
+  async function startManualCompaction({ chatId, session }) {
+    return startCompaction({ chatId, session, mode: "manual" });
+  }
+
   async function startCodexServer() {
     const server = new CodexAppServer({ codexBin, env: codexEnv });
+    server.onAuthWatchdog((event) => {
+      queueCodexBackendRecovery(event);
+    });
+    server.onProcessExit(({ code, signal, expected, authFailure }) => {
+      if (expected) return;
+      const reason = authFailure?.reason || `codex app-server exited (code=${code}, signal=${signal})`;
+      recordCodexBackendFailure(reason, {
+        auth: Boolean(authFailure),
+        code,
+        signal,
+      });
+    });
     server.onNotification(async (msg) => {
       const { method, params } = msg;
       if (!method || !params) return;
+
+      if (method === "token_count") {
+        const threadId = params?.threadId || params?.thread?.id || null;
+        const chatId = threadId ? chatIdForThread(threadId) : null;
+        if (!chatId) return;
+        const session = getOrCreateSession(chatId);
+        const recorded = recordContextUsageForSession(session, params);
+        if (!recorded) return;
+        const rt = getRuntime(chatId);
+        const autoReason = shouldAutoCompact(session, rt);
+        if (autoReason && !rt.activeTurnId) {
+          await startCompaction({
+            chatId,
+            session,
+            mode: "auto",
+            reason: autoReason,
+            allowQueuedTasks: true,
+          });
+        }
+        return;
+      }
+
+      if (method === "contextCompaction") {
+        const threadId = params?.threadId || params?.thread?.id || null;
+        const chatId = threadId ? chatIdForThread(threadId) : null;
+        if (!chatId) return;
+        console.log(`Observed contextCompaction for chat ${chatId}`);
+        return;
+      }
 
       if (method === "turn/started") {
         const { threadId, turn } = params;
@@ -1212,38 +2653,54 @@ async function main() {
         if (!chatId) return;
         const session = getOrCreateSession(chatId);
         const rt = getRuntime(chatId);
+        const turnMeta = getTurnInputMeta(rt, turn?.id);
+        const silentTurn = Boolean(turnMeta?.silent);
+        const compactionTurnKind = isCompactionTurnKind(turnMeta?.kind) ? turnMeta.kind : null;
+        const status = turn?.status || "completed";
         rt.activeTurnId = null;
         stopTyping(chatId);
         await flushBufferedAgentMessages(chatId, rt);
 
-        if (isGroupChat(chatId) && turn?.status === "completed") {
+        if (!silentTurn && isGroupChat(chatId) && status === "completed") {
           await revealFinalGroupAgentMessage(chatId, rt, turn?.id);
         }
 
-        const status = turn?.status || "completed";
         if (status !== "completed") {
-          const retried = await retryTurnAfterUsageLimit({ chatId, session, rt, turn });
-          if (!retried) {
-            const rawDetail = extractTurnErrorText(turn);
-            const detail = isGroupChat(chatId) ? sanitizeGroupAgentText(rawDetail) : rawDetail;
-            const text = detail
-              ? `Turn ${status}: ${truncateMiddle(detail, 1200)}`
-              : `Turn ${status}.`;
-            if (!(isGroupChat(chatId) && hasSeenGroupVisibleText(rt, text))) {
+          const authRetried = await retryTurnAfterAuthFailure({ chatId, rt, turn });
+          const retried = authRetried
+            ? false
+            : await retryTurnAfterUsageLimit({ chatId, session, rt, turn });
+          const contextRetried = authRetried || retried
+            ? false
+            : await retryTurnAfterContextFailure({ chatId, session, rt, turn });
+          if (!authRetried && !retried && !contextRetried) {
+            if (compactionTurnKind) {
+              rt.compactionInProgress = false;
+              rt.postCompactionRetryTask = null;
+              const rawDetail = extractTurnErrorText(turn);
+              const detail = rawDetail ? truncateMiddle(rawDetail, 1200) : null;
+              const text = status === "interrupted" || status === "cancelled"
+                ? "Context compaction cancelled. Staying on the current thread."
+                : detail
+                  ? `Context compaction ${status}: ${detail}`
+                  : `Context compaction ${status}. Staying on the current thread.`;
               await telegram.sendMessage({ chat_id: chatId, text });
-              if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
+            } else if (!silentTurn) {
+              const rawDetail = extractTurnErrorText(turn);
+              const detail = isGroupChat(chatId) ? sanitizeGroupAgentText(rawDetail) : rawDetail;
+              const text = detail
+                ? `Turn ${status}: ${truncateMiddle(detail, 1200)}`
+                : `Turn ${status}.`;
+              if (!(isGroupChat(chatId) && hasSeenGroupVisibleText(rt, text))) {
+                await telegram.sendMessage({ chat_id: chatId, text });
+                if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
+              }
             }
           }
         }
 
-        if (turn?.id) {
-          delete rt.turnInputMetaByTurnId[turn.id];
-          delete rt.lastAgentMessageIdByTurnId[turn.id];
-          delete rt.groupAgentMessageByTurnId[turn.id];
-        }
-
         const diff = rt.turnDiffByTurnId?.[turn?.id];
-        if (diff && typeof diff === "string" && diff.trim()) {
+        if (!silentTurn && diff && typeof diff === "string" && diff.trim()) {
           const text = isGroupChat(chatId)
             ? "本轮包含代码改动，具体 diff 已在群里隐藏。"
             : `Turn diff (preview):\n\n${truncateMiddle(diff, 3500)}`;
@@ -1251,6 +2708,41 @@ async function main() {
             await telegram.sendMessage({ chat_id: chatId, text });
             if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
           }
+        }
+
+        if (status === "completed" && compactionTurnKind) {
+          const finished = await finishCompaction({
+            chatId,
+            session,
+            rt,
+            turnId: turn?.id,
+            mode: compactionTurnKind === "autoCompaction" ? "auto" : "manual",
+          });
+          if (!finished && compactionTurnKind === "autoCompaction") {
+            await maybeStartQueuedTask({ chatId, session });
+          }
+        } else if (status === "completed") {
+          const autoReason = shouldAutoCompact(session, rt, { allowDuringIdle: true });
+          if (autoReason) {
+            const started = await startCompaction({
+              chatId,
+              session,
+              mode: "auto",
+              reason: autoReason,
+              allowQueuedTasks: true,
+            });
+            if (!started) {
+              await maybeStartQueuedTask({ chatId, session });
+            }
+          } else {
+            await maybeStartQueuedTask({ chatId, session });
+          }
+        }
+
+        if (turn?.id) {
+          delete rt.turnInputMetaByTurnId[turn.id];
+          delete rt.lastAgentMessageIdByTurnId[turn.id];
+          delete rt.groupAgentMessageByTurnId[turn.id];
         }
         return;
       }
@@ -1271,8 +2763,20 @@ async function main() {
         const session = getOrCreateSession(chatId);
         const rt = getRuntime(chatId);
         if (!item || !item.id) return;
+        const silentTurn = isSilentTurn(rt, turnId);
 
         if (item.type === "commandExecution") {
+          if (silentTurn) {
+            rt.items[item.id] = {
+              kind: "command",
+              messageId: null,
+              header: "",
+              buffer: "",
+              redacted: true,
+              silent: true,
+            };
+            return;
+          }
           const redacted = isGroupChat(chatId);
           const header = item.command ? `$ ${item.command}` : "[commandExecution]";
           const cwdLine = item.cwd ? `cwd: ${item.cwd}` : session.cwd ? `cwd: ${session.cwd}` : null;
@@ -1294,6 +2798,17 @@ async function main() {
         }
 
         if (item.type === "fileChange") {
+          if (silentTurn) {
+            rt.items[item.id] = {
+              kind: "fileChange",
+              messageId: null,
+              header: "",
+              buffer: "",
+              redacted: true,
+              silent: true,
+            };
+            return;
+          }
           const title = item.title || "[fileChange]";
           const redacted = isGroupChat(chatId);
           const text = redacted ? summarizeGroupFileChange(title) : title;
@@ -1313,6 +2828,17 @@ async function main() {
 
         if (item.type === "agentMessage") {
           if (turnId) rt.lastAgentMessageIdByTurnId[turnId] = item.id;
+          if (silentTurn) {
+            rt.items[item.id] = {
+              kind: "agentMessage",
+              messageId: null,
+              buffer: item.text || "",
+              renderedBuffer: item.text || "",
+              turnId: turnId || null,
+              silent: true,
+            };
+            return;
+          }
           if (!rt.items[item.id]) {
             rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
           } else {
@@ -1332,9 +2858,27 @@ async function main() {
         const chatId = chatIdForThread(threadId);
         if (!chatId || !item || !item.id) return;
         const rt = getRuntime(chatId);
+        const silentTurn = isSilentTurn(rt, turnId);
 
         if (item.type === "agentMessage") {
           if (turnId) rt.lastAgentMessageIdByTurnId[turnId] = item.id;
+          if (silentTurn) {
+            if (!rt.items[item.id]) {
+              rt.items[item.id] = {
+                kind: "agentMessage",
+                messageId: null,
+                buffer: item.text || "",
+                renderedBuffer: item.text || "",
+                turnId: turnId || null,
+                silent: true,
+              };
+            } else if (typeof item.text === "string" && item.text.trim()) {
+              rt.items[item.id].buffer = item.text;
+              rt.items[item.id].renderedBuffer = item.text;
+              rt.items[item.id].silent = true;
+            }
+            return;
+          }
           if (!rt.items[item.id]) {
             rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
           } else {
@@ -1350,13 +2894,22 @@ async function main() {
         const chatId = chatIdForThread(threadId);
         if (!chatId) return;
         const rt = getRuntime(chatId);
+        const silentTurn = isSilentTurn(rt, turnId);
         if (!rt.items?.[itemId]) {
-          rt.items[itemId] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
+          rt.items[itemId] = {
+            kind: "agentMessage",
+            messageId: null,
+            buffer: "",
+            renderedBuffer: "",
+            turnId: turnId || null,
+            silent: silentTurn,
+          };
         }
         if (turnId) {
           rt.items[itemId].turnId = turnId;
           rt.lastAgentMessageIdByTurnId[turnId] = itemId;
         }
+        if (silentTurn) rt.items[itemId].silent = true;
         rt.items[itemId].buffer += delta;
         return;
       }
@@ -1575,6 +3128,7 @@ async function main() {
     await server.start();
     await server.initialize();
     codex = server;
+    recordCodexBackendHealthy();
   }
 
   /** @type {Map<string, any>} */
@@ -1590,20 +3144,60 @@ async function main() {
     const created = {
       activeTurnId: null,
       pendingInputMeta: null,
+      pendingTasks: [],
+      queuedTaskSeq: 1,
       turnInputMetaByTurnId: {},
       lastAgentMessageIdByTurnId: {},
       groupAgentMessageByTurnId: {},
       items: {},
       turnDiffByTurnId: {},
+      postCompactionRetryTask: null,
+      authRecoveryReplayTask: null,
       lastGroupProgressByBucket: {},
       sentGroupVisibleTexts: new Set(),
       editTimers: new Map(),
       failoverInProgress: false,
+      compactionInProgress: false,
       typingTimer: null,
       menuPage: MENU_PAGES.MAIN,
     };
     runtimeByChat.set(chatId, created);
     return created;
+  }
+
+  function isChatBusy(rt) {
+    return Boolean(rt?.activeTurnId || rt?.failoverInProgress || rt?.compactionInProgress);
+  }
+
+  function getQueuedTaskCount(rt) {
+    return countQueuedTasks(rt);
+  }
+
+  function enqueuePendingTask(rt, text) {
+    if (!Array.isArray(rt.pendingTasks)) rt.pendingTasks = [];
+    if (!Number.isFinite(rt.queuedTaskSeq)) rt.queuedTaskSeq = 1;
+    const task = {
+      id: rt.queuedTaskSeq,
+      text,
+      createdAt: nowIso(),
+    };
+    rt.queuedTaskSeq += 1;
+    rt.pendingTasks.push(task);
+    return { task, position: rt.pendingTasks.length };
+  }
+
+  function shiftPendingTask(rt) {
+    if (!Array.isArray(rt?.pendingTasks) || rt.pendingTasks.length === 0) return null;
+    const next = rt.pendingTasks.shift() || null;
+    if (!rt.pendingTasks.length) rt.queuedTaskSeq = 1;
+    return next;
+  }
+
+  function clearPendingTasks(rt) {
+    const count = getQueuedTaskCount(rt);
+    rt.pendingTasks = [];
+    rt.queuedTaskSeq = 1;
+    return count;
   }
 
   function startTyping(chatId) {
@@ -1630,8 +3224,10 @@ async function main() {
   function getOrCreateSession(chatId) {
     const key = String(chatId);
     const existing = store.data.sessions[key];
-    if (existing && typeof existing === "object") return existing;
-    const created = {
+    if (existing && typeof existing === "object") {
+      return normalizeSessionState(existing, defaults);
+    }
+    const created = normalizeSessionState({
       threadId: null,
       cwd: defaults.cwd,
       model: defaults.model,
@@ -1641,11 +3237,60 @@ async function main() {
       approvalPolicy: defaults.approvalPolicy,
       sandboxMode: defaults.sandboxMode,
       updatedAt: nowIso(),
-    };
+    }, defaults);
     store.data.sessions[key] = created;
     store.markDirty();
     store.saveThrottled();
     return created;
+  }
+
+  function getTurnInputMeta(rt, turnId) {
+    if (!rt || !turnId) return null;
+    return rt.turnInputMetaByTurnId?.[turnId] || null;
+  }
+
+  function getReplayableAuthRecoveryTask(rt) {
+    if (!rt) return null;
+    if (rt.authRecoveryReplayTask?.text) {
+      return rt.authRecoveryReplayTask;
+    }
+    if (rt.activeTurnId) {
+      return buildAuthRecoveryReplayTask(getTurnInputMeta(rt, rt.activeTurnId), "active_turn");
+    }
+    if (rt.pendingInputMeta?.text) {
+      return buildAuthRecoveryReplayTask(rt.pendingInputMeta, "pending_request");
+    }
+    return null;
+  }
+
+  function queueAuthRecoveryReplayTask(rt, task) {
+    if (!rt || !task?.text) return false;
+    if (rt.authRecoveryReplayTask?.text) return true;
+    rt.authRecoveryReplayTask = task;
+    return true;
+  }
+
+  function shouldHandoffAuthRecoveryToReplay(chatId) {
+    if (chatId === null || chatId === undefined) return false;
+    const rt = getRuntime(chatId);
+    return Boolean(
+      rt?.authRecoveryReplayTask?.text
+      || rt?.pendingInputMeta?.text
+      || rt?.activeTurnId,
+    );
+  }
+
+  function isSilentTurn(rt, turnId) {
+    return Boolean(getTurnInputMeta(rt, turnId)?.silent);
+  }
+
+  function extractFinalTurnAgentText(rt, turnId) {
+    if (!rt || !turnId) return "";
+    const itemId = rt.lastAgentMessageIdByTurnId?.[turnId];
+    if (!itemId) return "";
+    const entry = rt.items?.[itemId];
+    if (!entry) return "";
+    return String(entry.buffer || entry.renderedBuffer || "").trim();
   }
 
   function chatIdForThread(threadId) {
@@ -1655,10 +3300,16 @@ async function main() {
     return null;
   }
 
-  async function resetSessionThread(chatId, session) {
+  async function resetSessionThread(chatId, session, { clearCompactionHistory = true } = {}) {
     session.threadId = null;
     const rt = getRuntime(chatId);
     rt.activeTurnId = null;
+    rt.pendingInputMeta = null;
+    rt.compactionInProgress = false;
+    rt.postCompactionRetryTask = null;
+    rt.authRecoveryReplayTask = null;
+    clearPendingTasks(rt);
+    rt.turnInputMetaByTurnId = {};
     rt.items = {};
     rt.turnDiffByTurnId = {};
     rt.lastAgentMessageIdByTurnId = {};
@@ -1666,6 +3317,7 @@ async function main() {
     rt.lastGroupProgressByBucket = {};
     rt.sentGroupVisibleTexts = new Set();
     stopTyping(chatId);
+    clearSessionContextTracking(session, { clearSummary: true, clearHistory: clearCompactionHistory });
     session.updatedAt = nowIso();
     store.markDirty();
     store.saveThrottled();
@@ -1678,21 +3330,265 @@ async function main() {
     return false;
   }
 
-  async function switchAccountProfile(profile) {
+  async function waitForCodexBackendRecovery() {
+    if (codexBackendRecoveryBypassDepth > 0) return;
+    if (!codexBackendRecoveryPromise) return;
+    await codexBackendRecoveryPromise.catch(() => {});
+    if (!codex) {
+      throw new Error("Codex backend is unavailable after the automatic recovery attempt.");
+    }
+  }
+
+  function setGlobalFailoverState(inProgress) {
+    for (const rt of runtimeByChat.values()) {
+      rt.failoverInProgress = inProgress;
+    }
+  }
+
+  function clearInterruptedTurnState(chatId, rt) {
+    if (!rt) return;
+    for (const pending of rt.editTimers?.values() || []) {
+      clearTimeout(pending.timer);
+    }
+    if (rt.editTimers) rt.editTimers.clear();
+    rt.activeTurnId = null;
+    rt.pendingInputMeta = null;
+    rt.items = {};
+    rt.turnDiffByTurnId = {};
+    rt.lastAgentMessageIdByTurnId = {};
+    rt.groupAgentMessageByTurnId = {};
+    rt.lastGroupProgressByBucket = {};
+    rt.sentGroupVisibleTexts = new Set();
+    stopTyping(chatId);
+  }
+
+  function captureInterruptedTurnsForRecovery() {
+    const captured = [];
+    for (const [chatId, rt] of runtimeByChat.entries()) {
+      const replayTask = getReplayableAuthRecoveryTask(rt);
+      if (!replayTask && !rt.activeTurnId && !rt.pendingInputMeta) continue;
+      if (replayTask) queueAuthRecoveryReplayTask(rt, replayTask);
+      captured.push({ chatId, task: rt.authRecoveryReplayTask || replayTask || null });
+      clearInterruptedTurnState(chatId, rt);
+    }
+    return captured;
+  }
+
+  function clearAllQueuedAuthRecoveryTasks() {
+    for (const rt of runtimeByChat.values()) {
+      if (isCompactionTurnKind(rt.authRecoveryReplayTask?.kind)) {
+        rt.compactionInProgress = false;
+      }
+      rt.authRecoveryReplayTask = null;
+    }
+  }
+
+  async function notifyInterruptedTurns(captured, textBuilder) {
+    for (const { chatId, task } of captured) {
+      const text = textBuilder(task);
+      if (!text) continue;
+      await telegram.sendMessage({ chat_id: chatId, text });
+    }
+  }
+
+  async function replayInterruptedTurnsAfterRecovery() {
+    codexBackendRecoveryBypassDepth += 1;
+    try {
+      for (const [chatId, rt] of runtimeByChat.entries()) {
+        const replayTask = rt.authRecoveryReplayTask;
+        if (!replayTask) continue;
+        rt.authRecoveryReplayTask = null;
+        const session = getOrCreateSession(chatId);
+        const replayNotice = isCompactionTurnKind(replayTask.kind)
+          ? "认证恢复完成，继续刚才被中断的上下文压缩。"
+          : "认证恢复完成，正在自动重试刚才被中断的输入。";
+        await telegram.sendMessage({ chat_id: chatId, text: replayNotice });
+        try {
+          await startOrSteerTurn({
+            chatId,
+            session,
+            text: replayTask.text,
+            attemptedProfileIds: replayTask.attemptedProfileIds || null,
+            kind: replayTask.kind || "user",
+            silent: Boolean(replayTask.silent),
+            contextRetryCount: Number(replayTask.contextRetryCount || 0),
+            authReplayCount: Number(replayTask.authReplayCount || 0),
+            skipBackendRecoveryWait: true,
+          });
+        } catch (err) {
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: `自动续跑失败：${truncateMiddle(err.message || String(err), 1200)}`,
+          });
+        }
+      }
+    } finally {
+      codexBackendRecoveryBypassDepth = Math.max(0, codexBackendRecoveryBypassDepth - 1);
+    }
+  }
+
+  async function recoverCodexBackendFromAuthFailure(event) {
+    const reason = event?.reason || "Codex backend auth failure";
+    const currentProfile = getCurrentAccountProfile();
+    if (currentProfile) {
+      markProfileForRecoveryError(currentProfile, { message: reason });
+    }
+    markCodexBackendRecovering(reason);
+    const captured = captureInterruptedTurnsForRecovery();
+
+    if (!autoAccountFailover || accountProfiles.length < 2) {
+      markCodexBackendRecoveryFailed("Auth watchdog fired, but no spare Codex account is configured.");
+      clearAllQueuedAuthRecoveryTasks();
+      await notifyInterruptedTurns(
+        captured,
+        () => "当前 Codex 账号认证已失效，但没有可切换的备用账号；刚才中断的输入没有自动续跑。",
+      );
+      return false;
+    }
+
+    const attempted = new Set(currentProfile?.profileId ? [currentProfile.profileId] : []);
+    const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
+    if (!fallbackProfiles.length) {
+      markCodexBackendRecoveryFailed("Auth watchdog fired, but every spare account is temporarily blocked.");
+      clearAllQueuedAuthRecoveryTasks();
+      await notifyInterruptedTurns(
+        captured,
+        () => "当前 Codex 账号认证已失效，且暂时没有可用的备用账号；刚才中断的输入没有自动续跑。",
+      );
+      return false;
+    }
+
+    if (captured.some(({ task }) => task?.text)) {
+      await notifyInterruptedTurns(
+        captured,
+        (task) => (task?.text
+          ? "检测到当前 Codex 账号后台认证已失效，正在自动切到下一号，并在恢复后把刚才中断的输入续跑一次。"
+          : null),
+      );
+    }
+
+    setGlobalFailoverState(true);
+    try {
+      for (const nextProfile of fallbackProfiles) {
+        try {
+          await switchAccountProfile(nextProfile, {
+            allowActiveTurns: true,
+            revertOnFailure: false,
+          });
+          recordCodexBackendHealthy({ recoveredProfileId: nextProfile.profileId });
+          await replayInterruptedTurnsAfterRecovery();
+          return true;
+        } catch (err) {
+          recordCodexBackendFailure(extractCodexErrorText(err), {
+            auth: isAccountAuthFailure(err),
+            state: "recovering",
+          });
+        }
+      }
+    } finally {
+      setGlobalFailoverState(false);
+    }
+
+    markCodexBackendRecoveryFailed("Every spare Codex account failed its recovery health check.");
+    clearAllQueuedAuthRecoveryTasks();
+    await notifyInterruptedTurns(
+      captured,
+      () => "当前 Codex 账号认证已失效，备用账号也没能通过恢复健康检查；刚才中断的输入没有自动续跑。",
+    );
+    return false;
+  }
+
+  function queueCodexBackendRecovery(event) {
+    const reason = event?.reason || "Codex backend auth failure";
+    recordCodexBackendFailure(reason, {
+      auth: true,
+      code: event?.code ?? null,
+      signal: event?.signal ?? null,
+      state: codexBackendRecoveryPromise ? "recovering" : "unhealthy",
+    });
+    if (codexBackendTransitionDepth > 0) return codexBackendRecoveryPromise;
+    if (codexBackendRecoveryPromise) return codexBackendRecoveryPromise;
+    codexBackendRecoveryPromise = recoverCodexBackendFromAuthFailure(event)
+      .catch((err) => {
+        markCodexBackendRecoveryFailed(err.message || String(err));
+        console.error("Codex backend auth recovery failed:", err);
+        return false;
+      })
+      .finally(() => {
+        codexBackendRecoveryPromise = null;
+      });
+    return codexBackendRecoveryPromise;
+  }
+
+  async function ensureCodexBackendRecovered(event) {
+    const promise = queueCodexBackendRecovery(event);
+    if (!promise) {
+      await waitForCodexBackendRecovery();
+      return Boolean(codex);
+    }
+    const recovered = await promise.catch(() => false);
+    return Boolean(recovered && codex);
+  }
+
+  async function switchAccountProfile(profile, {
+    allowActiveTurns = false,
+    revertOnFailure = true,
+  } = {}) {
     if (!profile) throw new Error("Unknown account profile");
-    if (hasActiveTurns()) {
+    if (!allowActiveTurns && hasActiveTurns()) {
       throw new Error("A turn is still running. Wait for it to finish or use /stop first.");
     }
 
     stopTypingForAllChats();
-    writeAuthForProfile(profile);
-    store.data.bridge.currentAccountProfileId = profile.profileId;
-    store.markDirty();
-    store.save();
-
-    if (codex) codex.stop();
-    await startCodexServer();
-    return profile;
+    const previousProfile = getCurrentAccountProfile();
+    const previousAuth = readCodexAuth(runtimeAuthPath);
+    codexBackendTransitionDepth += 1;
+    try {
+      writeAuthForProfile(profile);
+      if (codex) codex.stop({ expected: true });
+      await startCodexServer();
+      await verifySwitchedAccount(profile);
+      reconcileRuntimeAccountBinding({ expectedProfile: profile, strict: true });
+      store.data.bridge.currentAccountProfileId = profile.profileId;
+      markAccountProfileHealthy(profile);
+      recordCodexBackendHealthy();
+      store.markDirty();
+      store.save();
+      return profile;
+    } catch (err) {
+      const authFailure = isAccountAuthFailure(err);
+      if (authFailure) {
+        markAccountProfileUnhealthy(profile, extractCodexErrorText(err));
+      }
+      recordCodexBackendFailure(extractCodexErrorText(err), {
+        auth: authFailure,
+        state: revertOnFailure ? "recovering" : "unhealthy",
+      });
+      if (revertOnFailure && previousAuth) {
+        fs.writeFileSync(runtimeAuthPath, JSON.stringify(previousAuth, null, 2));
+        if (codex) codex.stop({ expected: true });
+        try {
+          await startCodexServer();
+          recordCodexBackendHealthy();
+        } catch (restoreErr) {
+          codex = null;
+          recordCodexBackendFailure(restoreErr.message || String(restoreErr), {
+            auth: isAccountAuthFailure(restoreErr),
+          });
+        }
+        if (previousProfile?.profileId) {
+          store.data.bridge.currentAccountProfileId = previousProfile.profileId;
+        }
+      } else {
+        if (codex) codex.stop({ expected: true });
+        codex = null;
+      }
+      store.markDirty();
+      store.saveThrottled();
+      throw err;
+    } finally {
+      codexBackendTransitionDepth = Math.max(0, codexBackendTransitionDepth - 1);
+    }
   }
 
   function stopTypingForAllChats() {
@@ -1703,7 +3599,7 @@ async function main() {
 
   function buildMenuPayload(session, rt) {
     const page = getMenuPage(rt);
-    const meta = buildAccountMeta();
+    const meta = { ...buildAccountMeta(), autoCompact };
     return {
       text: buildMenuText(session, rt, page, meta),
       reply_markup: buildMenuKeyboard(page, meta),
@@ -1730,6 +3626,54 @@ async function main() {
     });
   }
 
+  async function startFreshThread(session, chatId, {
+    announceText = (threadId) => `Started new thread: ${threadId}`,
+    useFailover = true,
+  } = {}) {
+    const run = async () => {
+        const started = await codex.request("thread/start", {
+          cwd: session.cwd,
+          model: session.model,
+          personality: session.personality,
+          approvalPolicy: session.approvalPolicy,
+          sandbox: session.sandboxMode,
+        });
+        const threadId = started?.thread?.id || started?.threadId || started?.thread?.threadId;
+        if (!threadId) throw new Error("thread/start did not return a thread id");
+        session.threadId = threadId;
+        clearSessionContextTracking(session, { clearSummary: false, clearHistory: false });
+        const rt = getRuntime(chatId);
+        rt.activeTurnId = null;
+        rt.pendingInputMeta = null;
+        rt.turnInputMetaByTurnId = {};
+        rt.items = {};
+        rt.turnDiffByTurnId = {};
+        rt.lastAgentMessageIdByTurnId = {};
+        rt.groupAgentMessageByTurnId = {};
+        rt.lastGroupProgressByBucket = {};
+        rt.sentGroupVisibleTexts = new Set();
+        session.updatedAt = nowIso();
+        store.markDirty();
+        store.saveThrottled();
+
+        if (announceText) {
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: announceText(threadId),
+            disable_web_page_preview: true,
+          });
+        }
+
+        return threadId;
+      };
+    if (!useFailover) return run();
+    return requestWithAccountFailover({
+      chatId,
+      failureLabel: "thread setup",
+      run,
+    });
+  }
+
   const initialAccountProfile = resolveInitialAccountProfile();
   if (initialAccountProfile) {
     writeAuthForProfile(initialAccountProfile);
@@ -1741,6 +3685,7 @@ async function main() {
   }
 
   await startCodexServer();
+  await ensureHealthyStartupAccount();
 
   async function notifyUnauthorizedChat(chatId) {
     if (unauthorizedNotified.has(chatId)) return;
@@ -1759,11 +3704,11 @@ async function main() {
   }
 
   async function ensureThread(session, chatId) {
-    return requestWithAccountFailover({
-      chatId,
-      failureLabel: "thread setup",
-      run: async () => {
-        if (session.threadId) {
+    if (session.threadId) {
+      return requestWithAccountFailover({
+        chatId,
+        failureLabel: "thread setup",
+        run: async () => {
           try {
             await codex.request("thread/resume", {
               threadId: session.threadId,
@@ -1776,41 +3721,49 @@ async function main() {
             return session.threadId;
           } catch (err) {
             if (isAccountFailoverError(err)) throw err;
+            if (isLikelyContextRequestError(err, session)) {
+              throw err;
+            }
             console.warn("thread/resume failed, starting new thread:", err.message);
             session.threadId = null;
           }
-        }
-
-        const started = await codex.request("thread/start", {
-          cwd: session.cwd,
-          model: session.model,
-          personality: session.personality,
-          approvalPolicy: session.approvalPolicy,
-          sandbox: session.sandboxMode,
-        });
-        const threadId = started?.thread?.id || started?.threadId || started?.thread?.threadId;
-        if (!threadId) throw new Error("thread/start did not return a thread id");
-        session.threadId = threadId;
-        const rt = getRuntime(chatId);
-        rt.activeTurnId = null;
-        rt.items = {};
-        rt.turnDiffByTurnId = {};
-        session.updatedAt = nowIso();
-        store.markDirty();
-        store.saveThrottled();
-
-        await telegram.sendMessage({
-          chat_id: chatId,
-          text: `Started new thread: ${threadId}`,
-          disable_web_page_preview: true,
-        });
-
-        return threadId;
-      },
-    });
+          return startFreshThread(session, chatId, { useFailover: false });
+        },
+      });
+    }
+    return startFreshThread(session, chatId);
   }
 
-  async function startOrSteerTurn({ chatId, session, text, attemptedProfileIds = null }) {
+  async function maybeStartQueuedTask({ chatId, session }) {
+    const rt = getRuntime(chatId);
+    if (isChatBusy(rt)) return false;
+    const nextTask = shiftPendingTask(rt);
+    if (!nextTask) return false;
+
+    const remaining = getQueuedTaskCount(rt);
+    const suffix = remaining > 0 ? `，后面还剩 ${remaining} 条` : "";
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: `开始处理排队中的下一条任务${suffix}。`,
+    });
+    await startOrSteerTurn({ chatId, session, text: nextTask.text });
+    return true;
+  }
+
+  async function startOrSteerTurn({
+    chatId,
+    session,
+    text,
+    attemptedProfileIds = null,
+    kind = "user",
+    silent = false,
+    contextRetryCount = 0,
+    authReplayCount = 0,
+    skipBackendRecoveryWait = false,
+  }) {
+    if (!skipBackendRecoveryWait) {
+      await waitForCodexBackendRecovery();
+    }
     const rt = getRuntime(chatId);
     const currentProfile = getCurrentAccountProfile();
     rt.pendingInputMeta = {
@@ -1819,23 +3772,95 @@ async function main() {
         ...(attemptedProfileIds || []),
         currentProfile?.profileId || null,
       ]),
+      kind,
+      silent,
+      contextRetryCount,
+      authReplayCount,
     };
 
     try {
+      if (rt.compactionInProgress && !isCompactionTurnKind(kind)) {
+        rt.pendingInputMeta = null;
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: "正在压缩上下文，请稍后再发这条消息。",
+        });
+        return;
+      }
+
+      const autoReason = kind === "user" ? shouldAutoCompact(session, rt) : null;
+      if (kind === "user" && autoReason === "emergency" && rt.activeTurnId) {
+        rt.pendingInputMeta = null;
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: isGroupChat(chatId)
+            ? "上下文已接近窗口上限，本轮结束后会先自动压缩，暂不接收新任务。"
+            : "当前上下文已接近窗口上限，本轮结束后会优先自动压缩，请稍后再发消息。",
+        });
+        return;
+      }
+
+      if (kind === "user" && autoReason && !rt.activeTurnId) {
+        rt.pendingInputMeta = null;
+        const started = await startCompaction({
+          chatId,
+          session,
+          mode: "auto",
+          reason: autoReason,
+          allowQueuedTasks: true,
+        });
+        if (!started) {
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: "自动压缩没有成功启动，请稍后重试 /compact 或直接再发一次消息。",
+          });
+        }
+        return;
+      }
+
+      if (isGroupChat(chatId) && isChatBusy(rt) && !isCompactionTurnKind(kind)) {
+        const { position } = enqueuePendingTask(rt, text);
+        rt.pendingInputMeta = null;
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: position === 1
+            ? "当前任务还在进行中，新任务已进入队列（第 1 条待处理）。如果你想改方向，请先发 /stop，再发新任务。"
+            : `当前任务还在进行中，新任务已进入队列（第 ${position} 条待处理）。如果你想改方向，请先发 /stop，再发新任务。`,
+        });
+        return;
+      }
+
       const threadId = await ensureThread(session, chatId);
+      if (threadId === AUTH_RECOVERY_HANDOFF) {
+        return;
+      }
       startTyping(chatId);
 
       if (rt.activeTurnId) {
         rt.turnInputMetaByTurnId[rt.activeTurnId] = { ...rt.pendingInputMeta };
         rt.pendingInputMeta = null;
 
-        await codex.request("turn/steer", {
-          threadId,
-          expectedTurnId: rt.activeTurnId,
-          input: [{ type: "text", text }],
+        const steerResult = await requestWithAccountFailover({
+          chatId,
+          failureLabel: "turn steer",
+          run: async () => codex.request("turn/steer", {
+            threadId,
+            expectedTurnId: rt.activeTurnId,
+            input: [{ type: "text", text }],
+          }),
         });
+        if (steerResult === AUTH_RECOVERY_HANDOFF) {
+          return;
+        }
         await telegram.sendMessage({ chat_id: chatId, text: "Steering active turn…" });
         return;
+      }
+
+      let inputText = text;
+      let appliedSummaryBootstrap = false;
+      if (kind === "user" && session.pendingSummaryBootstrap?.text) {
+        inputText = buildCompactionBootstrapText(session.pendingSummaryBootstrap, text);
+        appliedSummaryBootstrap = true;
       }
 
       rt.items = {};
@@ -1844,28 +3869,60 @@ async function main() {
       store.markDirty();
       store.saveThrottled();
 
-      await requestWithAccountFailover({
+      const startResult = await requestWithAccountFailover({
         chatId,
         failureLabel: "turn start",
-        run: async () => codex.request("turn/start", {
-          threadId,
-          input: [{ type: "text", text }],
-          cwd: session.cwd,
-          model: session.model,
-          effort: session.effort,
-          summary: session.summary,
-          personality: session.personality,
-          approvalPolicy: session.approvalPolicy,
-          sandboxPolicy:
-            session.sandboxMode === "danger-full-access"
-              ? { type: "dangerFullAccess" }
-              : session.sandboxMode === "read-only"
-                ? { type: "readOnly" }
-                : { type: "workspaceWrite" },
-        }),
+        run: async () => {
+          const result = await codex.request("turn/start", {
+            threadId,
+            input: [{ type: "text", text: inputText }],
+            cwd: session.cwd,
+            model: session.model,
+            effort: session.effort,
+            summary: session.summary,
+            personality: session.personality,
+            approvalPolicy: session.approvalPolicy,
+            sandboxPolicy:
+              session.sandboxMode === "danger-full-access"
+                ? { type: "dangerFullAccess" }
+                : session.sandboxMode === "read-only"
+                  ? { type: "readOnly" }
+                  : { type: "workspaceWrite" },
+          });
+          if (appliedSummaryBootstrap) {
+            session.pendingSummaryBootstrap = null;
+            session.updatedAt = nowIso();
+            store.markDirty();
+            store.saveThrottled();
+          }
+          return result;
+        },
       });
+      if (startResult === AUTH_RECOVERY_HANDOFF) {
+        return;
+      }
     } catch (err) {
-      if (rt.pendingInputMeta?.text === text) {
+      const pendingMeta = rt.pendingInputMeta?.text === text ? rt.pendingInputMeta : null;
+      if (
+        kind === "user"
+        && !rt.activeTurnId
+        && isLikelyContextRequestError(err, session)
+        && Number(pendingMeta?.contextRetryCount || contextRetryCount || 0) < 1
+      ) {
+        rt.pendingInputMeta = null;
+        const handled = await retryAfterContextCompaction({
+          chatId,
+          session,
+          rt,
+          text,
+          attemptedProfileIds: pendingMeta?.attemptedProfileIds || attemptedProfileIds || [],
+          contextRetryCount: Number(pendingMeta?.contextRetryCount || contextRetryCount || 0),
+          source: "request_failure",
+          detail: extractCodexErrorText(err),
+        });
+        if (handled) return;
+      }
+      if (pendingMeta) {
         rt.pendingInputMeta = null;
       }
       throw err;
@@ -1874,12 +3931,36 @@ async function main() {
 
   async function interruptTurn({ chatId, session }) {
     const rt = getRuntime(chatId);
-    if (!session.threadId || !rt.activeTurnId) {
-      await telegram.sendMessage({ chat_id: chatId, text: "No active turn." });
+    const clearedCount = clearPendingTasks(rt);
+    if (rt.compactionInProgress && !rt.activeTurnId) {
+      rt.compactionInProgress = false;
+      rt.postCompactionRetryTask = null;
+      const text = clearedCount
+        ? `Compaction was pending. Cleared ${clearedCount} queued task(s).`
+        : "Compaction was pending and is now cancelled.";
+      await telegram.sendMessage({ chat_id: chatId, text });
       return;
     }
-    await codex.request("turn/interrupt", { threadId: session.threadId, turnId: rt.activeTurnId });
-    await telegram.sendMessage({ chat_id: chatId, text: "Interrupt requested." });
+    if (!session.threadId || !rt.activeTurnId) {
+      const text = clearedCount
+        ? `No active turn. Cleared ${clearedCount} queued task(s).`
+        : "No active turn.";
+      await telegram.sendMessage({ chat_id: chatId, text });
+      return;
+    }
+    await requestWithAccountFailover({
+      chatId,
+      failureLabel: "turn interrupt",
+      allowAuthReplayHandoff: false,
+      run: async () => codex.request("turn/interrupt", {
+        threadId: session.threadId,
+        turnId: rt.activeTurnId,
+      }),
+    });
+    const text = clearedCount
+      ? `Interrupt requested. Cleared ${clearedCount} queued task(s).`
+      : "Interrupt requested.";
+    await telegram.sendMessage({ chat_id: chatId, text });
   }
 
   function scheduleEdit({ chatId, messageId, getText, rt, itemId }) {
@@ -1917,15 +3998,31 @@ async function main() {
   }
 
   async function upsertAgentMessage({ chatId, item, rt }) {
-    const buffer = item?.text || rt.items?.[item?.id]?.buffer || "";
     const existing = item?.id ? rt.items?.[item.id] : null;
+    const buffer = typeof item?.text === "string" ? item.text : existing?.buffer || "";
     const groupChat = isGroupChat(chatId);
     const renderedBuffer = groupChat ? sanitizeGroupAgentText(buffer) : buffer;
     const turnId = existing?.turnId || item?.turnId || null;
+    const silent = Boolean(existing?.silent || item?.silent);
 
     if (!renderedBuffer.trim()) {
       if (item?.id && !existing) {
-        rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId };
+        rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId, silent };
+      }
+      return;
+    }
+
+    if (silent) {
+      if (item?.id) {
+        rt.items[item.id] = {
+          ...(existing || {}),
+          kind: "agentMessage",
+          messageId: existing?.messageId || null,
+          buffer,
+          renderedBuffer,
+          turnId,
+          silent: true,
+        };
       }
       return;
     }
@@ -2038,6 +4135,7 @@ async function main() {
     const pending = Object.entries(rt.items || {}).filter(([, entry]) => (
       entry &&
       entry.kind === "agentMessage" &&
+      !entry.silent &&
       entry.buffer &&
       entry.buffer.trim()
     ));
@@ -2057,6 +4155,7 @@ async function main() {
     if (!itemId) return;
     const entry = rt.items?.[itemId];
     if (!entry || entry.kind !== "agentMessage") return;
+    if (entry.silent) return;
 
     const rawText = truncateMiddle(entry.buffer || "", 3900);
     if (!rawText.trim()) return;
@@ -2225,19 +4324,46 @@ async function main() {
       return;
     }
 
+    if (trimmed === "/compact") {
+      await startManualCompaction({ chatId, session });
+      return;
+    }
+
     if (trimmed === "/status") {
       const rt = getRuntime(chatId);
       const meta = buildAccountMeta();
+      const backendHealth = ensureCodexBackendHealthState();
       await telegram.sendMessage({
         chat_id: chatId,
         text: [
           `threadId: ${session.threadId || "(none)"}`,
           `activeTurnId: ${rt.activeTurnId || "(none)"}`,
+          `queuedTasks: ${getQueuedTaskCount(rt)}`,
+          `contextUsage: ${formatContextUsageLine(session)}`,
+          `contextWindow: ${session.contextWindow || "(unknown)"}`,
+          `lastTurnTokens: ${session.lastTurnTokens || "(unknown)"}`,
+          `compactionPending: ${session.compactionPending ? `yes${session.compactionPendingReason ? ` (${session.compactionPendingReason})` : ""}` : "no"}`,
+          `compactionInProgress: ${rt.compactionInProgress ? "yes" : "no"}`,
+          `lastCompactionAt: ${session.lastCompactionAt || "(never)"}`,
+          `compactionGeneration: ${session.compactionGeneration || 0}`,
           `cwd: ${session.cwd}`,
           `model: ${session.model}`,
           `effort: ${session.effort}`,
           `account: ${meta.currentAccountLabel || "(default)"}`,
           `accountFailover: ${meta.autoAccountFailover ? "on" : "off"}`,
+          `runtimeAccountProfileId: ${meta.runtimeAccountProfileId || "(unknown)"}`,
+          `runtimeAccountEmail: ${meta.runtimeAccountEmail || "(unknown)"}`,
+          `runtimeAccountId: ${meta.runtimeAccountId || "(unknown)"}`,
+          `backendRecoveryState: ${backendHealth.state || "starting"}`,
+          `lastBackendAuthError: ${backendHealth.lastAuthFailure || "(none)"}`,
+          `lastRecoveryAttemptAt: ${formatTimestamp(backendHealth.lastRecoveryStartedAt)}`,
+          `lastRecoveryResult: ${backendHealth.lastRecoveryResult || "(none)"}`,
+          `replayQueued: ${rt.authRecoveryReplayTask?.text ? "yes" : "no"}`,
+          `autoCompact: ${autoCompact ? "on" : "off"} (soft ${formatPercent(contextThresholds.soft)}, hard ${formatPercent(contextThresholds.hard)}, emergency ${formatPercent(contextThresholds.emergency)})`,
+          `telegramPolling: ${buildPollingStatusLine()}`,
+          `codexBackend: ${buildCodexBackendStatusLine()}`,
+          `telegramTransport: ${telegram.transportLabel}`,
+          `accountSource: ${meta.accountSourcePath || "(none)"}`,
           `sandbox: ${session.sandboxMode}`,
           `approvalPolicy: ${session.approvalPolicy}`,
           `codexHome: ${codexHome}`,
@@ -2332,6 +4458,17 @@ async function main() {
           return;
         }
 
+        if (actionType === "compact") {
+          const started = await startManualCompaction({ chatId, session });
+          await telegram.answerCallbackQuery({
+            callback_query_id: cbq.id,
+            text: started ? "Compaction started" : "Compaction unavailable",
+            show_alert: false,
+          });
+          await renderMenuMessage(chatId, cbq.message.message_id);
+          return;
+        }
+
         if (actionType === "cwd" && value) {
           session.cwd = value;
           session.updatedAt = nowIso();
@@ -2406,7 +4543,8 @@ async function main() {
 
     for (;;) {
       try {
-        const updates = await telegram.getUpdates({ offset, timeout: 30, allowed_updates });
+        const updates = await telegram.getUpdates({ offset, timeout: pollTimeoutSeconds, allowed_updates });
+        recordTelegramPollSuccess();
         for (const u of updates) {
           offset = u.update_id + 1;
           store.data.telegram.offset = offset;
@@ -2428,7 +4566,22 @@ async function main() {
           }
         }
       } catch (err) {
+        const health = recordTelegramPollError(err);
         console.error("Polling error:", err.message);
+        const stallBaselineMs = Math.max(
+          Number(health.lastPollSuccessAt || 0),
+          processStartedAt,
+        );
+        const stalledMs = Math.max(0, Date.now() - stallBaselineMs);
+        if (
+          health.consecutivePollErrors >= TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD
+          && stalledMs >= TELEGRAM_POLLING_STALL_THRESHOLD_MS
+        ) {
+          await requestSupervisorRestart(
+            `Telegram polling stalled for ${Math.round(stalledMs / 1000)}s after ${health.consecutivePollErrors} consecutive errors`,
+          );
+          return;
+        }
         await sleep(2000);
       }
     }
@@ -2441,7 +4594,28 @@ async function main() {
   await pollingLoop();
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+module.exports = {
+  _test: {
+    DEFAULT_CONTEXT_SOFT_RATIO,
+    DEFAULT_CONTEXT_HARD_RATIO,
+    DEFAULT_CONTEXT_EMERGENCY_RATIO,
+    classifyContextUsageRatio,
+    extractContextUsageSnapshotPayload,
+    applyContextUsageSnapshot,
+    shouldAutoCompactDecision,
+    isContextFailurePatternMatch,
+    shouldTreatTextAsContextFailure,
+    isAccountAuthFailureText,
+    buildAuthRecoveryReplayTask,
+    summarizeCodexBackendHealth,
+    buildCompactionBootstrapText,
+    countQueuedTasks,
+  },
+};
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}
