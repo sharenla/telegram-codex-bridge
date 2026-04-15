@@ -112,6 +112,32 @@ function maskProxyUrl(proxyUrl) {
   }
 }
 
+function redactTelegramBotToken(text) {
+  if (!text) return text;
+  return String(text).replace(
+    /https:\/\/api\.telegram\.org\/bot[^/\s]+/g,
+    "https://api.telegram.org/bot<redacted>",
+  );
+}
+
+function formatCurlTransportError(error, stderr, { timeoutMs = 0 } = {}) {
+  const stderrText = stderr ? String(stderr).trim() : "";
+  if (stderrText) return stderrText;
+
+  if (timeoutMs && error?.killed && error?.signal) {
+    return `timed out after ${timeoutMs}ms`;
+  }
+
+  const parts = [];
+  if (typeof error?.code === "number") parts.push(`exit ${error.code}`);
+  else if (typeof error?.code === "string") parts.push(error.code);
+  if (error?.signal) parts.push(`signal ${error.signal}`);
+  if (error?.killed) parts.push("killed");
+
+  if (parts.length) return `curl failed (${parts.join(", ")})`;
+  return "curl failed";
+}
+
 function detectLocalTelegramProxy() {
   for (const candidate of CLASH_CONFIG_CANDIDATES) {
     const text = readTextFile(candidate);
@@ -297,6 +323,77 @@ function parseCsvIds(value) {
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function buildTelegramInstanceLockPath(token) {
+  const hash = crypto.createHash("sha256").update(String(token || "")).digest("hex").slice(0, 12);
+  return path.join(os.tmpdir(), `telegram-codex-bridge.${hash}.lock`);
+}
+
+function isPidRunning(pid) {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+function acquireInstanceLock(lockPath, { label = "instance" } = {}) {
+  const payload = JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    label,
+  }, null, 2);
+
+  try {
+    fs.writeFileSync(lockPath, payload, { flag: "wx" });
+  } catch (err) {
+    if (err?.code !== "EEXIST") throw err;
+
+    const existingText = readTextFile(lockPath);
+    const existing = existingText ? safeJsonParse(existingText) : null;
+    const existingPid = Number(existing?.pid || 0);
+
+    if (existingPid && isPidRunning(existingPid)) {
+      const startedAt = typeof existing?.startedAt === "string" ? existing.startedAt : null;
+      const details = startedAt ? ` (started ${startedAt})` : "";
+      const lockErr = new Error(
+        `Another ${label} is already running (pid ${existingPid}${details}). Stop it before starting a second instance.\nLock: ${lockPath}`,
+      );
+      lockErr.code = "INSTANCE_LOCKED";
+      throw lockErr;
+    }
+
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {
+      // ignore stale lock cleanup errors
+    }
+
+    fs.writeFileSync(lockPath, payload, { flag: "wx" });
+  }
+
+  const cleanup = () => {
+    try {
+      fs.unlinkSync(lockPath);
+    } catch {
+      // ignore
+    }
+  };
+
+  process.once("exit", cleanup);
+  process.once("SIGINT", () => {
+    cleanup();
+    process.exit(130);
+  });
+  process.once("SIGTERM", () => {
+    cleanup();
+    process.exit(143);
+  });
+
+  return { lockPath, cleanup };
 }
 
 function atomicWriteJson(filePath, data) {
@@ -637,8 +734,8 @@ class TelegramApi {
         maxBuffer: 1024 * 1024,
       }, (error, out, stderr) => {
         if (error) {
-          const message = stderr ? String(stderr).trim() : error.message;
-          reject(new Error(`Telegram API ${method} transport failed: ${message}`));
+          const message = redactTelegramBotToken(formatCurlTransportError(error, stderr, { timeoutMs: childTimeoutMs }));
+          reject(new Error(`Telegram API ${method} transport failed (${this.transportLabel}): ${message}`));
           return;
         }
         resolve(out);
@@ -1442,6 +1539,15 @@ async function main() {
   const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   if (!BOT_TOKEN) {
     console.error("Missing TELEGRAM_BOT_TOKEN");
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    const lockPath = resolveUserPath(process.env.TELEGRAM_INSTANCE_LOCK_PATH || "") || buildTelegramInstanceLockPath(BOT_TOKEN);
+    acquireInstanceLock(lockPath, { label: "telegram-codex-bridge instance" });
+  } catch (err) {
+    console.error(err?.message || err);
     process.exitCode = 1;
     return;
   }
