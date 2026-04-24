@@ -108,12 +108,15 @@ codex app-server --listen stdio://
 - `/stop`：中断当前 turn；在群聊里还会清空已排队的新任务
 - `/cwd /abs/path`：切换工作目录
 - `/project /abs/path`：切换项目并重置 thread
-- `/models`：查看推荐模型
-- `/model gpt-5.4-mini`：切模型
+- `/models`：查看推荐模型；内置快捷别名 `5.2 / 5.4 / 5.5`
+- `/model 5.4`：切模型（会保存成 `gpt-5.4`）
+- `/model 5.5 xhigh`：同时切模型和思考等级
 - `/efforts`：查看思考级别
 - `/effort xhigh`：切换思考强度
+- `/think medium`：`/effort` 的别名
 - `/accounts`：查看账号池
 - `/account 2`：切到第 2 个账号
+- `/authsync`：从账号池同步最新认证并重启 Codex 后端（常用于 token 失效/断流后自救）
 - `/answer <token> ...`：回答需要输入的问题
 
 ### 群聊行为
@@ -160,6 +163,18 @@ TELEGRAM_POLL_TIMEOUT_SECONDS=5
 
 ```bash
 TELEGRAM_PROXY_URL=direct
+```
+
+### Codex 网络 / 代理
+
+注意：`TELEGRAM_PROXY_URL` 只影响 Telegram，不影响 Codex（`codex app-server`）。
+
+如果 chatgpt.com 在你当前网络环境里不稳定 / 断流 / 被阻断，可以让 Codex 也走本机代理（环境变量会被 bridge 继承）：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:1082
+# or:
+ALL_PROXY=socks5h://127.0.0.1:1082
 ```
 
 ### 多机器注意事项
@@ -294,12 +309,15 @@ codex app-server --listen stdio://
 - `/stop`: interrupt the current turn; in groups it also clears queued follow-up tasks
 - `/cwd /abs/path`: switch working directory
 - `/project /abs/path`: switch project and reset the thread
-- `/models`: show recommended models
-- `/model gpt-5.4-mini`: switch model
+- `/models`: show recommended models; built-in short aliases are `5.2 / 5.4 / 5.5`
+- `/model 5.4`: switch model (stored as `gpt-5.4`)
+- `/model 5.5 xhigh`: switch model and reasoning effort together
 - `/efforts`: show reasoning-effort options
 - `/effort xhigh`: raise reasoning effort
+- `/think medium`: alias for `/effort`
 - `/accounts`: show account pool
 - `/account 2`: switch to account #2
+- `/authsync`: resync latest auth from account pool and restart the Codex backend (useful after token drift/stream disconnect)
 - `/answer <token> ...`: answer an input request
 
 ### Group behavior
@@ -346,6 +364,18 @@ TELEGRAM_POLL_TIMEOUT_SECONDS=5
 
 ```bash
 TELEGRAM_PROXY_URL=direct
+```
+
+### Codex upstream proxy
+
+Note: `TELEGRAM_PROXY_URL` only affects Telegram. It does not affect Codex (`codex app-server`).
+
+If chatgpt.com is flaky/blocked on your network, set an upstream proxy so the spawned `codex app-server` inherits it:
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:1082
+# or:
+ALL_PROXY=socks5h://127.0.0.1:1082
 ```
 
 ### Multi-machine note

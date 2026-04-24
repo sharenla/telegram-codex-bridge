@@ -134,3 +134,62 @@ test("countQueuedTasks returns pending task length", () => {
   assert.equal(_test.countQueuedTasks({ pendingTasks: [{}, {}, {}] }), 3);
   assert.equal(_test.countQueuedTasks({ pendingTasks: null }), 0);
 });
+
+test("normalizeModelId maps short GPT 5 aliases to Codex model ids", () => {
+  assert.equal(_test.normalizeModelId("5.2"), "gpt-5.2");
+  assert.equal(_test.normalizeModelId("5.4"), "gpt-5.4");
+  assert.equal(_test.normalizeModelId("5.5"), "gpt-5.5");
+  assert.equal(_test.normalizeModelId("custom-model"), "custom-model");
+});
+
+test("normalizeEffortLevel accepts canonical levels and common aliases", () => {
+  assert.equal(_test.normalizeEffortLevel("medium"), "medium");
+  assert.equal(_test.normalizeEffortLevel("x-high"), "xhigh");
+  assert.equal(_test.normalizeEffortLevel("max"), "xhigh");
+  assert.equal(_test.normalizeEffortLevel("invalid"), null);
+});
+
+test("parseModelCommandArgs can set model and effort together", () => {
+  assert.deepEqual(_test.parseModelCommandArgs("5.4 xhigh"), {
+    model: "gpt-5.4",
+    effort: "xhigh",
+    error: null,
+  });
+});
+
+test("parseModelCommandArgs rejects invalid effort", () => {
+  const parsed = _test.parseModelCommandArgs("5.5 impossible");
+  assert.equal(parsed.model, null);
+  assert.equal(parsed.effort, null);
+  assert.match(parsed.error, /Invalid effort/);
+});
+
+test("resolveAgentMessageTurnId falls back to active turn when event turnId is missing", () => {
+  assert.equal(
+    _test.resolveAgentMessageTurnId({
+      explicitTurnId: null,
+      existingTurnId: null,
+      rt: { activeTurnId: "turn-active" },
+    }),
+    "turn-active",
+  );
+});
+
+test("resolveAgentMessageTurnId keeps existing turn binding over active turn", () => {
+  assert.equal(
+    _test.resolveAgentMessageTurnId({
+      explicitTurnId: null,
+      existingTurnId: "turn-existing",
+      rt: { activeTurnId: "turn-active" },
+    }),
+    "turn-existing",
+  );
+});
+
+test("shouldRetryTelegramMethod keeps sendMessage at-most-once", () => {
+  assert.equal(_test.shouldRetryTelegramMethod("sendMessage"), false);
+});
+
+test("shouldRetryTelegramMethod still retries getUpdates", () => {
+  assert.equal(_test.shouldRetryTelegramMethod("getUpdates"), true);
+});

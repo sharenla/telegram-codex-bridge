@@ -12,9 +12,15 @@ const { setTimeout: sleep } = require("node:timers/promises");
 require("dotenv").config();
 
 const argv = new Set(process.argv.slice(2));
-const VALID_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
-const QUICK_MODELS = ["gpt-5.4", "gpt-5.4-mini"];
-const QUICK_EFFORTS = ["high", "xhigh"];
+const EFFORT_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh"];
+const VALID_EFFORTS = new Set(EFFORT_LEVELS);
+const RECOMMENDED_MODELS = [
+  { id: "gpt-5.2", aliases: ["5.2"], description: "stable coding default" },
+  { id: "gpt-5.4", aliases: ["5.4"], description: "stronger general coding model" },
+  { id: "gpt-5.5", aliases: ["5.5"], description: "newer/highest tier option" },
+];
+const QUICK_MODELS = RECOMMENDED_MODELS.map((model) => model.id);
+const QUICK_EFFORTS = ["low", "medium", "high", "xhigh"];
 const DEFAULT_CONTEXT_SOFT_RATIO = 0.70;
 const DEFAULT_CONTEXT_HARD_RATIO = 0.82;
 const DEFAULT_CONTEXT_EMERGENCY_RATIO = 0.90;
@@ -79,6 +85,13 @@ const ACCOUNT_LIMIT_COOLDOWN_MS = 60 * 60 * 1000;
 const TELEGRAM_POLLING_STALL_THRESHOLD_MS = 3 * 60 * 1000;
 const TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD = 6;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 5;
+const TELEGRAM_RETRYABLE_METHODS = new Set([
+  "getUpdates",
+  "getMe",
+  "sendChatAction",
+  "editMessageText",
+  "answerCallbackQuery",
+]);
 const AUTH_RECOVERY_HANDOFF = Symbol("AUTH_RECOVERY_HANDOFF");
 const CLASH_CONFIG_CANDIDATES = [
   path.join(os.homedir(), "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
@@ -118,6 +131,10 @@ function redactTelegramBotToken(text) {
     /https:\/\/api\.telegram\.org\/bot[^/\s]+/g,
     "https://api.telegram.org/bot<redacted>",
   );
+}
+
+function shouldRetryTelegramMethod(method) {
+  return TELEGRAM_RETRYABLE_METHODS.has(String(method || ""));
 }
 
 function formatCurlTransportError(error, stderr, { timeoutMs = 0 } = {}) {
@@ -458,6 +475,10 @@ function normalizeIncomingText(text, botUsername) {
   return source.replace(mentionPattern, "").replace(/\s{2,}/g, " ").trim();
 }
 
+function resolveAgentMessageTurnId({ explicitTurnId = null, existingTurnId = null, rt = null } = {}) {
+  return existingTurnId || explicitTurnId || rt?.activeTurnId || null;
+}
+
 function isReplyToBot(message, botId) {
   return Number(message?.reply_to_message?.from?.id) === Number(botId);
 }
@@ -689,7 +710,8 @@ class TelegramApi {
           message.includes("SSL_ERROR_SYSCALL") ||
           message.includes("timed out") ||
           message.includes("Connect Timeout");
-        if (!isTransient || attempt === 4) throw error;
+        const retryableMethod = shouldRetryTelegramMethod(method);
+        if (!isTransient || !retryableMethod || attempt === 4) throw error;
         console.warn(`Telegram API ${method} retry ${attempt}/4 after transient error: ${message}`);
         await sleep(500 * attempt);
       }
@@ -1029,6 +1051,71 @@ function countQueuedTasks(rt) {
   return Array.isArray(rt?.pendingTasks) ? rt.pendingTasks.length : 0;
 }
 
+function chunkArray(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function normalizeModelId(input) {
+  const trimmed = String(input || "").trim();
+  if (!trimmed) return null;
+  const lowered = trimmed.toLowerCase();
+  const recommended = RECOMMENDED_MODELS.find((model) => (
+    model.id.toLowerCase() === lowered ||
+    model.aliases.some((alias) => alias.toLowerCase() === lowered)
+  ));
+  return recommended?.id || trimmed;
+}
+
+function normalizeEffortLevel(input) {
+  const trimmed = String(input || "").trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.toLowerCase().replace(/_/g, "-");
+  const aliases = {
+    min: "minimal",
+    minimum: "minimal",
+    med: "medium",
+    mid: "medium",
+    "x-high": "xhigh",
+    "extra-high": "xhigh",
+    max: "xhigh",
+    maximum: "xhigh",
+    off: "none",
+    no: "none",
+  };
+  const canonical = aliases[normalized] || normalized;
+  return VALID_EFFORTS.has(canonical) ? canonical : null;
+}
+
+function parseModelCommandArgs(rawArgs) {
+  const parts = String(rawArgs || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) {
+    return { model: null, effort: null, error: null };
+  }
+  if (parts.length > 2) {
+    return {
+      model: null,
+      effort: null,
+      error: "Usage: /model <5.2|5.4|5.5|model-id> [effort]",
+    };
+  }
+
+  const model = normalizeModelId(parts[0]);
+  const effort = parts[1] ? normalizeEffortLevel(parts[1]) : null;
+  if (parts[1] && !effort) {
+    return {
+      model: null,
+      effort: null,
+      error: `Invalid effort. Use one of: ${EFFORT_LEVELS.join(", ")}`,
+    };
+  }
+
+  return { model, effort, error: null };
+}
+
 function formatPercent(ratio) {
   if (!Number.isFinite(ratio)) return "(unknown)";
   return `${(ratio * 100).toFixed(1)}%`;
@@ -1111,6 +1198,22 @@ function shouldTreatTextAsContextFailure(text, compactionPendingReason = null) {
 function isAccountAuthFailureText(text) {
   if (!text) return false;
   return ACCOUNT_AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(String(text)));
+}
+
+function isRemoteCompactTransportFailureText(text) {
+  if (!text) return false;
+  const normalized = String(text);
+  if (!/codex\/responses\/compact/i.test(normalized)) return false;
+  return /stream disconnected|error sending request|connection|timed out|timeout|eof/i.test(normalized);
+}
+
+function buildRemoteCompactFailureHint({ hasSpareAccounts = false } = {}) {
+  const actions = [];
+  actions.push("`/authsync`");
+  if (hasSpareAccounts) actions.push("`/accounts` 后用 `/account` 切号");
+  actions.push("重启 bridge");
+  actions.push("给 Codex 配 `HTTPS_PROXY`/`ALL_PROXY`");
+  return `提示：这看起来是 Codex 远端 compact 请求断流。可尝试：${actions.join("；")}。`;
 }
 
 function buildAuthRecoveryReplayTask(inputMeta, source = "auth_failure", createdAt = nowIso()) {
@@ -1258,12 +1361,14 @@ function buildHelpText() {
     "Telegram Codex Bridge commands:",
     "/new - start a new Codex thread",
     "/compact - compact the current thread into a fresh thread",
+    "/authsync - resync Codex auth & restart backend",
     "/status - show current thread/turn",
     "/cwd <path> - set working dir for this chat",
     "/project <path> - set cwd and start a fresh thread",
-    "/model <id> - set model for this chat",
+    "/model <5.2|5.4|5.5|id> [effort] - set model, optionally with reasoning effort",
     "/effort <none|minimal|low|medium|high|xhigh> - set reasoning effort",
-    "/models - show recommended model ids",
+    "/think <none|minimal|low|medium|high|xhigh> - alias for /effort",
+    "/models - show recommended model ids and aliases",
     "/efforts - show reasoning effort options",
     "/accounts - show available Codex accounts",
     "/account <id|index> - switch Codex account without dropping the thread",
@@ -1280,23 +1385,31 @@ function buildHelpText() {
 }
 
 function buildModelsText() {
-  return [
+  const lines = [
     "Recommended models:",
-    "gpt-5.4 - strongest general coding model",
-    "gpt-5.4-mini - lighter/faster, cheaper",
+    ...RECOMMENDED_MODELS.map((model) => {
+      const aliasText = model.aliases.length ? ` (alias: ${model.aliases.join(", ")})` : "";
+      return `${model.id}${aliasText} - ${model.description}`;
+    }),
     "",
-    "Use: /model <id>",
-    "Example: /model gpt-5.4-mini",
-  ].join("\n");
+    "Custom model IDs are still accepted.",
+    "Use: /model <id> [effort]",
+    "Examples:",
+    "/model 5.4",
+    "/model 5.5 xhigh",
+  ];
+  return lines.join("\n");
 }
 
 function buildEffortsText() {
   return [
     "Reasoning effort options:",
-    "none, minimal, low, medium, high, xhigh",
+    EFFORT_LEVELS.join(", "),
     "",
-    "Use: /effort <level>",
-    "Example: /effort xhigh",
+    "Use: /effort <level> or /think <level>",
+    "Examples:",
+    "/effort xhigh",
+    "/think medium",
   ].join("\n");
 }
 
@@ -1364,9 +1477,10 @@ function buildMenuText(session, rt, page = MENU_PAGES.MAIN, meta = {}) {
   if (page === MENU_PAGES.MODEL) {
     return header.concat([
       "模型与思考级别",
-      "- 模型和 effort 放在同一层",
+      "- 快捷模型：5.2 / 5.4 / 5.5",
       "- 自定义模型继续用 /model <id>",
-      "- 自定义 effort 继续用 /effort <level>",
+      "- 可用 /model 5.4 xhigh 同时切模型和思考等级",
+      "- 自定义 effort 继续用 /effort <level> 或 /think <level>",
     ]).join("\n");
   }
 
@@ -1436,10 +1550,18 @@ function buildMenuKeyboard(page = MENU_PAGES.MAIN, meta = {}) {
   }
 
   if (page === MENU_PAGES.MODEL) {
+    const modelButtons = QUICK_MODELS.map((model) => ({
+      text: `Model ${model.replace(/^gpt-/, "")}`,
+      callback_data: `menu|model|${model}`,
+    }));
+    const effortButtons = QUICK_EFFORTS.map((effort) => ({
+      text: `Effort ${effort}`,
+      callback_data: `menu|effort|${effort}`,
+    }));
     return {
       inline_keyboard: [
-        QUICK_MODELS.map((model) => ({ text: `Model ${model}`, callback_data: `menu|model|${model}` })),
-        QUICK_EFFORTS.map((effort) => ({ text: `Effort ${effort}`, callback_data: `menu|effort|${effort}` })),
+        modelButtons,
+        ...chunkArray(effortButtons, 2),
         [
           { text: "Back", callback_data: `menu|open|${MENU_PAGES.MAIN}` },
           { text: "Refresh", callback_data: "menu|refresh" },
@@ -1765,7 +1887,26 @@ async function main() {
   const authTemplate = readCodexAuth(runtimeAuthPath) || readCodexAuth(fallbackAuthPath);
   const accountsSourceDefault = path.join(os.homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json");
   const accountsSource = process.env.CODEX_ACCOUNTS_SOURCE || (fs.existsSync(accountsSourceDefault) ? accountsSourceDefault : "");
-  const accountProfiles = loadCodexAccountProfiles(accountsSource);
+  let accountProfiles = loadCodexAccountProfiles(accountsSource);
+  let autoAccountFailover = accountProfiles.length > 1
+    && parseBooleanEnv(process.env.CODEX_AUTO_ACCOUNT_FAILOVER, true);
+
+  function reloadAccountProfiles({ reason = "reload", silent = false } = {}) {
+    const previous = accountProfiles;
+    const next = loadCodexAccountProfiles(accountsSource);
+    accountProfiles = next;
+    autoAccountFailover = accountProfiles.length > 1
+      && parseBooleanEnv(process.env.CODEX_AUTO_ACCOUNT_FAILOVER, true);
+
+    if (!silent) {
+      const prevCount = previous?.length || 0;
+      const nextCount = next?.length || 0;
+      const summary = prevCount === nextCount ? `${nextCount}` : `${prevCount} -> ${nextCount}`;
+      console.log(`Reloaded Codex account profiles (${summary}) [${reason}].`);
+    }
+
+    return accountProfiles;
+  }
 
   const defaults = {
     cwd: process.env.CODEX_CWD || process.cwd(),
@@ -1796,8 +1937,6 @@ async function main() {
   console.log(
     `Telegram transport: ${telegram.transportLabel}${telegram.proxySource ? ` (${telegram.proxySource})` : ""}; poll timeout ${pollTimeoutSeconds}s`,
   );
-  const autoAccountFailover = accountProfiles.length > 1
-    && parseBooleanEnv(process.env.CODEX_AUTO_ACCOUNT_FAILOVER, true);
 
   function getAccountHealthMap() {
     if (!store.data.bridge || typeof store.data.bridge !== "object") {
@@ -2794,9 +2933,13 @@ async function main() {
             } else if (!silentTurn) {
               const rawDetail = extractTurnErrorText(turn);
               const detail = isGroupChat(chatId) ? sanitizeGroupAgentText(rawDetail) : rawDetail;
+              const hint = isRemoteCompactTransportFailureText(rawDetail)
+                ? buildRemoteCompactFailureHint({ hasSpareAccounts: autoAccountFailover && accountProfiles.length > 1 })
+                : null;
+              const maxDetailLen = hint ? 900 : 1200;
               const text = detail
-                ? `Turn ${status}: ${truncateMiddle(detail, 1200)}`
-                : `Turn ${status}.`;
+                ? `Turn ${status}: ${truncateMiddle(detail, maxDetailLen)}${hint ? `\n\n${hint}` : ""}`
+                : `Turn ${status}.${hint ? `\n\n${hint}` : ""}`;
               if (!(isGroupChat(chatId) && hasSeenGroupVisibleText(rt, text))) {
                 await telegram.sendMessage({ chat_id: chatId, text });
                 if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
@@ -2849,6 +2992,7 @@ async function main() {
           delete rt.turnInputMetaByTurnId[turn.id];
           delete rt.lastAgentMessageIdByTurnId[turn.id];
           delete rt.groupAgentMessageByTurnId[turn.id];
+          delete rt.groupAgentMessagePendingByTurnId[turn.id];
         }
         return;
       }
@@ -2869,7 +3013,8 @@ async function main() {
         const session = getOrCreateSession(chatId);
         const rt = getRuntime(chatId);
         if (!item || !item.id) return;
-        const silentTurn = isSilentTurn(rt, turnId);
+        const effectiveTurnId = resolveAgentMessageTurnId({ explicitTurnId: turnId, rt });
+        const silentTurn = isSilentTurn(rt, effectiveTurnId);
 
         if (item.type === "commandExecution") {
           if (silentTurn) {
@@ -2933,27 +3078,27 @@ async function main() {
         }
 
         if (item.type === "agentMessage") {
-          if (turnId) rt.lastAgentMessageIdByTurnId[turnId] = item.id;
+          if (effectiveTurnId) rt.lastAgentMessageIdByTurnId[effectiveTurnId] = item.id;
           if (silentTurn) {
             rt.items[item.id] = {
               kind: "agentMessage",
               messageId: null,
               buffer: item.text || "",
               renderedBuffer: item.text || "",
-              turnId: turnId || null,
+              turnId: effectiveTurnId,
               silent: true,
             };
             return;
           }
           if (!rt.items[item.id]) {
-            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
+            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: effectiveTurnId };
           } else {
-            rt.items[item.id].turnId = turnId || rt.items[item.id].turnId || null;
+            rt.items[item.id].turnId = effectiveTurnId || rt.items[item.id].turnId || null;
           }
           if (item.text && item.text.trim()) {
             await upsertAgentMessage({ chatId, item, rt });
           } else {
-            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
+            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: effectiveTurnId };
           }
           return;
         }
@@ -2964,10 +3109,11 @@ async function main() {
         const chatId = chatIdForThread(threadId);
         if (!chatId || !item || !item.id) return;
         const rt = getRuntime(chatId);
-        const silentTurn = isSilentTurn(rt, turnId);
+        const effectiveTurnId = resolveAgentMessageTurnId({ explicitTurnId: turnId, rt });
+        const silentTurn = isSilentTurn(rt, effectiveTurnId);
 
         if (item.type === "agentMessage") {
-          if (turnId) rt.lastAgentMessageIdByTurnId[turnId] = item.id;
+          if (effectiveTurnId) rt.lastAgentMessageIdByTurnId[effectiveTurnId] = item.id;
           if (silentTurn) {
             if (!rt.items[item.id]) {
               rt.items[item.id] = {
@@ -2975,7 +3121,7 @@ async function main() {
                 messageId: null,
                 buffer: item.text || "",
                 renderedBuffer: item.text || "",
-                turnId: turnId || null,
+                turnId: effectiveTurnId,
                 silent: true,
               };
             } else if (typeof item.text === "string" && item.text.trim()) {
@@ -2986,9 +3132,9 @@ async function main() {
             return;
           }
           if (!rt.items[item.id]) {
-            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: turnId || null };
+            rt.items[item.id] = { kind: "agentMessage", messageId: null, buffer: "", renderedBuffer: "", turnId: effectiveTurnId };
           } else {
-            rt.items[item.id].turnId = turnId || rt.items[item.id].turnId || null;
+            rt.items[item.id].turnId = effectiveTurnId || rt.items[item.id].turnId || null;
           }
           await upsertAgentMessage({ chatId, item, rt });
         }
@@ -3000,20 +3146,21 @@ async function main() {
         const chatId = chatIdForThread(threadId);
         if (!chatId) return;
         const rt = getRuntime(chatId);
-        const silentTurn = isSilentTurn(rt, turnId);
+        const effectiveTurnId = resolveAgentMessageTurnId({ explicitTurnId: turnId, rt });
+        const silentTurn = isSilentTurn(rt, effectiveTurnId);
         if (!rt.items?.[itemId]) {
           rt.items[itemId] = {
             kind: "agentMessage",
             messageId: null,
             buffer: "",
             renderedBuffer: "",
-            turnId: turnId || null,
+            turnId: effectiveTurnId,
             silent: silentTurn,
           };
         }
-        if (turnId) {
-          rt.items[itemId].turnId = turnId;
-          rt.lastAgentMessageIdByTurnId[turnId] = itemId;
+        if (effectiveTurnId) {
+          rt.items[itemId].turnId = effectiveTurnId;
+          rt.lastAgentMessageIdByTurnId[effectiveTurnId] = itemId;
         }
         if (silentTurn) rt.items[itemId].silent = true;
         rt.items[itemId].buffer += delta;
@@ -3255,6 +3402,7 @@ async function main() {
       turnInputMetaByTurnId: {},
       lastAgentMessageIdByTurnId: {},
       groupAgentMessageByTurnId: {},
+      groupAgentMessagePendingByTurnId: {},
       items: {},
       turnDiffByTurnId: {},
       postCompactionRetryTask: null,
@@ -3390,6 +3538,70 @@ async function main() {
     return Boolean(getTurnInputMeta(rt, turnId)?.silent);
   }
 
+  async function ensureGroupAgentTurnMessage({ chatId, rt, turnId, text }) {
+    if (!rt || !turnId) return null;
+    if (!rt.groupAgentMessageByTurnId) rt.groupAgentMessageByTurnId = {};
+    if (!rt.groupAgentMessagePendingByTurnId) rt.groupAgentMessagePendingByTurnId = {};
+
+    const existingMessageId = rt.groupAgentMessageByTurnId[turnId] || null;
+    if (existingMessageId) return existingMessageId;
+
+    if (!rt.groupAgentMessagePendingByTurnId[turnId]) {
+      rt.groupAgentMessagePendingByTurnId[turnId] = telegram
+        .sendMessage({ chat_id: chatId, text })
+        .then((sent) => {
+          const messageId = sent?.message_id || null;
+          if (messageId) {
+            rt.groupAgentMessageByTurnId[turnId] = messageId;
+            rememberGroupVisibleText(rt, text);
+          }
+          return messageId;
+        })
+        .finally(() => {
+          delete rt.groupAgentMessagePendingByTurnId[turnId];
+        });
+    }
+
+    return rt.groupAgentMessagePendingByTurnId[turnId];
+  }
+
+  async function ensureAgentItemMessage({ chatId, rt, itemId, entry, text }) {
+    if (!entry) return null;
+    if (entry.messageId) return entry.messageId;
+
+    const pendingText = entry.pendingMessageText || text;
+    if (!entry.pendingMessagePromise) {
+      entry.pendingMessageText = text;
+      entry.pendingMessagePromise = telegram
+        .sendMessage({ chat_id: chatId, text })
+        .then((sent) => {
+          const messageId = sent?.message_id || null;
+          if (messageId) entry.messageId = messageId;
+          return messageId;
+        })
+        .finally(() => {
+          delete entry.pendingMessagePromise;
+          delete entry.pendingMessageText;
+        });
+    }
+
+    const messageId = await entry.pendingMessagePromise;
+    if (
+      messageId
+      && itemId
+      && truncateMiddle(entry.renderedBuffer || "", 3900) !== pendingText
+    ) {
+      scheduleEdit({
+        chatId,
+        messageId,
+        rt,
+        itemId,
+        getText: () => truncateMiddle(entry.renderedBuffer || "", 3900),
+      });
+    }
+    return messageId;
+  }
+
   function extractFinalTurnAgentText(rt, turnId) {
     if (!rt || !turnId) return "";
     const itemId = rt.lastAgentMessageIdByTurnId?.[turnId];
@@ -3420,6 +3632,7 @@ async function main() {
     rt.turnDiffByTurnId = {};
     rt.lastAgentMessageIdByTurnId = {};
     rt.groupAgentMessageByTurnId = {};
+    rt.groupAgentMessagePendingByTurnId = {};
     rt.lastGroupProgressByBucket = {};
     rt.sentGroupVisibleTexts = new Set();
     stopTyping(chatId);
@@ -3463,6 +3676,7 @@ async function main() {
     rt.turnDiffByTurnId = {};
     rt.lastAgentMessageIdByTurnId = {};
     rt.groupAgentMessageByTurnId = {};
+    rt.groupAgentMessagePendingByTurnId = {};
     rt.lastGroupProgressByBucket = {};
     rt.sentGroupVisibleTexts = new Set();
     stopTyping(chatId);
@@ -3535,12 +3749,30 @@ async function main() {
 
   async function recoverCodexBackendFromAuthFailure(event) {
     const reason = event?.reason || "Codex backend auth failure";
+    reloadAccountProfiles({ reason: "auth_failure", silent: true });
     const currentProfile = getCurrentAccountProfile();
     if (currentProfile) {
       markProfileForRecoveryError(currentProfile, { message: reason });
     }
     markCodexBackendRecovering(reason);
     const captured = captureInterruptedTurnsForRecovery();
+
+    if (currentProfile) {
+      try {
+        await switchAccountProfile(currentProfile, {
+          allowActiveTurns: true,
+          revertOnFailure: false,
+        });
+        recordCodexBackendHealthy({ recoveredProfileId: currentProfile.profileId });
+        await replayInterruptedTurnsAfterRecovery();
+        return true;
+      } catch (err) {
+        recordCodexBackendFailure(extractCodexErrorText(err), {
+          auth: isAccountAuthFailure(err),
+          state: "recovering",
+        });
+      }
+    }
 
     if (!autoAccountFailover || accountProfiles.length < 2) {
       markCodexBackendRecoveryFailed("Auth watchdog fired, but no spare Codex account is configured.");
@@ -3645,26 +3877,30 @@ async function main() {
       throw new Error("A turn is still running. Wait for it to finish or use /stop first.");
     }
 
+    reloadAccountProfiles({ reason: "switchAccountProfile", silent: true });
+    const resolvedProfile = profile?.profileId ? findAccountProfile(profile.profileId) : null;
+    const effectiveProfile = resolvedProfile || profile;
+
     stopTypingForAllChats();
     const previousProfile = getCurrentAccountProfile();
     const previousAuth = readCodexAuth(runtimeAuthPath);
     codexBackendTransitionDepth += 1;
     try {
-      writeAuthForProfile(profile);
+      writeAuthForProfile(effectiveProfile);
       if (codex) codex.stop({ expected: true });
       await startCodexServer();
-      await verifySwitchedAccount(profile);
-      reconcileRuntimeAccountBinding({ expectedProfile: profile, strict: true });
-      store.data.bridge.currentAccountProfileId = profile.profileId;
-      markAccountProfileHealthy(profile);
+      await verifySwitchedAccount(effectiveProfile);
+      reconcileRuntimeAccountBinding({ expectedProfile: effectiveProfile, strict: true });
+      store.data.bridge.currentAccountProfileId = effectiveProfile.profileId;
+      markAccountProfileHealthy(effectiveProfile);
       recordCodexBackendHealthy();
       store.markDirty();
       store.save();
-      return profile;
+      return effectiveProfile;
     } catch (err) {
       const authFailure = isAccountAuthFailure(err);
       if (authFailure) {
-        markAccountProfileUnhealthy(profile, extractCodexErrorText(err));
+        markAccountProfileUnhealthy(effectiveProfile, extractCodexErrorText(err));
       }
       recordCodexBackendFailure(extractCodexErrorText(err), {
         auth: authFailure,
@@ -3756,6 +3992,7 @@ async function main() {
         rt.turnDiffByTurnId = {};
         rt.lastAgentMessageIdByTurnId = {};
         rt.groupAgentMessageByTurnId = {};
+        rt.groupAgentMessagePendingByTurnId = {};
         rt.lastGroupProgressByBucket = {};
         rt.sentGroupVisibleTexts = new Set();
         session.updatedAt = nowIso();
@@ -4108,8 +4345,15 @@ async function main() {
     const buffer = typeof item?.text === "string" ? item.text : existing?.buffer || "";
     const groupChat = isGroupChat(chatId);
     const renderedBuffer = groupChat ? sanitizeGroupAgentText(buffer) : buffer;
-    const turnId = existing?.turnId || item?.turnId || null;
+    const turnId = resolveAgentMessageTurnId({
+      explicitTurnId: item?.turnId,
+      existingTurnId: existing?.turnId,
+      rt,
+    });
     const silent = Boolean(existing?.silent || item?.silent);
+    if (turnId && item?.id) {
+      rt.lastAgentMessageIdByTurnId[turnId] = item.id;
+    }
 
     if (!renderedBuffer.trim()) {
       if (item?.id && !existing) {
@@ -4165,10 +4409,18 @@ async function main() {
           getText: () => truncateMiddle(entry.renderedBuffer || "", 3900),
         });
       } else {
-        const sent = await telegram.sendMessage({ chat_id: chatId, text });
-        entry.messageId = sent.message_id;
-        rt.groupAgentMessageByTurnId[turnId] = sent.message_id;
-        rememberGroupVisibleText(rt, text);
+        const ensuredMessageId = await ensureGroupAgentTurnMessage({ chatId, rt, turnId, text });
+        entry.messageId = ensuredMessageId;
+        if (ensuredMessageId) {
+          rt.groupAgentMessageByTurnId[turnId] = ensuredMessageId;
+          scheduleEdit({
+            chatId,
+            messageId: ensuredMessageId,
+            rt,
+            itemId: item.id,
+            getText: () => truncateMiddle(entry.renderedBuffer || "", 3900),
+          });
+        }
       }
       rt.lastGroupProgressByBucket.agentMessage = text;
       return;
@@ -4218,10 +4470,16 @@ async function main() {
         existing.suppressedDuplicate = true;
         return;
       }
-      const sent = await telegram.sendMessage({ chat_id: chatId, text });
-      existing.messageId = sent.message_id;
+      const ensuredMessageId = await ensureAgentItemMessage({
+        chatId,
+        rt,
+        itemId: item?.id || null,
+        entry: existing,
+        text,
+      });
+      existing.messageId = ensuredMessageId;
       existing.suppressedDuplicate = false;
-      if (groupChat) rememberGroupVisibleText(rt, text);
+      if (groupChat && ensuredMessageId) rememberGroupVisibleText(rt, text);
       return;
     }
     scheduleEdit({
@@ -4362,21 +4620,48 @@ async function main() {
       return;
     }
 
-    if (trimmed.startsWith("/model ")) {
-      session.model = trimmed.slice("/model ".length).trim();
-      session.updatedAt = nowIso();
-      store.markDirty();
-      store.saveThrottled();
-      await telegram.sendMessage({ chat_id: chatId, text: `model set to: ${session.model}` });
+    if (trimmed === "/model") {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: [`current model: ${session.model}`, "", buildModelsText()].join("\n"),
+      });
       return;
     }
 
-    if (trimmed.startsWith("/effort ")) {
-      const nextEffort = trimmed.slice("/effort ".length).trim();
-      if (!VALID_EFFORTS.has(nextEffort)) {
+    if (trimmed.startsWith("/model ")) {
+      const parsed = parseModelCommandArgs(trimmed.slice("/model ".length));
+      if (parsed.error || !parsed.model) {
         await telegram.sendMessage({
           chat_id: chatId,
-          text: "Invalid effort. Use one of: none, minimal, low, medium, high, xhigh",
+          text: parsed.error || "Usage: /model <5.2|5.4|5.5|model-id> [effort]",
+        });
+        return;
+      }
+      session.model = parsed.model;
+      if (parsed.effort) session.effort = parsed.effort;
+      session.updatedAt = nowIso();
+      store.markDirty();
+      store.saveThrottled();
+      const effortLine = parsed.effort ? `\neffort set to: ${session.effort}` : "";
+      await telegram.sendMessage({ chat_id: chatId, text: `model set to: ${session.model}${effortLine}` });
+      return;
+    }
+
+    if (trimmed === "/effort" || trimmed === "/think" || trimmed === "/thinking") {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: [`current effort: ${session.effort}`, "", buildEffortsText()].join("\n"),
+      });
+      return;
+    }
+
+    const effortCommand = ["/effort ", "/think ", "/thinking "].find((prefix) => trimmed.startsWith(prefix));
+    if (effortCommand) {
+      const nextEffort = normalizeEffortLevel(trimmed.slice(effortCommand.length));
+      if (!nextEffort) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `Invalid effort. Use one of: ${EFFORT_LEVELS.join(", ")}`,
         });
         return;
       }
@@ -4432,6 +4717,35 @@ async function main() {
 
     if (trimmed === "/compact") {
       await startManualCompaction({ chatId, session });
+      return;
+    }
+
+    if (trimmed === "/authsync") {
+      reloadAccountProfiles({ reason: "/authsync" });
+      const profile = getCurrentAccountProfile();
+      if (!profile) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: "No Codex account profile is available. Check CODEX_ACCOUNTS_SOURCE, or run `codex login` to seed CODEX_HOME/auth.json.",
+        });
+        return;
+      }
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: `Resyncing Codex auth for: ${profile.shortLabel}…`,
+      });
+      try {
+        await switchAccountProfile(profile);
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: "Codex auth resynced and backend restarted.",
+        });
+      } catch (err) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `Auth resync failed: ${truncateMiddle(err.message || String(err), 1200)}`,
+        });
+      }
       return;
     }
 
@@ -4586,21 +4900,26 @@ async function main() {
         }
 
         if (actionType === "model" && value) {
-          session.model = value;
+          session.model = normalizeModelId(value);
           session.updatedAt = nowIso();
           store.markDirty();
           store.saveThrottled();
-          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `model => ${value}`, show_alert: false });
+          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `model => ${session.model}`, show_alert: false });
           await renderMenuMessage(chatId, cbq.message.message_id);
           return;
         }
 
-        if (actionType === "effort" && value && VALID_EFFORTS.has(value)) {
-          session.effort = value;
+        if (actionType === "effort" && value) {
+          const nextEffort = normalizeEffortLevel(value);
+          if (!nextEffort) {
+            await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "Invalid effort", show_alert: true });
+            return;
+          }
+          session.effort = nextEffort;
           session.updatedAt = nowIso();
           store.markDirty();
           store.saveThrottled();
-          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `effort => ${value}`, show_alert: false });
+          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `effort => ${session.effort}`, show_alert: false });
           await renderMenuMessage(chatId, cbq.message.message_id);
           return;
         }
@@ -4716,12 +5035,18 @@ module.exports = {
     summarizeCodexBackendHealth,
     buildCompactionBootstrapText,
     countQueuedTasks,
+    normalizeModelId,
+    normalizeEffortLevel,
+    parseModelCommandArgs,
+    resolveAgentMessageTurnId,
+    shouldRetryTelegramMethod,
   },
 };
 
 if (require.main === module) {
   main().catch((err) => {
     console.error(err);
-    process.exitCode = 1;
+    // Exit immediately so the supervisor can start a fresh bridge process.
+    process.exit(1);
   });
 }
