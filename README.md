@@ -103,6 +103,8 @@ codex app-server --listen stdio://
 - 直接发送文本：发起一次 Codex `turn/start`
 - `/menu`：打开快捷按钮面板
 - `/status`：查看当前 `thread / model / effort / cwd`，以及最近一次上下文占用观测
+- `/truth`：查看当前项目绑定的 repo / runtime / state / logs 真相源
+- `/refresh`：重新绑定当前项目的真相源，并让下一次用户消息带上 source-of-truth bootstrap
 - `/new`：新开线程
 - `/compact`：把当前 thread 压缩成摘要，并切到一个新的 thread
 - `/stop`：中断当前 turn；在群聊里还会清空已排队的新任务
@@ -177,6 +179,74 @@ HTTPS_PROXY=http://127.0.0.1:1082
 ALL_PROXY=socks5h://127.0.0.1:1082
 ```
 
+### 真相源 / Source Registry
+
+Telegram 只是输入输出通道。为了让 bridge 更接近 Codex 桌面端的判断路径，bridge 会为每个 chat 维护一个 source-of-truth profile：
+
+- `/project /abs/path` 会切换 `cwd`、重置 thread，并重新绑定项目真相源
+- `/truth` 会显示当前 profile 里的 repo、live runtime、service copy、state files、logs、LaunchAgent、Codex homes
+- `/refresh` 会重新计算绑定，并让下一次真实用户消息自动附带一段 source-of-truth bootstrap
+- 如果没有匹配到 profile，bridge 会退回到 `cwd-only`，并提醒不要把 cwd 当成 live runtime truth
+- bridge 启动时默认会从 `DESKTOP_CODEX_HOME` 同步桌面端的 memories / skills / plugins / rules 到 bridge 的独立 `CODEX_HOME`
+- 同步会保留 bridge 自己的 `auth.json`、sessions、sqlite state 和 logs；`config.toml` 会过滤掉 root 级 `approval_policy`、`sandbox_mode`、`notify`
+
+仓库默认会加载 `config/source-registry.json`，里面维护本机各业务项目的 repo / runtime / state / logs 入口；`SOURCE_REGISTRY_PATH` 只在你要覆盖这份默认表时才需要设置。
+
+内置 fallback profile 会覆盖 bridge 自身：
+
+- workspace repo：当前 checkout 或 `BRIDGE_WORKSPACE_ROOT`
+- installed service copy：`~/Library/Application Support/telegram-codex-bridge-service`
+- state：service copy 下的 `data/store.json`
+- logs：service copy 下的 `data/logs`
+- LaunchAgent：`com.sharenla.telegram-codex-bridge`
+
+你也可以用 JSON 文件替换默认项目真相源：
+
+```bash
+SOURCE_REGISTRY_PATH=/absolute/path/source-registry.json
+DESKTOP_CODEX_HOME=~/.codex
+CODEX_CONTEXT_SYNC=1
+```
+
+示例：
+
+```json
+{
+  "projects": [
+    {
+      "id": "telegram-codex-bridge",
+      "name": "Telegram Codex Bridge",
+      "root": "~/Documents/Playground/telegram-codex-bridge",
+      "aliases": [
+        "~/Library/Application Support/telegram-codex-bridge-service"
+      ],
+      "sources": {
+        "canonicalRepo": "~/Documents/Playground/telegram-codex-bridge",
+        "installedServiceCopy": "~/Library/Application Support/telegram-codex-bridge-service",
+        "stateFiles": [
+          "~/Library/Application Support/telegram-codex-bridge-service/data/store.json"
+        ],
+        "logs": [
+          "~/Library/Application Support/telegram-codex-bridge-service/data/logs"
+        ],
+        "launchAgents": [
+          "com.sharenla.telegram-codex-bridge"
+        ],
+        "codexHomes": [
+          "~/.codex"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For bridge behavior, verify the installed service copy, store.json, logs, and LaunchAgent before trusting the workspace checkout."
+      ],
+      "neverAssume": [
+        "Do not assume workspace edits are live until the installed service copy is synced or checked."
+      ]
+    }
+  ]
+}
+```
+
 ### 多机器注意事项
 
 - 这个 bridge 目前使用 Telegram `getUpdates` 轮询
@@ -205,7 +275,8 @@ CODEX_AUTO_ACCOUNT_FAILOVER=1
 
 ### 上下文占用与手动压缩
 
-- bridge 会记录最近一次 `token_count`，并在 `/status` 里显示 `contextUsage / contextWindow / lastTurnTokens`
+- bridge 会记录最近一次 `token_count`；`contextTokens` 使用 Codex 上报的 total usage 计算上下文占用，`lastTurnTokens` 只表示最近一轮输入输出
+- `/status` 会显示 `contextUsage / contextTokens / contextWindow / lastTurnTokens`
 - 当占用率接近阈值时，`/status` 会标记 `compactionPending`
 - 默认只观测，不会自动压缩
 - 你可以在空闲时手动执行 `/compact`
@@ -304,6 +375,8 @@ codex app-server --listen stdio://
 - Send plain text: start a Codex `turn/start`
 - `/menu`: open the shortcut button panel
 - `/status`: show current `thread / model / effort / cwd` plus the latest context-usage snapshot
+- `/truth`: show the current repo / runtime / state / logs source-of-truth profile
+- `/refresh`: rebind the current source profile and inject a source-of-truth bootstrap into the next user turn
 - `/new`: start a new thread
 - `/compact`: compact the current thread into a fresh thread with a summary bootstrap
 - `/stop`: interrupt the current turn; in groups it also clears queued follow-up tasks
@@ -378,6 +451,74 @@ HTTPS_PROXY=http://127.0.0.1:1082
 ALL_PROXY=socks5h://127.0.0.1:1082
 ```
 
+### Source Registry
+
+Telegram should only be the transport. To make bridge behavior closer to the Codex desktop app, the bridge keeps a source-of-truth profile per chat:
+
+- `/project /abs/path` switches `cwd`, resets the thread, and rebinds the project truth profile
+- `/truth` shows the active repo, live runtime, service copy, state files, logs, LaunchAgent, and Codex homes
+- `/refresh` recomputes the binding and makes the next real user message carry a source-of-truth bootstrap
+- when no profile matches, the bridge falls back to `cwd-only` and warns the agent not to treat cwd as live runtime truth
+- on startup, the bridge syncs desktop memories / skills / plugins / rules from `DESKTOP_CODEX_HOME` into the bridge's separate `CODEX_HOME`
+- the sync preserves the bridge's own `auth.json`, sessions, sqlite state, and logs; `config.toml` is filtered to drop root-level `approval_policy`, `sandbox_mode`, and `notify`
+
+By default, the bridge loads `config/source-registry.json`, which maps local business projects to their repo / runtime / state / log sources. Set `SOURCE_REGISTRY_PATH` only when you want to override that default registry.
+
+The built-in fallback profile covers the bridge itself:
+
+- workspace repo: current checkout or `BRIDGE_WORKSPACE_ROOT`
+- installed service copy: `~/Library/Application Support/telegram-codex-bridge-service`
+- state: `data/store.json` under the service copy
+- logs: `data/logs` under the service copy
+- LaunchAgent: `com.sharenla.telegram-codex-bridge`
+
+You can replace the default project truth registry with a JSON file:
+
+```bash
+SOURCE_REGISTRY_PATH=/absolute/path/source-registry.json
+DESKTOP_CODEX_HOME=~/.codex
+CODEX_CONTEXT_SYNC=1
+```
+
+Example:
+
+```json
+{
+  "projects": [
+    {
+      "id": "telegram-codex-bridge",
+      "name": "Telegram Codex Bridge",
+      "root": "~/Documents/Playground/telegram-codex-bridge",
+      "aliases": [
+        "~/Library/Application Support/telegram-codex-bridge-service"
+      ],
+      "sources": {
+        "canonicalRepo": "~/Documents/Playground/telegram-codex-bridge",
+        "installedServiceCopy": "~/Library/Application Support/telegram-codex-bridge-service",
+        "stateFiles": [
+          "~/Library/Application Support/telegram-codex-bridge-service/data/store.json"
+        ],
+        "logs": [
+          "~/Library/Application Support/telegram-codex-bridge-service/data/logs"
+        ],
+        "launchAgents": [
+          "com.sharenla.telegram-codex-bridge"
+        ],
+        "codexHomes": [
+          "~/.codex"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For bridge behavior, verify the installed service copy, store.json, logs, and LaunchAgent before trusting the workspace checkout."
+      ],
+      "neverAssume": [
+        "Do not assume workspace edits are live until the installed service copy is synced or checked."
+      ]
+    }
+  ]
+}
+```
+
 ### Multi-machine note
 
 - The bridge currently uses Telegram `getUpdates` polling
@@ -406,8 +547,8 @@ That allows the bridge to switch to the next account and retry when it hits acco
 
 ### Context Usage And Manual Compaction
 
-- the bridge records the latest `token_count` snapshot and exposes it in `/status`
-- `/status` shows `contextUsage / contextWindow / lastTurnTokens` and whether compaction is pending
+- the bridge records the latest `token_count` snapshot; `contextTokens` comes from Codex total usage and drives context occupancy, while `lastTurnTokens` is only the latest turn
+- `/status` shows `contextUsage / contextTokens / contextWindow / lastTurnTokens` and whether compaction is pending
 - automatic compaction is still off by default
 - you can trigger manual compaction with `/compact` only when the chat is idle
 - `/compact` asks the old thread for a fixed 5-section summary, then switches the chat to a fresh thread

@@ -33,9 +33,12 @@ resolve_node_bin() {
 }
 
 NODE_BIN="$(resolve_node_bin)"
-CODEX_BIN="${CODEX_BIN:-$(command -v codex || true)}"
-if [[ -z "${CODEX_BIN}" && -x "/Applications/Codex.app/Contents/Resources/codex" ]]; then
+if [[ -n "${CODEX_BIN:-}" ]]; then
+  CODEX_BIN="${CODEX_BIN}"
+elif [[ -x "/Applications/Codex.app/Contents/Resources/codex" ]]; then
   CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"
+else
+  CODEX_BIN="$(command -v codex || true)"
 fi
 if [[ -z "${CODEX_BIN}" ]]; then
   echo "codex binary not found" >&2

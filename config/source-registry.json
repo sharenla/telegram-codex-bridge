@@ -1,0 +1,326 @@
+{
+  "projects": [
+    {
+      "id": "telegram-codex-bridge",
+      "name": "Telegram Codex Bridge",
+      "root": "/Users/wukong/Documents/Playground/telegram-codex-bridge",
+      "aliases": [
+        "/Users/wukong/Library/Application Support/telegram-codex-bridge-service"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/Documents/Playground/telegram-codex-bridge",
+        "installedServiceCopy": "/Users/wukong/Library/Application Support/telegram-codex-bridge-service",
+        "stateFiles": [
+          "/Users/wukong/Library/Application Support/telegram-codex-bridge-service/data/store.json"
+        ],
+        "logs": [
+          "/Users/wukong/Library/Application Support/telegram-codex-bridge-service/data/logs"
+        ],
+        "launchAgents": [
+          "com.sharenla.telegram-codex-bridge"
+        ],
+        "codexHomes": [
+          "/Users/wukong/Library/Application Support/telegram-codex-bridge-service/data/codex-home",
+          "/Users/wukong/.codex"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "Verify the launchd-installed service copy, store.json, logs, and LaunchAgent before current-state bridge claims.",
+        "Separate Telegram polling health from Codex backend auth health."
+      ],
+      "neverAssume": [
+        "Do not assume workspace edits are live until install:launch-agent has synced the service copy.",
+        "Do not treat a running PID as proof that polling or backend auth is healthy."
+      ]
+    },
+    {
+      "id": "openclaw-gateway",
+      "name": "OpenClaw Gateway",
+      "root": "/Users/wukong/openclaw",
+      "aliases": [
+        "/Users/wukong/.openclaw"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/openclaw",
+        "liveRuntime": [
+          "/Users/wukong/.openclaw"
+        ],
+        "stateFiles": [
+          "/Users/wukong/.openclaw/openclaw.json",
+          "/Users/wukong/.openclaw/state.sqlite",
+          "/Users/wukong/.openclaw/telegram",
+          "/Users/wukong/.openclaw/agents"
+        ],
+        "logs": [
+          "/Users/wukong/.openclaw/logs"
+        ],
+        "launchAgents": [
+          "com.clawdbot.gateway",
+          "com.clawdbot.watchdog"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For Telegram routing and live gateway behavior, inspect ~/.openclaw/openclaw.json, ~/.openclaw/agents, update offsets, and gateway logs.",
+        "Confirm the active LaunchAgent before assuming the repo checkout is the runtime."
+      ],
+      "neverAssume": [
+        "Do not infer live Telegram routing from /Users/wukong/openclaw repo files alone.",
+        "Do not print bot tokens or provider secrets from runtime config."
+      ]
+    },
+    {
+      "id": "hermes-agent",
+      "name": "Hermes Agent",
+      "root": "/Users/wukong/hermes-agent",
+      "aliases": [
+        "/Users/wukong/.hermes",
+        "/Users/wukong/.hermes/profiles"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/hermes-agent",
+        "liveRuntime": [
+          "/Users/wukong/.hermes",
+          "/Users/wukong/.hermes/profiles"
+        ],
+        "stateFiles": [
+          "/Users/wukong/.hermes/config.yaml",
+          "/Users/wukong/.hermes/gateway_state.json",
+          "/Users/wukong/.hermes/state.db",
+          "/Users/wukong/.hermes/profiles"
+        ],
+        "logs": [
+          "/Users/wukong/.hermes/logs",
+          "/Users/wukong/.hermes/profiles"
+        ],
+        "launchAgents": [
+          "ai.hermes.gateway",
+          "ai.hermes.gateway-agent-team-orchestrator"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For model/provider behavior, inspect the active Hermes profile under ~/.hermes/profiles before trusting global config.",
+        "For Telegram or gateway symptoms, check gateway_state.json, profile logs, and LaunchAgent state."
+      ],
+      "neverAssume": [
+        "Do not conflate global Hermes config with profile-scoped runtime config.",
+        "Do not expose provider keys or auth.json contents."
+      ]
+    },
+    {
+      "id": "agent-team",
+      "name": "Agent Team Control Plane",
+      "root": "/Users/wukong/agent-team",
+      "aliases": [
+        "/Users/wukong/.hermes/profiles/agent-team-orchestrator"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/agent-team",
+        "liveRuntime": [
+          "/Users/wukong/.hermes/profiles/agent-team-orchestrator"
+        ],
+        "stateFiles": [
+          "/Users/wukong/agent-team/README.md",
+          "/Users/wukong/agent-team/SOUL.md",
+          "/Users/wukong/agent-team/inventory",
+          "/Users/wukong/agent-team/agents",
+          "/Users/wukong/.hermes/profiles/agent-team-orchestrator"
+        ],
+        "logs": [
+          "/Users/wukong/.hermes/profiles/agent-team-orchestrator/logs"
+        ],
+        "launchAgents": [
+          "ai.hermes.gateway-agent-team-orchestrator"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "Keep control-plane contracts, leads, and runtime writeback boundaries distinct from business repos.",
+        "For orchestrator runtime questions, inspect the Hermes agent-team-orchestrator profile."
+      ],
+      "neverAssume": [
+        "Do not write runtime tasks or approvals unless explicitly asked.",
+        "Do not collapse Deribit and Binance lead boundaries."
+      ]
+    },
+    {
+      "id": "trading-binance",
+      "name": "Trading Binance Research Repo",
+      "root": "/Users/wukong/trading-binance",
+      "aliases": [
+        "/Users/wukong/openclaw-binance",
+        "/Users/wukong/openclaw-binance/binance-control-plane"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/trading-binance",
+        "liveRuntime": [
+          "/Users/wukong/openclaw-binance/binance-control-plane"
+        ],
+        "stateFiles": [
+          "/Users/wukong/openclaw-binance/binance-control-plane/state",
+          "/Users/wukong/openclaw-binance/binance-control-plane/temp",
+          "/Users/wukong/openclaw-binance/binance-control-plane/config"
+        ],
+        "logs": [
+          "/Users/wukong/openclaw-binance/binance-control-plane/logs",
+          "/Users/wukong/openclaw-binance/binance-control-plane/tmp/logs"
+        ],
+        "launchAgents": [
+          "com.wukong.binance-config-sync-queue.watch",
+          "com.wukong.binance-drawdown-events.watch",
+          "com.wukong.binance-futures-nav-report.daily",
+          "com.wukong.binance-futures-private-events.watch",
+          "com.wukong.binance-live-status-card.watch",
+          "com.wukong.binance-options-paper-events.watch",
+          "com.wukong.binance-options-private-events.watch",
+          "com.wukong.binance-options-supervisor-events.watch",
+          "com.wukong.binance-paper-reports.maybe-send",
+          "com.wukong.binance-scan-snapshots.watch",
+          "com.wukong.binance-supervisor-status-card.watch"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For executable Binance runtime truth, inspect openclaw-binance/binance-control-plane rather than trading-binance alone.",
+        "For live status, check runtime state/temp/logs and relevant LaunchAgents."
+      ],
+      "neverAssume": [
+        "Do not treat planning docs or research repo files as deployed runtime behavior.",
+        "Do not omit no-decision days when user asks to preserve them."
+      ]
+    },
+    {
+      "id": "openclaw-binance-runtime",
+      "name": "OpenClaw Binance Runtime",
+      "root": "/Users/wukong/openclaw-binance",
+      "aliases": [
+        "/Users/wukong/openclaw-binance/binance-control-plane",
+        "/Users/wukong/trading-binance"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/openclaw-binance",
+        "liveRuntime": [
+          "/Users/wukong/openclaw-binance/binance-control-plane"
+        ],
+        "stateFiles": [
+          "/Users/wukong/openclaw-binance/binance-control-plane/state",
+          "/Users/wukong/openclaw-binance/binance-control-plane/temp",
+          "/Users/wukong/openclaw-binance/binance-control-plane/config"
+        ],
+        "logs": [
+          "/Users/wukong/openclaw-binance/binance-control-plane/logs",
+          "/Users/wukong/openclaw-binance/binance-control-plane/tmp/logs"
+        ],
+        "launchAgents": [
+          "com.wukong.binance-config-sync-queue.watch",
+          "com.wukong.binance-drawdown-events.watch",
+          "com.wukong.binance-futures-nav-report.daily",
+          "com.wukong.binance-futures-private-events.watch",
+          "com.wukong.binance-live-status-card.watch",
+          "com.wukong.binance-options-paper-events.watch",
+          "com.wukong.binance-options-private-events.watch",
+          "com.wukong.binance-options-supervisor-events.watch",
+          "com.wukong.binance-paper-reports.maybe-send",
+          "com.wukong.binance-scan-snapshots.watch",
+          "com.wukong.binance-supervisor-status-card.watch"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For incidents, start from runtime state, temp watch files, logs, and LaunchAgent state.",
+        "Separate futures, options, private-stream, reports, and supervisor surfaces before changing anything."
+      ],
+      "neverAssume": [
+        "Do not restart or edit live runtime without a bounded request.",
+        "Do not expose exchange credentials."
+      ]
+    },
+    {
+      "id": "trading-deribit",
+      "name": "Trading Deribit Research Repo",
+      "root": "/Users/wukong/trading-deribit",
+      "aliases": [
+        "/Users/wukong/openclaw-deribit-stage6"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/trading-deribit",
+        "liveRuntime": [
+          "/Users/wukong/openclaw-deribit-stage6"
+        ],
+        "stateFiles": [
+          "/Users/wukong/openclaw-deribit-stage6/tmp/state",
+          "/Users/wukong/openclaw-deribit-stage6/configs",
+          "/Users/wukong/openclaw-deribit-stage6/configs/layered/current"
+        ],
+        "logs": [
+          "/Users/wukong/openclaw-deribit-stage6/tmp/logs"
+        ],
+        "launchAgents": [
+          "com.wukong.deribit-options-seller.daemon",
+          "com.wukong.deribit-options-seller.local-relay",
+          "com.wukong.deribit-options-seller.watch",
+          "com.wukong.deribit-options-seller.watchdog"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For live Deribit behavior, inspect openclaw-deribit-stage6 runtime state/configs/logs before trading-deribit research docs.",
+        "Keep research, shadow, and live execution roles distinct."
+      ],
+      "neverAssume": [
+        "Do not infer live strategy from research repo names.",
+        "Do not blend shadow and live promotion boundaries."
+      ]
+    },
+    {
+      "id": "openclaw-deribit-stage6",
+      "name": "OpenClaw Deribit Stage6 Runtime",
+      "root": "/Users/wukong/openclaw-deribit-stage6",
+      "aliases": [
+        "/Users/wukong/trading-deribit"
+      ],
+      "sources": {
+        "canonicalRepo": "/Users/wukong/openclaw-deribit-stage6",
+        "liveRuntime": [
+          "/Users/wukong/openclaw-deribit-stage6"
+        ],
+        "stateFiles": [
+          "/Users/wukong/openclaw-deribit-stage6/tmp/state",
+          "/Users/wukong/openclaw-deribit-stage6/tmp",
+          "/Users/wukong/openclaw-deribit-stage6/configs",
+          "/Users/wukong/openclaw-deribit-stage6/configs/layered/current",
+          "/Users/wukong/openclaw-deribit-stage6/manifest.json"
+        ],
+        "logs": [
+          "/Users/wukong/openclaw-deribit-stage6/tmp/logs"
+        ],
+        "launchAgents": [
+          "com.wukong.deribit-options-seller.daemon",
+          "com.wukong.deribit-options-seller.local-relay",
+          "com.wukong.deribit-options-seller.watch",
+          "com.wukong.deribit-options-seller.watchdog"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "For live gate, report, NAV, or strategy incidents, inspect tmp/state, configs/layered/current, tmp/logs, and LaunchAgents.",
+        "Answer exact gate/state questions from live state first, then explain strategy implications."
+      ],
+      "neverAssume": [
+        "Do not hand-write investor reports when the formal route exists.",
+        "Do not change live risk or execution rules without explicit approval."
+      ]
+    },
+    {
+      "id": "trading-stack",
+      "name": "Trading Stack Governance",
+      "root": "/Users/wukong/trading-stack",
+      "sources": {
+        "canonicalRepo": "/Users/wukong/trading-stack",
+        "stateFiles": [
+          "/Users/wukong/trading-stack/docs"
+        ]
+      },
+      "mustCheckBeforeAnswer": [
+        "Use this repo for cross-repo governance, routing, and protection registry questions."
+      ],
+      "neverAssume": [
+        "Do not apply governance docs directly to live runtime without checking the target repo/runtime."
+      ]
+    }
+  ]
+}

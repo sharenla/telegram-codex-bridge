@@ -26,6 +26,8 @@ const DEFAULT_CONTEXT_HARD_RATIO = 0.82;
 const DEFAULT_CONTEXT_EMERGENCY_RATIO = 0.90;
 const COMPACTION_SUMMARY_FORMAT = "five-section-markdown";
 const COMPACTION_SUMMARY_VERSION = 1;
+const SOURCE_TRUTH_BOOTSTRAP_VERSION = 1;
+const DEFAULT_BRIDGE_LAUNCH_AGENT = "com.sharenla.telegram-codex-bridge";
 const COMPACTION_SECTION_TITLES = [
   "当前目标",
   "已完成进展",
@@ -82,6 +84,7 @@ const ACCOUNT_AUTH_FAILURE_PATTERNS = [
 ];
 const ACCOUNT_HEALTH_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const ACCOUNT_LIMIT_COOLDOWN_MS = 60 * 60 * 1000;
+const ACCOUNT_ACCESS_EXPIRY_SKEW_MS = 5 * 60 * 1000;
 const TELEGRAM_POLLING_STALL_THRESHOLD_MS = 3 * 60 * 1000;
 const TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD = 6;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 5;
@@ -255,6 +258,31 @@ function parseJwtPayload(token) {
 function getJwtExpiryMs(token) {
   const payload = parseJwtPayload(token);
   return typeof payload?.exp === "number" ? payload.exp * 1000 : 0;
+}
+
+function maxFinitePositive(values) {
+  const finite = values
+    .map((value) => Number(value || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return finite.length ? Math.max(...finite) : 0;
+}
+
+function isAccessExpiryExpired(expiresMs, nowMs = Date.now(), skewMs = ACCOUNT_ACCESS_EXPIRY_SKEW_MS) {
+  const value = Number(expiresMs || 0);
+  if (!Number.isFinite(value) || value <= 0) return false;
+  const skew = Math.max(0, Number(skewMs || 0));
+  return value <= nowMs + skew;
+}
+
+function getAccountProfileAccessExpiryMs(profile) {
+  return maxFinitePositive([
+    profile?.expires,
+    getJwtExpiryMs(profile?.access),
+  ]);
+}
+
+function isAccountProfileAccessExpired(profile, nowMs = Date.now(), skewMs = ACCOUNT_ACCESS_EXPIRY_SKEW_MS) {
+  return isAccessExpiryExpired(getAccountProfileAccessExpiryMs(profile), nowMs, skewMs);
 }
 
 function truncateLabel(text, maxLen = 28) {
@@ -1047,6 +1075,39 @@ function uniqueStrings(values) {
   return [...new Set((values || []).filter((value) => typeof value === "string" && value))];
 }
 
+function normalizeStringList(value) {
+  if (Array.isArray(value)) {
+    return uniqueStrings(value.map((item) => String(item || "").trim()).filter(Boolean));
+  }
+  if (typeof value === "string" && value.trim()) {
+    return uniqueStrings(value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean));
+  }
+  return [];
+}
+
+function normalizeAbsolutePath(inputPath) {
+  const resolved = resolveUserPath(String(inputPath || "").trim());
+  if (!resolved) return null;
+  return path.resolve(resolved);
+}
+
+function normalizePathList(value) {
+  return uniqueStrings(normalizeStringList(value).map(normalizeAbsolutePath).filter(Boolean));
+}
+
+function isPathWithin(parentPath, candidatePath) {
+  const parent = normalizeAbsolutePath(parentPath);
+  const candidate = normalizeAbsolutePath(candidatePath);
+  if (!parent || !candidate) return false;
+  if (parent === candidate) return true;
+  const relative = path.relative(parent, candidate);
+  return Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+function firstExistingPath(paths) {
+  return (paths || []).find((candidate) => candidate && fs.existsSync(candidate)) || (paths || [])[0] || null;
+}
+
 function countQueuedTasks(rt) {
   return Array.isArray(rt?.pendingTasks) ? rt.pendingTasks.length : 0;
 }
@@ -1131,37 +1192,82 @@ function classifyContextUsageRatio(ratio, thresholds) {
 
 function extractContextUsageSnapshotPayload(params) {
   if (!params || typeof params !== "object") return null;
-  const totalCandidates = [
+  const info = params?.info || params?.token_count?.info || params?.tokenCount?.info || {};
+  const contextTokenCandidates = [
+    info?.total_token_usage?.total_tokens,
+    info?.totalTokenUsage?.totalTokens,
+    params?.total_token_usage?.total_tokens,
+    params?.totalTokenUsage?.totalTokens,
+    params?.token_count?.total_token_usage?.total_tokens,
+    params?.tokenCount?.totalTokenUsage?.totalTokens,
+    params?.context_tokens,
+    params?.contextTokens,
+    params?.total_tokens,
+    params?.totalTokens,
+  ];
+  const lastTurnCandidates = [
+    info?.last_token_usage?.total_tokens,
+    info?.lastTokenUsage?.totalTokens,
     params?.last_token_usage?.total_tokens,
     params?.lastTokenUsage?.totalTokens,
     params?.token_count?.last_token_usage?.total_tokens,
     params?.tokenCount?.lastTokenUsage?.totalTokens,
   ];
   const windowCandidates = [
+    info?.model_context_window,
+    info?.modelContextWindow,
+    info?.context_window,
+    info?.contextWindow,
     params?.model_context_window,
     params?.modelContextWindow,
+    params?.context_window,
+    params?.contextWindow,
     params?.token_count?.model_context_window,
     params?.tokenCount?.modelContextWindow,
+    params?.token_count?.context_window,
+    params?.tokenCount?.contextWindow,
   ];
-  const totalTokens = totalCandidates.find((value) => Number.isFinite(Number(value)));
+  const contextTokens = contextTokenCandidates.find((value) => Number.isFinite(Number(value)));
+  const lastTurnTokens = lastTurnCandidates.find((value) => Number.isFinite(Number(value)));
   const contextWindow = windowCandidates.find((value) => Number.isFinite(Number(value)));
-  if (!Number.isFinite(Number(totalTokens)) && !Number.isFinite(Number(contextWindow))) return null;
+  if (
+    !Number.isFinite(Number(contextTokens))
+    && !Number.isFinite(Number(lastTurnTokens))
+    && !Number.isFinite(Number(contextWindow))
+  ) return null;
   return {
-    totalTokens: Number.isFinite(Number(totalTokens)) ? Number(totalTokens) : null,
+    contextTokens: Number.isFinite(Number(contextTokens)) ? Number(contextTokens) : null,
+    lastTurnTokens: Number.isFinite(Number(lastTurnTokens)) ? Number(lastTurnTokens) : null,
     contextWindow: Number.isFinite(Number(contextWindow)) ? Number(contextWindow) : null,
   };
 }
 
 function applyContextUsageSnapshot(session, snapshot, thresholds, observedAt = nowIso()) {
   if (!session || typeof session !== "object" || !snapshot) return false;
-  if (Number.isFinite(snapshot.totalTokens)) {
-    session.lastTurnTokens = snapshot.totalTokens;
+  const contextTokens = Number.isFinite(Number(snapshot.contextTokens))
+    ? Number(snapshot.contextTokens)
+    : Number.isFinite(Number(snapshot.totalTokens))
+      ? Number(snapshot.totalTokens)
+      : null;
+  const lastTurnTokens = Number.isFinite(Number(snapshot.lastTurnTokens))
+    ? Number(snapshot.lastTurnTokens)
+    : Number.isFinite(Number(snapshot.totalTokens))
+      ? Number(snapshot.totalTokens)
+      : null;
+  if (Number.isFinite(contextTokens)) {
+    session.contextTokens = contextTokens;
+  }
+  if (Number.isFinite(lastTurnTokens)) {
+    session.lastTurnTokens = lastTurnTokens;
   }
   if (Number.isFinite(snapshot.contextWindow) && snapshot.contextWindow > 0) {
     session.contextWindow = snapshot.contextWindow;
   }
-  if (Number.isFinite(session.lastTurnTokens) && Number.isFinite(session.contextWindow) && session.contextWindow > 0) {
-    session.contextUsageRatio = session.lastTurnTokens / session.contextWindow;
+  const usageTokens = Number.isFinite(session.contextTokens)
+    ? session.contextTokens
+    : session.lastTurnTokens;
+  if (Number.isFinite(usageTokens) && Number.isFinite(session.contextWindow) && session.contextWindow > 0) {
+    session.contextUsageRatio = usageTokens / session.contextWindow;
   } else {
     session.contextUsageRatio = null;
   }
@@ -1170,6 +1276,17 @@ function applyContextUsageSnapshot(session, snapshot, thresholds, observedAt = n
   session.compactionPending = Boolean(pendingReason);
   session.compactionPendingReason = pendingReason;
   return true;
+}
+
+function extractTelemetryThreadId(params) {
+  return params?.threadId
+    || params?.thread_id
+    || params?.thread?.id
+    || params?.thread?.threadId
+    || params?.thread?.thread_id
+    || params?.context?.threadId
+    || params?.context?.thread_id
+    || null;
 }
 
 function shouldAutoCompactDecision({ autoCompactEnabled, session, rt, allowDuringIdle = true } = {}) {
@@ -1232,6 +1349,20 @@ function buildAuthRecoveryReplayTask(inputMeta, source = "auth_failure", created
   };
 }
 
+function getReplayableAuthRecoveryTaskFromRuntime(rt) {
+  if (!rt) return null;
+  if (rt.authRecoveryReplayTask?.text) {
+    return rt.authRecoveryReplayTask;
+  }
+  if (rt.activeTurnId) {
+    return buildAuthRecoveryReplayTask(rt.turnInputMetaByTurnId?.[rt.activeTurnId], "active_turn");
+  }
+  if (rt.pendingInputMeta?.text) {
+    return buildAuthRecoveryReplayTask(rt.pendingInputMeta, "pending_request");
+  }
+  return null;
+}
+
 function summarizeCodexBackendHealth(health) {
   const parts = [health?.state || "starting"];
   if (health?.lastOkAt) {
@@ -1248,6 +1379,471 @@ function summarizeCodexBackendHealth(health) {
   return parts.join(", ");
 }
 
+function normalizeSourceProfile(rawProfile, fallbackId = "profile") {
+  if (!rawProfile || typeof rawProfile !== "object") return null;
+  const rawSources = rawProfile.sources && typeof rawProfile.sources === "object"
+    ? rawProfile.sources
+    : {};
+  const root = normalizeAbsolutePath(
+    rawProfile.root
+      || rawProfile.projectRoot
+      || rawProfile.canonicalRepo
+      || rawSources.canonicalRepo
+      || rawSources.repo,
+  );
+  if (!root) return null;
+
+  const id = String(rawProfile.id || fallbackId || root).trim();
+  const name = String(rawProfile.name || rawProfile.label || path.basename(root) || root).trim();
+  const canonicalRepo = normalizeAbsolutePath(
+    rawSources.canonicalRepo
+      || rawSources.repo
+      || rawProfile.canonicalRepo
+      || root,
+  );
+  const installedServiceCopy = normalizeAbsolutePath(
+    rawSources.installedServiceCopy
+      || rawProfile.installedServiceCopy
+      || "",
+  );
+  const liveRuntime = normalizePathList(rawSources.liveRuntime || rawProfile.liveRuntime || rawProfile.liveRuntimePaths);
+  const stateFiles = normalizePathList(rawSources.stateFiles || rawProfile.stateFiles);
+  const logs = normalizePathList(rawSources.logs || rawProfile.logs);
+  const aliases = normalizePathList(rawProfile.aliases);
+  const codexHomes = normalizePathList(rawSources.codexHomes || rawProfile.codexHomes);
+  const matchPaths = uniqueStrings([
+    root,
+    canonicalRepo,
+    installedServiceCopy,
+    ...liveRuntime,
+    ...aliases,
+  ].filter(Boolean));
+
+  return {
+    id,
+    name,
+    root,
+    aliases,
+    matchPaths,
+    sources: {
+      canonicalRepo,
+      liveRuntime,
+      installedServiceCopy,
+      stateFiles,
+      logs,
+      remoteHosts: normalizeStringList(rawSources.remoteHosts || rawProfile.remoteHosts),
+      launchAgents: normalizeStringList(rawSources.launchAgents || rawProfile.launchAgents),
+      codexHomes,
+    },
+    mustCheckBeforeAnswer: normalizeStringList(rawProfile.mustCheckBeforeAnswer || rawProfile.mustCheck),
+    neverAssume: normalizeStringList(rawProfile.neverAssume || rawProfile.doNotAssume),
+  };
+}
+
+function buildBuiltinSourceProfiles({
+  codexHome,
+  desktopCodexHome,
+  bridgeRoot,
+  serviceRoot,
+  storePath,
+} = {}) {
+  const homeDir = os.homedir();
+  const workspaceBridgeRoot = firstExistingPath([
+    normalizeAbsolutePath(process.env.BRIDGE_WORKSPACE_ROOT || ""),
+    path.join(homeDir, "Documents", "Playground", "telegram-codex-bridge"),
+    bridgeRoot,
+  ]);
+  const resolvedServiceRoot = normalizeAbsolutePath(
+    serviceRoot
+      || process.env.BRIDGE_ROOT
+      || path.join(homeDir, "Library", "Application Support", "telegram-codex-bridge-service"),
+  );
+  const resolvedStorePath = normalizeAbsolutePath(
+    storePath || path.join(resolvedServiceRoot, "data", "store.json"),
+  );
+  const logDir = path.join(resolvedServiceRoot, "data", "logs");
+
+  return [
+    normalizeSourceProfile({
+      id: "telegram-codex-bridge",
+      name: "Telegram Codex Bridge",
+      root: workspaceBridgeRoot,
+      aliases: uniqueStrings([bridgeRoot, resolvedServiceRoot].filter(Boolean)),
+      sources: {
+        canonicalRepo: workspaceBridgeRoot,
+        installedServiceCopy: resolvedServiceRoot,
+        stateFiles: [resolvedStorePath],
+        logs: [logDir],
+        launchAgents: [DEFAULT_BRIDGE_LAUNCH_AGENT],
+        codexHomes: uniqueStrings([codexHome, desktopCodexHome].filter(Boolean)),
+      },
+      mustCheckBeforeAnswer: [
+        "For bridge behavior, verify the launchd-installed service copy, store.json, logs, and LaunchAgent before trusting the workspace checkout.",
+        "For Codex capability drift, compare bridge CODEX_HOME with the desktop Codex home.",
+      ],
+      neverAssume: [
+        "Do not assume workspace edits are live until the installed service copy is synced or checked.",
+        "Do not treat Telegram transport health as Codex backend health.",
+      ],
+    }, "telegram-codex-bridge"),
+    normalizeSourceProfile({
+      id: "home-workspace",
+      name: "Home Workspace",
+      root: homeDir,
+      sources: {
+        canonicalRepo: homeDir,
+        codexHomes: uniqueStrings([codexHome, desktopCodexHome].filter(Boolean)),
+      },
+      mustCheckBeforeAnswer: [
+        "Resolve the concrete repo or runtime boundary before answering project-specific current-state questions.",
+      ],
+      neverAssume: [
+        "Do not treat the home directory itself as the business repo truth.",
+      ],
+    }, "home-workspace"),
+  ].filter(Boolean);
+}
+
+function loadSourceRegistryFromPath(registryPath) {
+  const resolvedPath = normalizeAbsolutePath(registryPath || "");
+  if (!resolvedPath) return { registryPath: null, profiles: [], error: null };
+  const text = readTextFile(resolvedPath);
+  if (!text) {
+    return { registryPath: resolvedPath, profiles: [], error: `cannot read ${resolvedPath}` };
+  }
+  const parsed = safeJsonParse(text);
+  if (!parsed || typeof parsed !== "object") {
+    return { registryPath: resolvedPath, profiles: [], error: `invalid JSON in ${resolvedPath}` };
+  }
+  const rawProfiles = Array.isArray(parsed.projects)
+    ? parsed.projects
+    : Array.isArray(parsed.profiles)
+      ? parsed.profiles
+      : [];
+  const profiles = rawProfiles
+    .map((profile, index) => normalizeSourceProfile(profile, `external-${index + 1}`))
+    .filter(Boolean);
+  return { registryPath: resolvedPath, profiles, error: null };
+}
+
+function buildSourceRegistry({
+  registryPath = null,
+  codexHome = null,
+  desktopCodexHome = path.join(os.homedir(), ".codex"),
+  bridgeRoot = __dirname,
+  serviceRoot = null,
+  storePath = null,
+  loadedAt = nowIso(),
+} = {}) {
+  const external = loadSourceRegistryFromPath(registryPath);
+  const builtins = buildBuiltinSourceProfiles({
+    codexHome,
+    desktopCodexHome,
+    bridgeRoot: normalizeAbsolutePath(bridgeRoot),
+    serviceRoot,
+    storePath,
+  });
+  const profilesById = new Map();
+  for (const profile of [...builtins, ...external.profiles]) {
+    profilesById.set(profile.id, profile);
+  }
+  return {
+    version: 1,
+    registryPath: external.registryPath,
+    registryError: external.error,
+    loadedAt,
+    bridgeRoot: normalizeAbsolutePath(bridgeRoot),
+    codexHome: normalizeAbsolutePath(codexHome || ""),
+    desktopCodexHome: normalizeAbsolutePath(desktopCodexHome || ""),
+    profiles: [...profilesById.values()],
+  };
+}
+
+function findSourceProfileForPath(registry, cwd) {
+  const resolvedCwd = normalizeAbsolutePath(cwd);
+  if (!resolvedCwd) return null;
+  const matches = (registry?.profiles || [])
+    .map((profile) => {
+      const matchPath = (profile.matchPaths || []).find((candidate) => isPathWithin(candidate, resolvedCwd));
+      return matchPath ? { profile, matchPath, score: matchPath.length } : null;
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.score - left.score);
+  return matches[0] || null;
+}
+
+function buildGenericSourceProfile(cwd, registry = {}) {
+  const root = normalizeAbsolutePath(cwd) || os.homedir();
+  return normalizeSourceProfile({
+    id: "cwd-only",
+    name: "CWD only",
+    root,
+    sources: {
+      canonicalRepo: root,
+      codexHomes: uniqueStrings([registry.codexHome, registry.desktopCodexHome].filter(Boolean)),
+    },
+    mustCheckBeforeAnswer: [
+      "Only cwd is known. Verify repo, live runtime, state files, and logs before making current-state claims.",
+    ],
+    neverAssume: [
+      "Do not infer live runtime truth from cwd alone.",
+    ],
+  }, "cwd-only");
+}
+
+function resolveSessionTruth(session, registry) {
+  const match = findSourceProfileForPath(registry, session?.cwd);
+  const profile = match?.profile || buildGenericSourceProfile(session?.cwd, registry);
+  return {
+    profile,
+    matchPath: match?.matchPath || profile.root,
+    registryPath: registry?.registryPath || null,
+    registryError: registry?.registryError || null,
+    registryLoadedAt: registry?.loadedAt || null,
+  };
+}
+
+function refreshSessionTruthProfile(session, registry, {
+  reason = "refresh",
+  bootstrapPending = true,
+  refreshedAt = nowIso(),
+} = {}) {
+  if (!session || typeof session !== "object") return null;
+  const resolved = resolveSessionTruth(session, registry);
+  const profile = resolved.profile;
+  session.truthProfile = {
+    id: profile.id,
+    name: profile.name,
+    projectRoot: profile.root,
+    matchPath: resolved.matchPath,
+    registryPath: resolved.registryPath,
+    registryError: resolved.registryError,
+    lastRefreshedAt: refreshedAt,
+    lastBootstrapAt: session.truthProfile?.lastBootstrapAt || null,
+    refreshReason: reason,
+    bootstrapPending: Boolean(bootstrapPending),
+    bootstrapVersion: SOURCE_TRUTH_BOOTSTRAP_VERSION,
+  };
+  return resolved;
+}
+
+function normalizeTruthProfileState(session, defaults = {}) {
+  if (!session || typeof session !== "object") return null;
+  const truth = session.truthProfile && typeof session.truthProfile === "object"
+    ? session.truthProfile
+    : null;
+  if (!truth) {
+    session.truthProfile = null;
+    return null;
+  }
+  session.truthProfile = {
+    id: typeof truth.id === "string" ? truth.id : null,
+    name: typeof truth.name === "string" ? truth.name : null,
+    projectRoot: typeof truth.projectRoot === "string" ? truth.projectRoot : null,
+    matchPath: typeof truth.matchPath === "string" ? truth.matchPath : null,
+    registryPath: typeof truth.registryPath === "string" ? truth.registryPath : null,
+    registryError: typeof truth.registryError === "string" ? truth.registryError : null,
+    lastRefreshedAt: typeof truth.lastRefreshedAt === "string" ? truth.lastRefreshedAt : null,
+    lastBootstrapAt: typeof truth.lastBootstrapAt === "string" ? truth.lastBootstrapAt : null,
+    refreshReason: typeof truth.refreshReason === "string" ? truth.refreshReason : null,
+    bootstrapPending: Boolean(truth.bootstrapPending),
+    bootstrapVersion: Number.isFinite(Number(truth.bootstrapVersion))
+      ? Number(truth.bootstrapVersion)
+      : defaults.bootstrapVersion || SOURCE_TRUTH_BOOTSTRAP_VERSION,
+  };
+  return session.truthProfile;
+}
+
+function describeLocalSourcePath(sourcePath) {
+  const resolved = normalizeAbsolutePath(sourcePath);
+  if (!resolved) return null;
+  try {
+    const stat = fs.statSync(resolved);
+    const kind = stat.isDirectory() ? "dir" : "file";
+    return `${resolved} (${kind}, mtime ${stat.mtime.toISOString()})`;
+  } catch {
+    return `${resolved} (missing)`;
+  }
+}
+
+function formatTruthProfileText(session, registry, { maxItems = 6 } = {}) {
+  const resolved = resolveSessionTruth(session, registry);
+  const profile = resolved.profile;
+  const truthState = session?.truthProfile || {};
+  const sourceLines = [];
+  const addPathList = (label, values) => {
+    const normalized = normalizePathList(values).slice(0, maxItems);
+    if (!normalized.length) return;
+    sourceLines.push(`${label}:`);
+    for (const item of normalized) sourceLines.push(`- ${describeLocalSourcePath(item)}`);
+  };
+  const addStringList = (label, values) => {
+    const normalized = normalizeStringList(values).slice(0, maxItems);
+    if (!normalized.length) return;
+    sourceLines.push(`${label}:`);
+    for (const item of normalized) sourceLines.push(`- ${item}`);
+  };
+
+  addPathList("canonicalRepo", [profile.sources.canonicalRepo]);
+  addPathList("liveRuntime", profile.sources.liveRuntime);
+  addPathList("installedServiceCopy", [profile.sources.installedServiceCopy].filter(Boolean));
+  addPathList("stateFiles", profile.sources.stateFiles);
+  addPathList("logs", profile.sources.logs);
+  addStringList("launchAgents", profile.sources.launchAgents);
+  addStringList("remoteHosts", profile.sources.remoteHosts);
+  addPathList("codexHomes", profile.sources.codexHomes);
+
+  return [
+    "Source truth profile",
+    `cwd: ${session?.cwd || "(unknown)"}`,
+    `profile: ${profile.name} (${profile.id})`,
+    `projectRoot: ${profile.root}`,
+    `matchedBy: ${resolved.matchPath}`,
+    `registry: ${resolved.registryPath || "(builtin)"}`,
+    resolved.registryError ? `registryError: ${resolved.registryError}` : null,
+    `lastRefreshedAt: ${truthState.lastRefreshedAt || "(never)"}`,
+    `lastBootstrapAt: ${truthState.lastBootstrapAt || "(never)"}`,
+    `bootstrapPending: ${truthState.bootstrapPending ? "yes" : "no"}`,
+    "",
+    "Sources",
+    ...(sourceLines.length ? sourceLines : ["- cwd only; no richer source profile matched"]),
+    "",
+    "Must check before answer",
+    ...(profile.mustCheckBeforeAnswer.length ? profile.mustCheckBeforeAnswer.map((item) => `- ${item}`) : ["- Verify the relevant source before making current-state claims."]),
+    "",
+    "Never assume",
+    ...(profile.neverAssume.length ? profile.neverAssume.map((item) => `- ${item}`) : ["- Do not infer live/runtime truth from repo files alone."]),
+  ].filter((line) => line !== null).join("\n");
+}
+
+function buildTruthBootstrapText(resolvedTruth, userText) {
+  const profile = resolvedTruth?.profile;
+  if (!profile) return userText;
+  const lines = [
+    "Bridge source-of-truth bootstrap:",
+    "Telegram is only the transport. Before final conclusions, choose evidence from the source profile below.",
+    `Active profile: ${profile.name} (${profile.id})`,
+    `Project root: ${profile.root}`,
+    `Canonical repo: ${profile.sources.canonicalRepo || "(unknown)"}`,
+  ];
+  if (profile.sources.installedServiceCopy) lines.push(`Installed service copy: ${profile.sources.installedServiceCopy}`);
+  if (profile.sources.stateFiles.length) lines.push(`State files: ${profile.sources.stateFiles.slice(0, 4).join(", ")}`);
+  if (profile.sources.logs.length) lines.push(`Logs: ${profile.sources.logs.slice(0, 4).join(", ")}`);
+  if (profile.sources.launchAgents.length) lines.push(`LaunchAgents: ${profile.sources.launchAgents.join(", ")}`);
+  if (profile.sources.remoteHosts.length) lines.push(`Remote hosts: ${profile.sources.remoteHosts.join(", ")}`);
+  if (profile.mustCheckBeforeAnswer.length) {
+    lines.push("Must check before answer:");
+    for (const item of profile.mustCheckBeforeAnswer.slice(0, 5)) lines.push(`- ${item}`);
+  }
+  if (profile.neverAssume.length) {
+    lines.push("Never assume:");
+    for (const item of profile.neverAssume.slice(0, 5)) lines.push(`- ${item}`);
+  }
+  lines.push("");
+  lines.push(`User message: ${userText}`);
+  return lines.join("\n");
+}
+
+function filterDesktopCodexConfigToml(text) {
+  const dropRootKeys = new Set(["approval_policy", "sandbox_mode", "notify"]);
+  let inRoot = true;
+  return String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (/^\[/.test(trimmed)) inRoot = false;
+      if (!inRoot) return true;
+      const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*=/);
+      return !(match && dropRootKeys.has(match[1]));
+    })
+    .join("\n")
+    .replace(/\n*$/, "\n");
+}
+
+function pathsReferToSameLocation(leftPath, rightPath) {
+  const left = normalizeAbsolutePath(leftPath);
+  const right = normalizeAbsolutePath(rightPath);
+  return Boolean(left && right && left === right);
+}
+
+function copyDirectoryReplacingDestination(sourceDir, destinationDir) {
+  if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) return false;
+  ensureDir(path.dirname(destinationDir));
+  fs.rmSync(destinationDir, { recursive: true, force: true });
+  fs.cpSync(sourceDir, destinationDir, { recursive: true, dereference: false });
+  return true;
+}
+
+function copyFileIfPresent(sourceFile, destinationFile, transform = null) {
+  if (!fs.existsSync(sourceFile) || !fs.statSync(sourceFile).isFile()) return false;
+  ensureDir(path.dirname(destinationFile));
+  if (transform) {
+    fs.writeFileSync(destinationFile, transform(fs.readFileSync(sourceFile, "utf8")));
+  } else {
+    fs.copyFileSync(sourceFile, destinationFile);
+  }
+  return true;
+}
+
+function syncDesktopCodexContext({
+  codexHome,
+  desktopCodexHome = path.join(os.homedir(), ".codex"),
+  enabled = true,
+  logger = null,
+} = {}) {
+  const runtimeHome = normalizeAbsolutePath(codexHome);
+  const desktopHome = normalizeAbsolutePath(desktopCodexHome);
+  const report = {
+    enabled: Boolean(enabled),
+    skippedReason: null,
+    desktopCodexHome: desktopHome,
+    codexHome: runtimeHome,
+    synced: [],
+  };
+  if (!enabled) {
+    report.skippedReason = "disabled";
+    return report;
+  }
+  if (!runtimeHome || !desktopHome) {
+    report.skippedReason = "missing path";
+    return report;
+  }
+  if (pathsReferToSameLocation(runtimeHome, desktopHome)) {
+    report.skippedReason = "same CODEX_HOME";
+    return report;
+  }
+  if (!fs.existsSync(desktopHome) || !fs.statSync(desktopHome).isDirectory()) {
+    report.skippedReason = "desktop CODEX_HOME missing";
+    return report;
+  }
+  ensureDir(runtimeHome);
+
+  const syncDirs = ["memories", "skills", "plugins", "rules", "vendor_imports"];
+  for (const dirName of syncDirs) {
+    const copied = copyDirectoryReplacingDestination(
+      path.join(desktopHome, dirName),
+      path.join(runtimeHome, dirName),
+    );
+    if (copied) report.synced.push(dirName);
+  }
+
+  if (copyFileIfPresent(path.join(desktopHome, "AGENTS.md"), path.join(runtimeHome, "AGENTS.md"))) {
+    report.synced.push("AGENTS.md");
+  }
+  if (copyFileIfPresent(
+    path.join(desktopHome, "config.toml"),
+    path.join(runtimeHome, "config.toml"),
+    filterDesktopCodexConfigToml,
+  )) {
+    report.synced.push("config.toml");
+  }
+
+  if (logger && report.synced.length) {
+    logger(`Synced desktop Codex context from ${desktopHome}: ${report.synced.join(", ")}`);
+  }
+  return report;
+}
+
 function normalizeSessionState(session, defaults) {
   if (!session || typeof session !== "object") return session;
   session.threadId = session.threadId || null;
@@ -1259,8 +1855,11 @@ function normalizeSessionState(session, defaults) {
   session.approvalPolicy = session.approvalPolicy || defaults.approvalPolicy;
   session.sandboxMode = session.sandboxMode || defaults.sandboxMode;
   session.updatedAt = session.updatedAt || nowIso();
-  session.contextWindow = Number.isFinite(Number(session.contextWindow))
+  session.contextWindow = Number.isFinite(Number(session.contextWindow)) && Number(session.contextWindow) > 0
     ? Number(session.contextWindow)
+    : null;
+  session.contextTokens = Number.isFinite(Number(session.contextTokens))
+    ? Number(session.contextTokens)
     : null;
   session.lastTurnTokens = Number.isFinite(Number(session.lastTurnTokens))
     ? Number(session.lastTurnTokens)
@@ -1290,6 +1889,7 @@ function normalizeSessionState(session, defaults) {
   session.pendingSummaryBootstrap = session.pendingSummaryBootstrap && typeof session.pendingSummaryBootstrap === "object"
     ? session.pendingSummaryBootstrap
     : null;
+  normalizeTruthProfileState(session);
   return session;
 }
 
@@ -1299,6 +1899,7 @@ function clearSessionContextTracking(session, {
 } = {}) {
   if (!session || typeof session !== "object") return;
   session.contextWindow = null;
+  session.contextTokens = null;
   session.lastTurnTokens = null;
   session.lastTokenObservedAt = null;
   session.contextUsageRatio = null;
@@ -1316,13 +1917,16 @@ function clearSessionContextTracking(session, {
 }
 
 function formatContextUsageLine(session) {
-  if (!Number.isFinite(session?.lastTurnTokens) || !Number.isFinite(session?.contextWindow)) {
+  const usageTokens = Number.isFinite(session?.contextTokens)
+    ? session.contextTokens
+    : session?.lastTurnTokens;
+  if (!Number.isFinite(usageTokens) || !Number.isFinite(session?.contextWindow) || session.contextWindow <= 0) {
     return "(unknown)";
   }
   const ratio = Number.isFinite(session?.contextUsageRatio)
     ? `, ${formatPercent(session.contextUsageRatio)}`
     : "";
-  return `${session.lastTurnTokens}/${session.contextWindow}${ratio}`;
+  return `${usageTokens}/${session.contextWindow}${ratio}`;
 }
 
 function buildCompactionPrompt() {
@@ -1363,8 +1967,10 @@ function buildHelpText() {
     "/compact - compact the current thread into a fresh thread",
     "/authsync - resync Codex auth & restart backend",
     "/status - show current thread/turn",
+    "/truth - show current source-of-truth profile",
+    "/refresh - reload the source-of-truth binding for this chat",
     "/cwd <path> - set working dir for this chat",
-    "/project <path> - set cwd and start a fresh thread",
+    "/project <path> - set project truth profile and start a fresh thread",
     "/model <5.2|5.4|5.5|id> [effort] - set model, optionally with reasoning effort",
     "/effort <none|minimal|low|medium|high|xhigh> - set reasoning effort",
     "/think <none|minimal|low|medium|high|xhigh> - alias for /effort",
@@ -1442,6 +2048,7 @@ function buildMenuText(session, rt, page = MENU_PAGES.MAIN, meta = {}) {
   const header = [
     "Codex 控制面板",
     `cwd: ${session.cwd}`,
+    `truth: ${session.truthProfile?.name || "(unbound)"}`,
     `model: ${session.model}`,
     `effort: ${session.effort}`,
     accountLine,
@@ -1592,6 +2199,7 @@ function buildMenuKeyboard(page = MENU_PAGES.MAIN, meta = {}) {
     inline_keyboard: [
       [
         { text: "Status", callback_data: "menu|refresh" },
+        { text: "Truth", callback_data: "menu|truth" },
         { text: "Help", callback_data: "menu|help" },
       ],
       [
@@ -1882,6 +2490,38 @@ async function main() {
     process.env.CODEX_HOME || path.join(os.homedir(), ".codex"),
   );
   ensureDir(codexHome);
+  const desktopCodexHome = process.env.DESKTOP_CODEX_HOME || path.join(os.homedir(), ".codex");
+  const contextSyncReport = syncDesktopCodexContext({
+    codexHome,
+    desktopCodexHome,
+    enabled: parseBooleanEnv(process.env.CODEX_CONTEXT_SYNC, true),
+    logger: (line) => console.log(line),
+  });
+  if (contextSyncReport.skippedReason) {
+    console.log(`Desktop Codex context sync skipped: ${contextSyncReport.skippedReason}`);
+  }
+  const defaultSourceRegistryPath = path.join(__dirname, "config", "source-registry.json");
+  const sourceRegistryPath = process.env.SOURCE_REGISTRY_PATH
+    || process.env.TRUTH_SOURCE_REGISTRY
+    || (fs.existsSync(defaultSourceRegistryPath) ? defaultSourceRegistryPath : "");
+  const sourceRegistryOptions = {
+    registryPath: sourceRegistryPath,
+    codexHome,
+    desktopCodexHome,
+    bridgeRoot: __dirname,
+    serviceRoot: process.env.BRIDGE_ROOT || null,
+    storePath,
+  };
+  let sourceRegistry = buildSourceRegistry(sourceRegistryOptions);
+  function reloadSourceRegistry({ reason = "reload", silent = false } = {}) {
+    const next = buildSourceRegistry(sourceRegistryOptions);
+    sourceRegistry = next;
+    if (!silent) {
+      console.log(`Reloaded source registry [${reason}]: ${next.registryPath || "(builtin)"}`);
+      if (next.registryError) console.warn(`Source registry warning: ${next.registryError}`);
+    }
+    return sourceRegistry;
+  }
   const fallbackAuthPath = path.join(os.homedir(), ".codex", "auth.json");
   const runtimeAuthPath = path.join(codexHome, "auth.json");
   const authTemplate = readCodexAuth(runtimeAuthPath) || readCodexAuth(fallbackAuthPath);
@@ -1926,7 +2566,15 @@ async function main() {
   const autoCompact = parseBooleanEnv(process.env.AUTO_COMPACT, false);
   for (const session of Object.values(store.data.sessions || {})) {
     normalizeSessionState(session, defaults);
+    if (!session.truthProfile) {
+      refreshSessionTruthProfile(session, sourceRegistry, {
+        reason: "startup",
+        bootstrapPending: true,
+      });
+      store.markDirty();
+    }
   }
+  store.saveThrottled();
   const pollTimeoutSeconds = Math.max(
     1,
     Math.min(
@@ -2027,6 +2675,27 @@ async function main() {
     if (!candidates.length) return null;
     return candidates
       .sort((left, right) => getJwtExpiryMs(right.tokens?.access_token) - getJwtExpiryMs(left.tokens?.access_token))[0];
+  }
+
+  function getBestAccountAccessExpiryMs(profile) {
+    const freshestAuth = selectFreshAuthForProfile(profile);
+    return maxFinitePositive([
+      profile?.expires,
+      getJwtExpiryMs(profile?.access),
+      getJwtExpiryMs(freshestAuth?.tokens?.access_token),
+    ]);
+  }
+
+  function isAccountProfileExpiredForSelection(profile) {
+    return isAccessExpiryExpired(getBestAccountAccessExpiryMs(profile));
+  }
+
+  function isAccountProfileSelectable(profile, { attemptedProfileIds = new Set(), allowBlocked = false } = {}) {
+    if (!profile?.profileId) return false;
+    if (attemptedProfileIds?.has?.(profile.profileId)) return false;
+    if (isAccountProfileExpiredForSelection(profile)) return false;
+    if (!allowBlocked && isAccountProfileTemporarilyBlocked(profile)) return false;
+    return true;
   }
 
   function readRuntimeAccountId() {
@@ -2138,25 +2807,33 @@ async function main() {
   }
 
   function resolveInitialAccountProfile() {
+    const selectable = (profile) => (
+      profile && isAccountProfileSelectable(profile, { allowBlocked: false })
+    );
+    const nonExpired = (profile) => profile && !isAccountProfileExpiredForSelection(profile);
+
     const stored = store.data.bridge?.currentAccountProfileId;
     if (stored) {
       const found = findAccountProfile(stored);
-      if (found) return found;
+      if (selectable(found)) return found;
     }
 
     const lastGood = store.data.bridge?.lastGoodAccountProfileId;
     if (lastGood) {
       const found = findAccountProfile(lastGood);
-      if (found) return found;
+      if (selectable(found)) return found;
     }
 
     const runtimeAccountId = readRuntimeAccountId();
     if (runtimeAccountId) {
       const found = accountProfiles.find((profile) => profile.accountId === runtimeAccountId);
-      if (found) return found;
+      if (selectable(found)) return found;
     }
 
-    return accountProfiles[0] || null;
+    return accountProfiles.find((profile) => selectable(profile))
+      || accountProfiles.find((profile) => nonExpired(profile))
+      || accountProfiles[0]
+      || null;
   }
 
   function writeAuthForProfile(profile) {
@@ -2296,17 +2973,20 @@ async function main() {
   function listFallbackProfiles(currentProfileId, attemptedProfileIds = new Set()) {
     const startIndex = accountProfiles.findIndex((profile) => profile.profileId === currentProfileId);
     const filterProfiles = (profiles) => profiles.filter((profile) => !attemptedProfileIds.has(profile.profileId));
+    const skipExpired = (profiles) => profiles.filter((profile) => !isAccountProfileExpiredForSelection(profile));
     const skipBlocked = (profiles) => profiles.filter((profile) => !isAccountProfileTemporarilyBlocked(profile));
     if (startIndex < 0) {
-      const available = skipBlocked(filterProfiles(accountProfiles));
-      return available.length ? available : filterProfiles(accountProfiles);
+      const fresh = skipExpired(filterProfiles(accountProfiles));
+      const available = skipBlocked(fresh);
+      return available.length ? available : fresh;
     }
     const rotated = [
       ...accountProfiles.slice(startIndex + 1),
       ...accountProfiles.slice(0, startIndex),
     ];
-    const available = skipBlocked(filterProfiles(rotated));
-    return available.length ? available : filterProfiles(rotated);
+    const fresh = skipExpired(filterProfiles(rotated));
+    const available = skipBlocked(fresh);
+    return available.length ? available : fresh;
   }
 
   async function verifySwitchedAccount(profile) {
@@ -2849,8 +3529,7 @@ async function main() {
       if (!method || !params) return;
 
       if (method === "token_count") {
-        const threadId = params?.threadId || params?.thread?.id || null;
-        const chatId = threadId ? chatIdForThread(threadId) : null;
+        const chatId = chatIdForTelemetry(params);
         if (!chatId) return;
         const session = getOrCreateSession(chatId);
         const recorded = recordContextUsageForSession(session, params);
@@ -2870,8 +3549,7 @@ async function main() {
       }
 
       if (method === "contextCompaction") {
-        const threadId = params?.threadId || params?.thread?.id || null;
-        const chatId = threadId ? chatIdForThread(threadId) : null;
+        const chatId = chatIdForTelemetry(params);
         if (!chatId) return;
         console.log(`Observed contextCompaction for chat ${chatId}`);
         return;
@@ -3367,7 +4045,12 @@ async function main() {
 
       if (method === "session/update") {
         if (!session) return { ok: true, result: {} };
-        if (typeof params?.cwd === "string" && params.cwd.trim()) session.cwd = params.cwd.trim();
+        if (typeof params?.cwd === "string" && params.cwd.trim()) {
+          setSessionCwdWithTruth(session, params.cwd.trim(), {
+            reason: "session/update",
+            bootstrapPending: true,
+          });
+        }
         if (typeof params?.model === "string" && params.model.trim()) session.model = params.model.trim();
         session.updatedAt = nowIso();
         store.markDirty();
@@ -3479,7 +4162,9 @@ async function main() {
     const key = String(chatId);
     const existing = store.data.sessions[key];
     if (existing && typeof existing === "object") {
-      return normalizeSessionState(existing, defaults);
+      const session = normalizeSessionState(existing, defaults);
+      ensureSessionTruthProfile(session, { reason: "session", bootstrapPending: false });
+      return session;
     }
     const created = normalizeSessionState({
       threadId: null,
@@ -3492,10 +4177,53 @@ async function main() {
       sandboxMode: defaults.sandboxMode,
       updatedAt: nowIso(),
     }, defaults);
+    refreshSessionTruthProfile(created, sourceRegistry, {
+      reason: "new-session",
+      bootstrapPending: true,
+    });
     store.data.sessions[key] = created;
     store.markDirty();
     store.saveThrottled();
     return created;
+  }
+
+  function ensureSessionTruthProfile(session, {
+    reason = "refresh",
+    bootstrapPending = false,
+  } = {}) {
+    const resolved = resolveSessionTruth(session, sourceRegistry);
+    const current = session.truthProfile;
+    const needsRefresh = !current
+      || current.id !== resolved.profile.id
+      || current.projectRoot !== resolved.profile.root
+      || current.matchPath !== resolved.matchPath;
+    if (!needsRefresh) return resolved;
+    refreshSessionTruthProfile(session, sourceRegistry, {
+      reason,
+      bootstrapPending,
+    });
+    store.markDirty();
+    store.saveThrottled();
+    return resolved;
+  }
+
+  function setSessionCwdWithTruth(session, cwd, {
+    reason = "cwd",
+    bootstrapPending = true,
+  } = {}) {
+    const nextCwd = normalizeAbsolutePath(cwd);
+    if (!nextCwd) {
+      throw new Error("A valid absolute project/cwd path is required.");
+    }
+    session.cwd = nextCwd;
+    refreshSessionTruthProfile(session, sourceRegistry, {
+      reason,
+      bootstrapPending,
+    });
+    session.updatedAt = nowIso();
+    store.markDirty();
+    store.saveThrottled();
+    return resolveSessionTruth(session, sourceRegistry);
   }
 
   function getTurnInputMeta(rt, turnId) {
@@ -3504,17 +4232,7 @@ async function main() {
   }
 
   function getReplayableAuthRecoveryTask(rt) {
-    if (!rt) return null;
-    if (rt.authRecoveryReplayTask?.text) {
-      return rt.authRecoveryReplayTask;
-    }
-    if (rt.activeTurnId) {
-      return buildAuthRecoveryReplayTask(getTurnInputMeta(rt, rt.activeTurnId), "active_turn");
-    }
-    if (rt.pendingInputMeta?.text) {
-      return buildAuthRecoveryReplayTask(rt.pendingInputMeta, "pending_request");
-    }
-    return null;
+    return getReplayableAuthRecoveryTaskFromRuntime(rt);
   }
 
   function queueAuthRecoveryReplayTask(rt, task) {
@@ -3527,11 +4245,7 @@ async function main() {
   function shouldHandoffAuthRecoveryToReplay(chatId) {
     if (chatId === null || chatId === undefined) return false;
     const rt = getRuntime(chatId);
-    return Boolean(
-      rt?.authRecoveryReplayTask?.text
-      || rt?.pendingInputMeta?.text
-      || rt?.activeTurnId,
-    );
+    return Boolean(getReplayableAuthRecoveryTask(rt));
   }
 
   function isSilentTurn(rt, turnId) {
@@ -3616,6 +4330,15 @@ async function main() {
       if (session && session.threadId === threadId) return Number(chatId);
     }
     return null;
+  }
+
+  function chatIdForTelemetry(params) {
+    const threadId = extractTelemetryThreadId(params);
+    if (threadId) return chatIdForThread(threadId);
+    const activeChats = [...runtimeByChat.entries()]
+      .filter(([, rt]) => rt?.activeTurnId)
+      .map(([chatId]) => Number(chatId));
+    return activeChats.length === 1 ? activeChats[0] : null;
   }
 
   async function resetSessionThread(chatId, session, { clearCompactionHistory = true } = {}) {
@@ -3750,14 +4473,22 @@ async function main() {
   async function recoverCodexBackendFromAuthFailure(event) {
     const reason = event?.reason || "Codex backend auth failure";
     reloadAccountProfiles({ reason: "auth_failure", silent: true });
-    const currentProfile = getCurrentAccountProfile();
+    const currentProfile = findAccountProfile(store.data.bridge?.currentAccountProfileId)
+      || getCurrentAccountProfile();
     if (currentProfile) {
       markProfileForRecoveryError(currentProfile, { message: reason });
     }
     markCodexBackendRecovering(reason);
     const captured = captureInterruptedTurnsForRecovery();
+    const attempted = new Set(currentProfile?.profileId ? [currentProfile.profileId] : []);
+    const fallbackProfiles = autoAccountFailover && accountProfiles.length >= 2
+      ? listFallbackProfiles(currentProfile?.profileId, attempted)
+      : [];
+    const shouldRetryCurrent = currentProfile
+      && !isAccountProfileExpiredForSelection(currentProfile)
+      && (!isAccountAuthFailureText(reason) || fallbackProfiles.length === 0);
 
-    if (currentProfile) {
+    if (shouldRetryCurrent) {
       try {
         await switchAccountProfile(currentProfile, {
           allowActiveTurns: true,
@@ -3784,10 +4515,8 @@ async function main() {
       return false;
     }
 
-    const attempted = new Set(currentProfile?.profileId ? [currentProfile.profileId] : []);
-    const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
     if (!fallbackProfiles.length) {
-      markCodexBackendRecoveryFailed("Auth watchdog fired, but every spare account is temporarily blocked.");
+      markCodexBackendRecoveryFailed("Auth watchdog fired, but every spare account is expired or temporarily blocked.");
       clearAllQueuedAuthRecoveryTasks();
       await notifyInterruptedTurns(
         captured,
@@ -3880,6 +4609,9 @@ async function main() {
     reloadAccountProfiles({ reason: "switchAccountProfile", silent: true });
     const resolvedProfile = profile?.profileId ? findAccountProfile(profile.profileId) : null;
     const effectiveProfile = resolvedProfile || profile;
+    if (isAccountProfileExpiredForSelection(effectiveProfile)) {
+      throw new Error(`Codex account ${effectiveProfile.profileId || "unknown"} has an expired access token. Run /authsync or sign in again before selecting it.`);
+    }
 
     stopTypingForAllChats();
     const previousProfile = getCurrentAccountProfile();
@@ -4200,10 +4932,21 @@ async function main() {
       }
 
       let inputText = text;
+      let appliedTruthBootstrap = false;
+      const truthResolved = kind === "user"
+        ? ensureSessionTruthProfile(session, {
+            reason: "turn-start",
+            bootstrapPending: true,
+          })
+        : null;
       let appliedSummaryBootstrap = false;
       if (kind === "user" && session.pendingSummaryBootstrap?.text) {
         inputText = buildCompactionBootstrapText(session.pendingSummaryBootstrap, text);
         appliedSummaryBootstrap = true;
+      }
+      if (kind === "user" && session.truthProfile?.bootstrapPending && truthResolved?.profile) {
+        inputText = buildTruthBootstrapText(truthResolved, inputText);
+        appliedTruthBootstrap = true;
       }
 
       rt.items = {};
@@ -4234,6 +4977,13 @@ async function main() {
           });
           if (appliedSummaryBootstrap) {
             session.pendingSummaryBootstrap = null;
+            session.updatedAt = nowIso();
+            store.markDirty();
+            store.saveThrottled();
+          }
+          if (appliedTruthBootstrap && session.truthProfile) {
+            session.truthProfile.bootstrapPending = false;
+            session.truthProfile.lastBootstrapAt = nowIso();
             session.updatedAt = nowIso();
             store.markDirty();
             store.saveThrottled();
@@ -4602,20 +5352,37 @@ async function main() {
     }
 
     if (trimmed.startsWith("/cwd ")) {
-      session.cwd = trimmed.slice("/cwd ".length).trim();
-      session.updatedAt = nowIso();
-      store.markDirty();
-      store.saveThrottled();
-      await telegram.sendMessage({ chat_id: chatId, text: `cwd set to: ${session.cwd}` });
+      const resolved = setSessionCwdWithTruth(session, trimmed.slice("/cwd ".length).trim(), {
+        reason: "/cwd",
+        bootstrapPending: true,
+      });
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: [
+          `cwd set to: ${session.cwd}`,
+          `truth profile: ${resolved.profile.name} (${resolved.profile.id})`,
+          "Next user turn will include a source-of-truth bootstrap.",
+        ].join("\n"),
+      });
       return;
     }
 
     if (trimmed.startsWith("/project ")) {
-      session.cwd = trimmed.slice("/project ".length).trim();
+      const resolved = setSessionCwdWithTruth(session, trimmed.slice("/project ".length).trim(), {
+        reason: "/project",
+        bootstrapPending: true,
+      });
       await resetSessionThread(chatId, session);
+      session.truthProfile.bootstrapPending = true;
+      store.markDirty();
+      store.saveThrottled();
       await telegram.sendMessage({
         chat_id: chatId,
-        text: `project switched to: ${session.cwd}\nStarted with a fresh thread next time you message.`,
+        text: [
+          `project switched to: ${session.cwd}`,
+          `truth profile: ${resolved.profile.name} (${resolved.profile.id})`,
+          "Started with a fresh thread next time you message.",
+        ].join("\n"),
       });
       return;
     }
@@ -4720,6 +5487,36 @@ async function main() {
       return;
     }
 
+    if (trimmed === "/truth") {
+      ensureSessionTruthProfile(session, { reason: "/truth", bootstrapPending: false });
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: truncateMiddle(formatTruthProfileText(session, sourceRegistry), 3900),
+      });
+      return;
+    }
+
+    if (trimmed === "/refresh") {
+      reloadSourceRegistry({ reason: "/refresh" });
+      refreshSessionTruthProfile(session, sourceRegistry, {
+        reason: "/refresh",
+        bootstrapPending: true,
+      });
+      session.updatedAt = nowIso();
+      store.markDirty();
+      store.saveThrottled();
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: [
+          "Source truth profile refreshed.",
+          `profile: ${session.truthProfile?.name || "(unknown)"} (${session.truthProfile?.id || "unknown"})`,
+          `projectRoot: ${session.truthProfile?.projectRoot || "(unknown)"}`,
+          "Next user turn will include a source-of-truth bootstrap.",
+        ].join("\n"),
+      });
+      return;
+    }
+
     if (trimmed === "/authsync") {
       reloadAccountProfiles({ reason: "/authsync" });
       const profile = getCurrentAccountProfile();
@@ -4760,6 +5557,7 @@ async function main() {
           `activeTurnId: ${rt.activeTurnId || "(none)"}`,
           `queuedTasks: ${getQueuedTaskCount(rt)}`,
           `contextUsage: ${formatContextUsageLine(session)}`,
+          `contextTokens: ${session.contextTokens || "(unknown)"}`,
           `contextWindow: ${session.contextWindow || "(unknown)"}`,
           `lastTurnTokens: ${session.lastTurnTokens || "(unknown)"}`,
           `compactionPending: ${session.compactionPending ? `yes${session.compactionPendingReason ? ` (${session.compactionPendingReason})` : ""}` : "no"}`,
@@ -4767,6 +5565,10 @@ async function main() {
           `lastCompactionAt: ${session.lastCompactionAt || "(never)"}`,
           `compactionGeneration: ${session.compactionGeneration || 0}`,
           `cwd: ${session.cwd}`,
+          `truthProfile: ${session.truthProfile?.name || "(unbound)"} (${session.truthProfile?.id || "none"})`,
+          `truthRoot: ${session.truthProfile?.projectRoot || "(unknown)"}`,
+          `truthRefreshedAt: ${session.truthProfile?.lastRefreshedAt || "(never)"}`,
+          `truthBootstrapPending: ${session.truthProfile?.bootstrapPending ? "yes" : "no"}`,
           `model: ${session.model}`,
           `effort: ${session.effort}`,
           `account: ${meta.currentAccountLabel || "(default)"}`,
@@ -4858,8 +5660,22 @@ async function main() {
         }
 
         if (actionType === "status" || actionType === "refresh") {
+          if (actionType === "refresh") {
+            reloadSourceRegistry({ reason: "menu-refresh", silent: true });
+            ensureSessionTruthProfile(session, { reason: "menu-refresh", bootstrapPending: false });
+          }
           await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "Refreshed", show_alert: false });
           await renderMenuMessage(chatId, cbq.message.message_id);
+          return;
+        }
+
+        if (actionType === "truth") {
+          ensureSessionTruthProfile(session, { reason: "menu-truth", bootstrapPending: false });
+          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "Truth profile", show_alert: false });
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: truncateMiddle(formatTruthProfileText(session, sourceRegistry), 3900),
+          });
           return;
         }
 
@@ -4890,11 +5706,15 @@ async function main() {
         }
 
         if (actionType === "cwd" && value) {
-          session.cwd = value;
-          session.updatedAt = nowIso();
-          store.markDirty();
-          store.saveThrottled();
+          const resolved = setSessionCwdWithTruth(session, value, {
+            reason: "menu-cwd",
+            bootstrapPending: true,
+          });
           await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `cwd => ${value}`, show_alert: false });
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: `truth profile: ${resolved.profile.name} (${resolved.profile.id})`,
+          });
           await renderMenuMessage(chatId, cbq.message.message_id);
           return;
         }
@@ -5015,6 +5835,8 @@ async function main() {
   console.log("Telegram Codex Bridge started.");
   if (allowlist) console.log(`Allowlist enabled (${allowlist.size} chat ids).`);
   console.log(`Store: ${storePath}`);
+  console.log(`Source registry: ${sourceRegistry.registryPath || "(builtin)"}`);
+  if (sourceRegistry.registryError) console.warn(`Source registry warning: ${sourceRegistry.registryError}`);
 
   await pollingLoop();
 }
@@ -5030,14 +5852,27 @@ module.exports = {
     shouldAutoCompactDecision,
     isContextFailurePatternMatch,
     shouldTreatTextAsContextFailure,
+    extractTelemetryThreadId,
     isAccountAuthFailureText,
+    isAccessExpiryExpired,
+    isAccountProfileAccessExpired,
     buildAuthRecoveryReplayTask,
+    getReplayableAuthRecoveryTaskFromRuntime,
     summarizeCodexBackendHealth,
     buildCompactionBootstrapText,
     countQueuedTasks,
+    normalizeSessionState,
     normalizeModelId,
     normalizeEffortLevel,
     parseModelCommandArgs,
+    buildSourceRegistry,
+    normalizeSourceProfile,
+    findSourceProfileForPath,
+    refreshSessionTruthProfile,
+    formatTruthProfileText,
+    buildTruthBootstrapText,
+    filterDesktopCodexConfigToml,
+    syncDesktopCodexContext,
     resolveAgentMessageTurnId,
     shouldRetryTelegramMethod,
   },

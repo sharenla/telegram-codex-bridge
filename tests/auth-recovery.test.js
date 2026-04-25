@@ -41,6 +41,43 @@ test("buildAuthRecoveryReplayTask stops after one automatic replay", () => {
   assert.equal(task, null);
 });
 
+test("getReplayableAuthRecoveryTaskFromRuntime refuses second replay handoff", () => {
+  const task = _test.getReplayableAuthRecoveryTaskFromRuntime({
+    pendingInputMeta: {
+      text: "刚才 replay 过一次的输入",
+      authReplayCount: 1,
+    },
+  });
+
+  assert.equal(task, null);
+});
+
+test("getReplayableAuthRecoveryTaskFromRuntime builds first pending replay task", () => {
+  const task = _test.getReplayableAuthRecoveryTaskFromRuntime({
+    pendingInputMeta: {
+      text: "第一次可以续跑",
+      authReplayCount: 0,
+    },
+  });
+
+  assert.equal(task.text, "第一次可以续跑");
+  assert.equal(task.source, "pending_request");
+  assert.equal(task.authReplayCount, 1);
+});
+
+test("isAccountProfileAccessExpired respects access-token expiry skew", () => {
+  const nowMs = Date.parse("2026-04-25T00:00:00.000Z");
+  assert.equal(
+    _test.isAccountProfileAccessExpired({ expires: nowMs + 4 * 60 * 1000 }, nowMs, 5 * 60 * 1000),
+    true,
+  );
+  assert.equal(
+    _test.isAccountProfileAccessExpired({ expires: nowMs + 6 * 60 * 1000 }, nowMs, 5 * 60 * 1000),
+    false,
+  );
+  assert.equal(_test.isAccountProfileAccessExpired({ expires: 0 }, nowMs), false);
+});
+
 test("summarizeCodexBackendHealth highlights recovery and last error", () => {
   const summary = _test.summarizeCodexBackendHealth({
     state: "recovering",

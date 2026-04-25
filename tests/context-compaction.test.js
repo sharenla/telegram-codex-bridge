@@ -10,7 +10,8 @@ test("extractContextUsageSnapshotPayload supports snake_case payloads", () => {
   });
 
   assert.deepEqual(snapshot, {
-    totalTokens: 12345,
+    contextTokens: null,
+    lastTurnTokens: 12345,
     contextWindow: 200000,
   });
 });
@@ -22,8 +23,25 @@ test("extractContextUsageSnapshotPayload supports camelCase payloads", () => {
   });
 
   assert.deepEqual(snapshot, {
-    totalTokens: 54321,
+    contextTokens: null,
+    lastTurnTokens: 54321,
     contextWindow: 128000,
+  });
+});
+
+test("extractContextUsageSnapshotPayload prefers total usage for context occupancy", () => {
+  const snapshot = _test.extractContextUsageSnapshotPayload({
+    info: {
+      total_token_usage: { total_tokens: 170000 },
+      last_token_usage: { total_tokens: 12345 },
+      model_context_window: 200000,
+    },
+  });
+
+  assert.deepEqual(snapshot, {
+    contextTokens: 170000,
+    lastTurnTokens: 12345,
+    contextWindow: 200000,
   });
 });
 
@@ -37,18 +55,36 @@ test("applyContextUsageSnapshot updates ratio and pending reason", () => {
 
   const changed = _test.applyContextUsageSnapshot(
     session,
-    { totalTokens: 170000, contextWindow: 200000 },
+    { contextTokens: 170000, lastTurnTokens: 12345, contextWindow: 200000 },
     thresholds,
     "2026-04-14T00:00:00.000Z",
   );
 
   assert.equal(changed, true);
-  assert.equal(session.lastTurnTokens, 170000);
+  assert.equal(session.contextTokens, 170000);
+  assert.equal(session.lastTurnTokens, 12345);
   assert.equal(session.contextWindow, 200000);
   assert.equal(session.contextUsageRatio, 0.85);
   assert.equal(session.compactionPending, true);
   assert.equal(session.compactionPendingReason, "hard");
   assert.equal(session.lastTokenObservedAt, "2026-04-14T00:00:00.000Z");
+});
+
+test("normalizeSessionState treats zero context windows as unknown", () => {
+  const session = {
+    contextWindow: 0,
+    contextTokens: 1000,
+    lastTurnTokens: 100,
+  };
+
+  _test.normalizeSessionState(session, {});
+
+  assert.equal(session.contextWindow, null);
+});
+
+test("extractTelemetryThreadId accepts snake_case thread ids", () => {
+  assert.equal(_test.extractTelemetryThreadId({ thread_id: "thread-a" }), "thread-a");
+  assert.equal(_test.extractTelemetryThreadId({ context: { thread_id: "thread-b" } }), "thread-b");
 });
 
 test("shouldAutoCompactDecision only returns hard/emergency when enabled", () => {
