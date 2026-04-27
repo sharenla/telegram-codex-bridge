@@ -308,7 +308,44 @@ function readCodexAuth(authPath) {
   return parsed;
 }
 
-function loadCodexAccountProfiles(sourcePath) {
+function normalizeAccountSelectorList(value) {
+  return normalizeStringList(value).map((item) => item.toLowerCase());
+}
+
+function profileMatchesAccountSelector(profile, selector) {
+  const normalized = String(selector || "").trim().toLowerCase();
+  if (!normalized || !profile) return false;
+  return [
+    profile.profileId,
+    profile.accountId,
+    profile.label,
+    profile.shortLabel,
+  ].some((candidate) => String(candidate || "").trim().toLowerCase() === normalized);
+}
+
+function isAccountProfileLastResort(profile, selectors = []) {
+  return selectors.some((selector) => profileMatchesAccountSelector(profile, selector));
+}
+
+function sortAccountProfilesByPriority(profiles) {
+  return [...(profiles || [])].sort((left, right) => {
+    const lastResortOrder = Number(Boolean(left.lastResort)) - Number(Boolean(right.lastResort));
+    if (lastResortOrder !== 0) return lastResortOrder;
+    return String(left.label || left.profileId || "").localeCompare(String(right.label || right.profileId || ""));
+  });
+}
+
+function prioritizeAccountProfiles(profiles) {
+  const preferred = [];
+  const lastResort = [];
+  for (const profile of profiles || []) {
+    if (profile?.lastResort) lastResort.push(profile);
+    else preferred.push(profile);
+  }
+  return [...preferred, ...lastResort];
+}
+
+function loadCodexAccountProfiles(sourcePath, { lastResortAccounts = "" } = {}) {
   if (!sourcePath) return [];
   const resolved = resolveUserPath(sourcePath);
   const parsed = loadJsonFile(resolved);
@@ -317,6 +354,7 @@ function loadCodexAccountProfiles(sourcePath) {
     parsed.profiles && typeof parsed.profiles === "object" ? parsed.profiles : parsed;
   const items = [];
   const seen = new Set();
+  const lastResortSelectors = normalizeAccountSelectorList(lastResortAccounts);
 
   for (const [profileId, profile] of Object.entries(profileMap)) {
     if (!profile || typeof profile !== "object") continue;
@@ -334,25 +372,28 @@ function loadCodexAccountProfiles(sourcePath) {
       (typeof profileInfo.email === "string" && profileInfo.email) ||
       (typeof jwt?.email === "string" && jwt.email) ||
       null;
+    const label = email || accountId || profileId;
+    const shortLabel = truncateLabel(label, 24);
 
     const dedupeKey = `${accountId || "none"}:${profile.refresh.slice(-16)}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
-    items.push({
+    const item = {
       profileId,
       accountId,
-      label: email || accountId || profileId,
-      shortLabel: truncateLabel(email || accountId || profileId, 24),
+      label,
+      shortLabel,
       access: profile.access,
       refresh: profile.refresh,
       expires: Number.isFinite(profile.expires) ? profile.expires : getJwtExpiryMs(profile.access),
       sourcePath: resolved,
-    });
+    };
+    item.lastResort = isAccountProfileLastResort(item, lastResortSelectors);
+    items.push(item);
   }
 
-  items.sort((left, right) => left.label.localeCompare(right.label));
-  return items;
+  return sortAccountProfilesByPriority(items);
 }
 
 function parseCsvIds(value) {
@@ -2030,7 +2071,10 @@ function buildAccountsText(accountProfiles, currentProfileId) {
   const lines = ["Available Codex accounts:"];
   for (const [index, profile] of accountProfiles.entries()) {
     const marker = profile.profileId === currentProfileId ? "*" : " ";
-    const detail = profile.accountId ? ` (${profile.accountId.slice(0, 8)})` : "";
+    const detailParts = [];
+    if (profile.accountId) detailParts.push(profile.accountId.slice(0, 8));
+    if (profile.lastResort) detailParts.push("last resort");
+    const detail = detailParts.length ? ` (${detailParts.join(", ")})` : "";
     lines.push(`${marker} ${index + 1}. ${profile.label}${detail}`);
   }
   lines.push("");
@@ -2527,13 +2571,14 @@ async function main() {
   const authTemplate = readCodexAuth(runtimeAuthPath) || readCodexAuth(fallbackAuthPath);
   const accountsSourceDefault = path.join(os.homedir(), ".openclaw", "agents", "main", "agent", "auth-profiles.json");
   const accountsSource = process.env.CODEX_ACCOUNTS_SOURCE || (fs.existsSync(accountsSourceDefault) ? accountsSourceDefault : "");
-  let accountProfiles = loadCodexAccountProfiles(accountsSource);
+  const lastResortAccounts = process.env.CODEX_LAST_RESORT_ACCOUNTS || "";
+  let accountProfiles = loadCodexAccountProfiles(accountsSource, { lastResortAccounts });
   let autoAccountFailover = accountProfiles.length > 1
     && parseBooleanEnv(process.env.CODEX_AUTO_ACCOUNT_FAILOVER, true);
 
   function reloadAccountProfiles({ reason = "reload", silent = false } = {}) {
     const previous = accountProfiles;
-    const next = loadCodexAccountProfiles(accountsSource);
+    const next = loadCodexAccountProfiles(accountsSource, { lastResortAccounts });
     accountProfiles = next;
     autoAccountFailover = accountProfiles.length > 1
       && parseBooleanEnv(process.env.CODEX_AUTO_ACCOUNT_FAILOVER, true);
@@ -2811,28 +2856,31 @@ async function main() {
       profile && isAccountProfileSelectable(profile, { allowBlocked: false })
     );
     const nonExpired = (profile) => profile && !isAccountProfileExpiredForSelection(profile);
+    const hasPreferredSelectable = accountProfiles.some((profile) => !profile.lastResort && selectable(profile));
+    const canUseCandidate = (profile) => profile && (!profile.lastResort || !hasPreferredSelectable);
 
     const stored = store.data.bridge?.currentAccountProfileId;
     if (stored) {
       const found = findAccountProfile(stored);
-      if (selectable(found)) return found;
+      if (selectable(found) && canUseCandidate(found)) return found;
     }
 
     const lastGood = store.data.bridge?.lastGoodAccountProfileId;
     if (lastGood) {
       const found = findAccountProfile(lastGood);
-      if (selectable(found)) return found;
+      if (selectable(found) && canUseCandidate(found)) return found;
     }
 
     const runtimeAccountId = readRuntimeAccountId();
     if (runtimeAccountId) {
       const found = accountProfiles.find((profile) => profile.accountId === runtimeAccountId);
-      if (selectable(found)) return found;
+      if (selectable(found) && canUseCandidate(found)) return found;
     }
 
-    return accountProfiles.find((profile) => selectable(profile))
-      || accountProfiles.find((profile) => nonExpired(profile))
-      || accountProfiles[0]
+    const priorityProfiles = prioritizeAccountProfiles(accountProfiles);
+    return priorityProfiles.find((profile) => selectable(profile))
+      || priorityProfiles.find((profile) => nonExpired(profile))
+      || priorityProfiles[0]
       || null;
   }
 
@@ -2978,13 +3026,13 @@ async function main() {
     if (startIndex < 0) {
       const fresh = skipExpired(filterProfiles(accountProfiles));
       const available = skipBlocked(fresh);
-      return available.length ? available : fresh;
+      return available.length ? prioritizeAccountProfiles(available) : prioritizeAccountProfiles(fresh);
     }
     const rotated = [
       ...accountProfiles.slice(startIndex + 1),
       ...accountProfiles.slice(0, startIndex),
     ];
-    const fresh = skipExpired(filterProfiles(rotated));
+    const fresh = skipExpired(filterProfiles(prioritizeAccountProfiles(rotated)));
     const available = skipBlocked(fresh);
     return available.length ? available : fresh;
   }
@@ -5856,6 +5904,10 @@ module.exports = {
     isAccountAuthFailureText,
     isAccessExpiryExpired,
     isAccountProfileAccessExpired,
+    normalizeAccountSelectorList,
+    isAccountProfileLastResort,
+    sortAccountProfilesByPriority,
+    prioritizeAccountProfiles,
     buildAuthRecoveryReplayTask,
     getReplayableAuthRecoveryTaskFromRuntime,
     summarizeCodexBackendHealth,

@@ -78,6 +78,31 @@ test("isAccountProfileAccessExpired respects access-token expiry skew", () => {
   assert.equal(_test.isAccountProfileAccessExpired({ expires: 0 }, nowMs), false);
 });
 
+test("account priority keeps configured last-resort profiles at the end", () => {
+  const selectors = _test.normalizeAccountSelectorList("zheng_zhonghuai@163.com, openai-codex:backup");
+  const profiles = [
+    { profileId: "openai-codex:backup", label: "backup@example.com" },
+    { profileId: "openai-codex:alpha", label: "alpha@example.com" },
+    { profileId: "openai-codex:163", label: "zheng_zhonghuai@163.com" },
+  ].map((profile) => ({
+    ...profile,
+    lastResort: _test.isAccountProfileLastResort(profile, selectors),
+  }));
+
+  assert.deepEqual(
+    _test.sortAccountProfilesByPriority(profiles).map((profile) => profile.profileId),
+    ["openai-codex:alpha", "openai-codex:backup", "openai-codex:163"],
+  );
+  assert.deepEqual(
+    _test.prioritizeAccountProfiles([
+      profiles[2],
+      profiles[1],
+      profiles[0],
+    ]).map((profile) => profile.profileId),
+    ["openai-codex:alpha", "openai-codex:163", "openai-codex:backup"],
+  );
+});
+
 test("summarizeCodexBackendHealth highlights recovery and last error", () => {
   const summary = _test.summarizeCodexBackendHealth({
     state: "recovering",

@@ -269,9 +269,13 @@ CODEX_CONTEXT_SYNC=1
 
 ```bash
 CODEX_AUTO_ACCOUNT_FAILOVER=1
+# optional: try these accounts only after other usable accounts
+CODEX_LAST_RESORT_ACCOUNTS=someone@example.com
 ```
 
 这样遇到 429 / quota / rate-limit 这类账号层错误时，会自动切到下一个账号再重试
+
+`CODEX_LAST_RESORT_ACCOUNTS` 可以填邮箱、profileId 或 accountId；匹配到的账号仍可手动 `/account` 选择，但自动启动和故障切换会优先尝试其他可用账号。
 
 ### 上下文占用与手动压缩
 
@@ -541,9 +545,13 @@ If you need two machines online at the same time:
 
 ```bash
 CODEX_AUTO_ACCOUNT_FAILOVER=1
+# optional: try these accounts only after other usable accounts
+CODEX_LAST_RESORT_ACCOUNTS=someone@example.com
 ```
 
 That allows the bridge to switch to the next account and retry when it hits account-level failures such as 429, quota, or rate-limit errors.
+
+`CODEX_LAST_RESORT_ACCOUNTS` accepts emails, profileIds, or accountIds. Matching accounts remain manually selectable with `/account`, but automatic startup and failover prefer other usable accounts first.
 
 ### Context Usage And Manual Compaction
 
