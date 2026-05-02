@@ -109,7 +109,11 @@ codex app-server --listen stdio://
 - `/compact`：把当前 thread 压缩成摘要，并切到一个新的 thread
 - `/stop`：中断当前 turn；在群聊里还会清空已排队的新任务
 - `/cwd /abs/path`：切换工作目录
-- `/project /abs/path`：切换项目并重置 thread
+- `/projects`：列出 source-of-truth 项目
+- `/project <index|id|path>`：切换项目并重置 thread
+- `/sessions`：列出当前 cwd 下最近的 Codex sessions
+- `/resume <index|threadId>`：把当前 Telegram 会话绑定到已有 Codex thread
+- `/handback`：打印可在本机终端执行的 `codex resume` 命令
 - `/models`：查看推荐模型；内置快捷别名 `5.2 / 5.4 / 5.5`
 - `/model 5.4`：切模型（会保存成 `gpt-5.4`）
 - `/model 5.5 xhigh`：同时切模型和思考等级
@@ -128,6 +132,8 @@ codex app-server --listen stdio://
 自动路由默认关闭，避免升级后改变现有会话行为。设置 `CODEX_AUTO_ROUTE=auto` 或发送 `/autoroute auto` 后，bridge 会在每个新 turn 前按确定性规则选择 `model / effort`：简单文本走 `gpt-5.2 / low`，普通代码任务走 `gpt-5.4 / high`，命中 live/runtime/auth/deploy/trading/root-cause 等高风险信号时走 `gpt-5.5 / xhigh`。`/autoroute suggest` 只记录和预览，不自动覆盖；`/autoroute lock` 会保留当前手动选择。
 
 扩展命令默认只读，不会安装或启用插件。普通消息里如果写入 `$app`、`$skill` 或 `$plugin` 名称，bridge 会尽量把它转换成 Codex app-server 的精确 `mention` input；如果当前 app-server 不支持对应列表接口，会降级为普通文本。
+
+桌面端体验相关命令优先围绕“选对项目、接上已有 thread、能随时交还本机 Codex”设计。`/projects` 使用同一份 source registry，避免 Telegram 会话长期停在 `/Users/wukong`；`/sessions` 和 `/resume` 走 app-server 的 thread 列表/恢复接口；`/handback` 用于从 Telegram 切回本机 CLI。
 
 ### 群聊行为
 
@@ -407,7 +413,11 @@ codex app-server --listen stdio://
 - `/compact`: compact the current thread into a fresh thread with a summary bootstrap
 - `/stop`: interrupt the current turn; in groups it also clears queued follow-up tasks
 - `/cwd /abs/path`: switch working directory
-- `/project /abs/path`: switch project and reset the thread
+- `/projects`: list source-of-truth projects
+- `/project <index|id|path>`: switch project and reset the thread
+- `/sessions`: list recent Codex sessions for the current cwd
+- `/resume <index|threadId>`: bind this Telegram chat to an existing Codex thread
+- `/handback`: print a local `codex resume` command for the current thread
 - `/models`: show recommended models; built-in short aliases are `5.2 / 5.4 / 5.5`
 - `/model 5.4`: switch model (stored as `gpt-5.4`)
 - `/model 5.5 xhigh`: switch model and reasoning effort together
@@ -426,6 +436,8 @@ codex app-server --listen stdio://
 Automatic routing is off by default so upgrades do not change existing chat behavior. Set `CODEX_AUTO_ROUTE=auto` or send `/autoroute auto` to classify each new turn before it starts: simple text tasks use `gpt-5.2 / low`, normal coding tasks use `gpt-5.4 / high`, and live/runtime/auth/deploy/trading/root-cause signals use `gpt-5.5 / xhigh`. `/autoroute suggest` records/previews without overriding; `/autoroute lock` keeps the current manual choice.
 
 Extension commands are read-only by default and never install or enable plugins. When a plain message includes `$app`, `$skill`, or `$plugin` names, the bridge best-effort converts them into precise Codex app-server `mention` input; if the active app-server does not support the matching list method, the text is sent unchanged.
+
+Desktop-parity commands focus on choosing the right project, attaching existing threads, and handing work back to local Codex. `/projects` uses the same source registry so Telegram chats do not stay stuck at `/Users/wukong`; `/sessions` and `/resume` use app-server thread listing/resume; `/handback` is the Telegram-to-local CLI bridge.
 
 ### Group behavior
 

@@ -1654,6 +1654,132 @@ function buildExtensionMentionInputItems(text, { skillsResult = null, appsResult
   return items.slice(0, EXTENSION_MENTION_LIMIT);
 }
 
+function listSelectableSourceProfiles(registry, { includeHome = false } = {}) {
+  const profiles = Array.isArray(registry?.profiles) ? registry.profiles : [];
+  return profiles.filter((profile) => {
+    if (!profile?.id || !profile?.root) return false;
+    if (!includeHome && (profile.id === "home-workspace" || profile.id === "cwd-only")) return false;
+    return true;
+  });
+}
+
+function sourceProfileBadges(profile) {
+  const sources = profile?.sources || {};
+  return [
+    sources.liveRuntime?.length ? "runtime" : null,
+    sources.installedServiceCopy ? "service" : null,
+    sources.stateFiles?.length ? "state" : null,
+    sources.logs?.length ? "logs" : null,
+    sources.launchAgents?.length ? "launchd" : null,
+    sources.remoteHosts?.length ? "remote" : null,
+  ].filter(Boolean);
+}
+
+function formatProjectListText(registry, { currentCwd = "" } = {}) {
+  const profiles = listSelectableSourceProfiles(registry);
+  const lines = [`Projects (${profiles.length})`];
+  if (registry?.registryPath) lines.push(`registry: ${registry.registryPath}`);
+  if (registry?.registryError) lines.push(`registryError: ${registry.registryError}`);
+  if (!profiles.length) {
+    lines.push("- no project profiles available");
+    return lines.join("\n");
+  }
+  profiles.forEach((profile, index) => {
+    const active = currentCwd && findSourceProfileForPath({ profiles: [profile] }, currentCwd) ? "*" : " ";
+    const badges = sourceProfileBadges(profile);
+    lines.push(`${active}${index + 1}. ${profile.id} - ${profile.name}`);
+    lines.push(`   ${profile.root}${badges.length ? ` [${badges.join(", ")}]` : ""}`);
+  });
+  lines.push("");
+  lines.push("Use /project <index|id|path> to switch and start a fresh thread.");
+  return lines.join("\n");
+}
+
+function resolveProjectSelector(registry, selector) {
+  const raw = String(selector || "").trim();
+  if (!raw) return { type: "error", error: "Usage: /project <index|id|path>" };
+  const profiles = listSelectableSourceProfiles(registry);
+  if (/^\d+$/.test(raw)) {
+    const index = Number(raw);
+    const profile = profiles[index - 1];
+    if (profile) return { type: "profile", profile, selector: raw };
+    return { type: "error", error: `No project #${index}. Use /projects to list available projects.` };
+  }
+
+  const lowered = raw.toLowerCase();
+  const exact = profiles.find((profile) => {
+    const names = [
+      profile.id,
+      profile.name,
+      path.basename(profile.root || ""),
+      ...(profile.aliases || []),
+    ].filter(Boolean).map((item) => String(item).toLowerCase());
+    return names.includes(lowered);
+  });
+  if (exact) return { type: "profile", profile: exact, selector: raw };
+
+  const fuzzy = profiles.filter((profile) => {
+    const haystack = [
+      profile.id,
+      profile.name,
+      profile.root,
+      profile.sources?.canonicalRepo,
+      profile.sources?.installedServiceCopy,
+      ...(profile.aliases || []),
+    ].filter(Boolean).join(" ").toLowerCase();
+    return haystack.includes(lowered);
+  });
+  if (fuzzy.length === 1) return { type: "profile", profile: fuzzy[0], selector: raw };
+  if (fuzzy.length > 1) {
+    return {
+      type: "error",
+      error: [
+        `Project selector "${raw}" is ambiguous:`,
+        ...fuzzy.slice(0, 8).map((profile) => `- ${profile.id} (${profile.root})`),
+      ].join("\n"),
+    };
+  }
+
+  return { type: "path", path: raw, selector: raw };
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value || "").replace(/'/g, "'\\''")}'`;
+}
+
+function buildHandbackCommand({ cwd, threadId }) {
+  if (!threadId) return null;
+  return `cd ${shellSingleQuote(cwd || ".")} && codex resume ${shellSingleQuote(threadId)}`;
+}
+
+function normalizeThreadListData(result) {
+  const items = normalizeExtensionListData(result);
+  return items
+    .map((item) => item?.thread || item)
+    .filter((thread) => thread && typeof thread === "object" && (thread.id || thread.threadId));
+}
+
+function formatThreadListText(result, { currentThreadId = null, currentCwd = "", maxItems = 12 } = {}) {
+  const threads = normalizeThreadListData(result);
+  const lines = [`Sessions (${threads.length})`];
+  if (currentCwd) lines.push(`cwd: ${currentCwd}`);
+  if (!threads.length) {
+    lines.push("- no stored Codex sessions reported for this cwd");
+    return lines.join("\n");
+  }
+  threads.slice(0, maxItems).forEach((thread, index) => {
+    const id = thread.id || thread.threadId;
+    const active = currentThreadId && id === currentThreadId ? "*" : " ";
+    const status = thread.status ? ` [${thread.status}]` : "";
+    const preview = compactOneLine(thread.preview || thread.name || thread.title || "", 90);
+    lines.push(`${active}${index + 1}. ${id}${status}${preview ? ` - ${preview}` : ""}`);
+  });
+  if (threads.length > maxItems) lines.push(`... ${threads.length - maxItems} more`);
+  lines.push("");
+  lines.push("Use /resume <index|threadId> to attach this chat to a session.");
+  return lines.join("\n");
+}
+
 function parseModelCommandArgs(rawArgs) {
   const parts = String(rawArgs || "").trim().split(/\s+/).filter(Boolean);
   if (!parts.length) {
@@ -2689,7 +2815,11 @@ function buildHelpText() {
     "/truth - show current source-of-truth profile",
     "/refresh - reload the source-of-truth binding for this chat",
     "/cwd <path> - set working dir for this chat",
-    "/project <path> - set project truth profile and start a fresh thread",
+    "/projects - list source-of-truth projects",
+    "/project <index|id|path> - set project truth profile and start a fresh thread",
+    "/sessions - list recent Codex sessions for this cwd",
+    "/resume <index|threadId> - attach this chat to an existing Codex session",
+    "/handback - print a local `codex resume` command for the current thread",
     "/model <5.2|5.4|5.5|id> [effort] - set model, optionally with reasoning effort",
     "/effort <none|minimal|low|medium|high|xhigh> - set reasoning effort",
     "/think <none|minimal|low|medium|high|xhigh> - alias for /effort",
@@ -4851,6 +4981,7 @@ async function main() {
       turnDiffByTurnId: {},
       postCompactionRetryTask: null,
       authRecoveryReplayTask: null,
+      lastThreadList: [],
       lastGroupProgressByBucket: {},
       sentGroupVisibleTexts: new Set(),
       editTimers: new Map(),
@@ -4987,6 +5118,76 @@ async function main() {
       chat_id: chatId,
       text: truncateMiddle(sections.join("\n\n"), 3900),
     });
+  }
+
+  function threadListParams(session) {
+    const params = {
+      cursor: null,
+      limit: 20,
+    };
+    if (session?.cwd) params.cwd = session.cwd;
+    return params;
+  }
+
+  async function requestThreadList(session) {
+    return codex.request("thread/list", threadListParams(session));
+  }
+
+  function rememberThreadList(rt, result) {
+    rt.lastThreadList = normalizeThreadListData(result)
+      .map((thread) => thread.id || thread.threadId)
+      .filter(Boolean);
+  }
+
+  function resolveThreadSelector(rt, selector) {
+    const raw = String(selector || "").trim();
+    if (!raw) return null;
+    if (/^\d+$/.test(raw)) {
+      return rt?.lastThreadList?.[Number(raw) - 1] || null;
+    }
+    return raw;
+  }
+
+  async function sendThreadList({ chatId, session }) {
+    try {
+      const result = await requestThreadList(session);
+      rememberThreadList(getRuntime(chatId), result);
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: truncateMiddle(formatThreadListText(result, {
+          currentThreadId: session.threadId,
+          currentCwd: session.cwd,
+        }), 3900),
+      });
+    } catch (err) {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: `Sessions unavailable: ${truncateMiddle(err.message || String(err), 1200)}`,
+      });
+    }
+  }
+
+  async function attachExistingThread(chatId, session, threadId) {
+    await resetSessionThread(chatId, session);
+    const result = await requestWithAccountFailover({
+      chatId,
+      failureLabel: "thread resume",
+      run: async () => codex.request("thread/resume", {
+        threadId,
+        cwd: session.cwd,
+        model: session.model,
+        personality: session.personality,
+        approvalPolicy: session.approvalPolicy,
+        sandbox: session.sandboxMode,
+      }),
+    });
+    if (result === AUTH_RECOVERY_HANDOFF) return AUTH_RECOVERY_HANDOFF;
+    const resumedThreadId = result?.thread?.id || result?.threadId || result?.thread?.threadId || threadId;
+    session.threadId = resumedThreadId;
+    session.updatedAt = nowIso();
+    store.markDirty();
+    store.saveThrottled();
+    return resumedThreadId;
   }
 
   function enqueuePendingTask(rt, text) {
@@ -6327,8 +6528,22 @@ async function main() {
       return;
     }
 
+    if (trimmed === "/projects") {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: truncateMiddle(formatProjectListText(sourceRegistry, { currentCwd: session.cwd }), 3900),
+      });
+      return;
+    }
+
     if (trimmed.startsWith("/project ")) {
-      const resolved = setSessionCwdWithTruth(session, trimmed.slice("/project ".length).trim(), {
+      const selected = resolveProjectSelector(sourceRegistry, trimmed.slice("/project ".length));
+      if (selected.type === "error") {
+        await telegram.sendMessage({ chat_id: chatId, text: truncateMiddle(selected.error, 3900) });
+        return;
+      }
+      const nextCwd = selected.type === "profile" ? selected.profile.root : selected.path;
+      const resolved = setSessionCwdWithTruth(session, nextCwd, {
         reason: "/project",
         bootstrapPending: true,
       });
@@ -6341,8 +6556,47 @@ async function main() {
         text: [
           `project switched to: ${session.cwd}`,
           `truth profile: ${resolved.profile.name} (${resolved.profile.id})`,
+          selected.type === "profile" ? `selected: ${selected.profile.id}` : null,
           "Started with a fresh thread next time you message.",
+        ].filter(Boolean).join("\n"),
+      });
+      return;
+    }
+
+    if (trimmed === "/sessions" || trimmed === "/threads") {
+      await sendThreadList({ chatId, session });
+      return;
+    }
+
+    if (trimmed.startsWith("/resume ")) {
+      const threadId = resolveThreadSelector(getRuntime(chatId), trimmed.slice("/resume ".length));
+      if (!threadId) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: "Usage: /resume <threadId>. You can also run /sessions first, then /resume <index>.",
+        });
+        return;
+      }
+      const resumedThreadId = await attachExistingThread(chatId, session, threadId);
+      if (resumedThreadId === AUTH_RECOVERY_HANDOFF) return;
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: [
+          `Attached session: ${resumedThreadId}`,
+          `cwd: ${session.cwd}`,
+          "Next message will continue this Codex thread.",
         ].join("\n"),
+      });
+      return;
+    }
+
+    if (trimmed === "/handback") {
+      const command = buildHandbackCommand({ cwd: session.cwd, threadId: session.threadId });
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: command
+          ? ["Run locally:", command].join("\n")
+          : "No current Codex thread. Send a task or use /new first.",
       });
       return;
     }
@@ -6984,6 +7238,12 @@ module.exports = {
     formatAppsListText,
     formatMcpListText,
     formatPluginsListText,
+    listSelectableSourceProfiles,
+    formatProjectListText,
+    resolveProjectSelector,
+    buildHandbackCommand,
+    normalizeThreadListData,
+    formatThreadListText,
     parseModelCommandArgs,
     classifyTurnDifficulty,
     applyAutoRouteDecision,
