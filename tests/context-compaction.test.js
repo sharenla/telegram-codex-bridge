@@ -200,6 +200,63 @@ test("parseModelCommandArgs rejects invalid effort", () => {
   assert.match(parsed.error, /Invalid effort/);
 });
 
+test("normalizeAutoRouteMode accepts config aliases", () => {
+  assert.equal(_test.normalizeAutoRouteMode("auto"), "auto");
+  assert.equal(_test.normalizeAutoRouteMode("on"), "auto");
+  assert.equal(_test.normalizeAutoRouteMode("dry-run"), "suggest");
+  assert.equal(_test.normalizeAutoRouteMode("invalid", "off"), "off");
+});
+
+test("classifyTurnDifficulty keeps simple text on the small route", () => {
+  const route = _test.classifyTurnDifficulty({ text: "translate this short sentence" });
+  assert.equal(route.tier, "simple");
+  assert.equal(route.model, "gpt-5.2");
+  assert.equal(route.effort, "low");
+});
+
+test("classifyTurnDifficulty routes normal coding tasks to the coding preset", () => {
+  const route = _test.classifyTurnDifficulty({ text: "implement the parser fix and run tests" });
+  assert.equal(route.tier, "coding");
+  assert.equal(route.model, "gpt-5.4");
+  assert.equal(route.effort, "high");
+});
+
+test("classifyTurnDifficulty escalates live trading/root-cause tasks", () => {
+  const route = _test.classifyTurnDifficulty({
+    text: "为何 Binance live runtime 下单失败，先查根因",
+    truthProfile: {
+      id: "openclaw-binance",
+      name: "OpenClaw Binance",
+      sources: { liveRuntime: ["/srv/binance-trade-controller/current"] },
+    },
+  });
+  assert.equal(route.tier, "complex");
+  assert.equal(route.model, "gpt-5.5");
+  assert.equal(route.effort, "xhigh");
+});
+
+test("applyAutoRouteDecision applies auto mode but respects locks", () => {
+  const session = {
+    model: "gpt-5.4",
+    effort: "medium",
+    autoRouteMode: "auto",
+    autoRouteLocked: false,
+  };
+  const decision = _test.classifyTurnDifficulty({ text: "push到GitHub 前检查 live auth 风险" });
+  const applied = _test.applyAutoRouteDecision(session, decision, { observedAt: "2026-04-27T00:00:00.000Z" });
+  assert.equal(applied.applied, true);
+  assert.equal(session.model, "gpt-5.5");
+  assert.equal(session.effort, "xhigh");
+
+  session.autoRouteLocked = true;
+  session.model = "gpt-5.4";
+  session.effort = "medium";
+  const locked = _test.applyAutoRouteDecision(session, decision, { observedAt: "2026-04-27T00:00:01.000Z" });
+  assert.equal(locked.applied, false);
+  assert.equal(session.model, "gpt-5.4");
+  assert.equal(session.effort, "medium");
+});
+
 test("resolveAgentMessageTurnId falls back to active turn when event turnId is missing", () => {
   assert.equal(
     _test.resolveAgentMessageTurnId({
@@ -224,6 +281,13 @@ test("resolveAgentMessageTurnId keeps existing turn binding over active turn", (
 
 test("shouldRetryTelegramMethod keeps sendMessage at-most-once", () => {
   assert.equal(_test.shouldRetryTelegramMethod("sendMessage"), false);
+});
+
+test("truncateMiddle keeps UTF-8 byte length below Telegram-safe limit", () => {
+  const out = _test.truncateMiddle("汉".repeat(2000), 1000);
+
+  assert.ok(Buffer.byteLength(out, "utf8") <= 1000);
+  assert.match(out, /truncated/);
 });
 
 test("shouldRetryTelegramMethod still retries getUpdates", () => {

@@ -116,10 +116,18 @@ codex app-server --listen stdio://
 - `/efforts`：查看思考级别
 - `/effort xhigh`：切换思考强度
 - `/think medium`：`/effort` 的别名
+- `/autoroute auto`：开启按任务难度自动选择模型和思考等级；也支持 `off / suggest / lock / unlock`
+- `/route <message>`：预览某条消息会被分到哪个模型和思考等级
+- `/extensions`：只读查看 app-server 发现到的 skills / apps / MCP / plugins
+- `/skills`、`/apps`、`/mcp`、`/plugins`：分别查看扩展子系统；支持 `refresh` 的命令会强制刷新
 - `/accounts`：查看账号池
 - `/account 2`：切到第 2 个账号
 - `/authsync`：从账号池同步最新认证并重启 Codex 后端（常用于 token 失效/断流后自救）
 - `/answer <token> ...`：回答需要输入的问题
+
+自动路由默认关闭，避免升级后改变现有会话行为。设置 `CODEX_AUTO_ROUTE=auto` 或发送 `/autoroute auto` 后，bridge 会在每个新 turn 前按确定性规则选择 `model / effort`：简单文本走 `gpt-5.2 / low`，普通代码任务走 `gpt-5.4 / high`，命中 live/runtime/auth/deploy/trading/root-cause 等高风险信号时走 `gpt-5.5 / xhigh`。`/autoroute suggest` 只记录和预览，不自动覆盖；`/autoroute lock` 会保留当前手动选择。
+
+扩展命令默认只读，不会安装或启用插件。普通消息里如果写入 `$app`、`$skill` 或 `$plugin` 名称，bridge 会尽量把它转换成 Codex app-server 的精确 `mention` input；如果当前 app-server 不支持对应列表接口，会降级为普通文本。
 
 ### 群聊行为
 
@@ -264,7 +272,7 @@ CODEX_CONTEXT_SYNC=1
 ### 单账号 / 多账号
 
 - 单账号完全可以用：把 `.env` 里的 `CODEX_ACCOUNTS_SOURCE` 留空即可
-- 多账号时，把 `CODEX_ACCOUNTS_SOURCE` 指向 OpenClaw 的 `auth-profiles.json`
+- 多账号时，把 `CODEX_ACCOUNTS_SOURCE` 指向 OpenClaw 的 `auth-profiles.json`；多个账号池可以用逗号分隔，bridge 会按账号去重并保留最新 token
 - 建议保留：
 
 ```bash
@@ -273,9 +281,23 @@ CODEX_AUTO_ACCOUNT_FAILOVER=1
 CODEX_LAST_RESORT_ACCOUNTS=someone@example.com
 ```
 
-这样遇到 429 / quota / rate-limit 这类账号层错误时，会自动切到下一个账号再重试
+这样遇到 429 / quota / rate-limit 这类账号层错误时，会按账号池优先级自动切到下一个账号再重试；每个新 Codex turn 开始前也会主动跳出临时坏号、已过期账号或 last-resort 账号。
 
 `CODEX_LAST_RESORT_ACCOUNTS` 可以填邮箱、profileId 或 accountId；匹配到的账号仍可手动 `/account` 选择，但自动启动和故障切换会优先尝试其他可用账号。
+
+### Codex-lb backend
+
+如果本机已经运行 `codex-lb`，bridge 可以继续使用 Codex `app-server` 事件流，同时把上游 Codex API 交给 `codex-lb`：
+
+```bash
+CODEX_BACKEND=codex-lb
+CODEX_LB_CODEX_BASE_URL=http://127.0.0.1:2455/backend-api/codex
+# 如果 codex-lb 启用了 API key：
+CODEX_LB_ENV_KEY=CODEX_LB_API_KEY
+CODEX_LB_API_KEY=sk-clb-...
+```
+
+启用后，bridge 会在同步桌面端 Codex context 之后，把官方 Codex CLI provider block 写入独立的 `CODEX_HOME/config.toml`，不会改桌面端 `~/.codex/config.toml`。
 
 ### 上下文占用与手动压缩
 
@@ -392,10 +414,18 @@ codex app-server --listen stdio://
 - `/efforts`: show reasoning-effort options
 - `/effort xhigh`: raise reasoning effort
 - `/think medium`: alias for `/effort`
+- `/autoroute auto`: enable automatic model/effort routing by task difficulty; also supports `off / suggest / lock / unlock`
+- `/route <message>`: preview which model and effort a message would use
+- `/extensions`: read-only inventory of app-server skills / apps / MCP / plugins
+- `/skills`, `/apps`, `/mcp`, `/plugins`: inspect one extension subsystem; commands that accept `refresh` force a fresh read
 - `/accounts`: show account pool
 - `/account 2`: switch to account #2
 - `/authsync`: resync latest auth from account pool and restart the Codex backend (useful after token drift/stream disconnect)
 - `/answer <token> ...`: answer an input request
+
+Automatic routing is off by default so upgrades do not change existing chat behavior. Set `CODEX_AUTO_ROUTE=auto` or send `/autoroute auto` to classify each new turn before it starts: simple text tasks use `gpt-5.2 / low`, normal coding tasks use `gpt-5.4 / high`, and live/runtime/auth/deploy/trading/root-cause signals use `gpt-5.5 / xhigh`. `/autoroute suggest` records/previews without overriding; `/autoroute lock` keeps the current manual choice.
+
+Extension commands are read-only by default and never install or enable plugins. When a plain message includes `$app`, `$skill`, or `$plugin` names, the bridge best-effort converts them into precise Codex app-server `mention` input; if the active app-server does not support the matching list method, the text is sent unchanged.
 
 ### Group behavior
 
@@ -540,7 +570,7 @@ If you need two machines online at the same time:
 ### Single-account / multi-account
 
 - Single-account setups work fine: leave `CODEX_ACCOUNTS_SOURCE` empty
-- For multi-account setups, point `CODEX_ACCOUNTS_SOURCE` to OpenClaw’s `auth-profiles.json`
+- For multi-account setups, point `CODEX_ACCOUNTS_SOURCE` to OpenClaw’s `auth-profiles.json`; multiple pools can be comma-separated, and the bridge deduplicates by account while keeping the freshest token
 - Recommended:
 
 ```bash
@@ -549,9 +579,23 @@ CODEX_AUTO_ACCOUNT_FAILOVER=1
 CODEX_LAST_RESORT_ACCOUNTS=someone@example.com
 ```
 
-That allows the bridge to switch to the next account and retry when it hits account-level failures such as 429, quota, or rate-limit errors.
+That allows the bridge to switch to the next account by account-pool priority and retry when it hits account-level failures such as 429, quota, or rate-limit errors. Before each new Codex turn, it also proactively leaves temporarily unhealthy, expired, or last-resort accounts when a better account is available.
 
 `CODEX_LAST_RESORT_ACCOUNTS` accepts emails, profileIds, or accountIds. Matching accounts remain manually selectable with `/account`, but automatic startup and failover prefer other usable accounts first.
+
+### Codex-lb backend
+
+When a local `codex-lb` service is already running, the bridge can keep using Codex `app-server` for streaming events while routing the upstream Codex API through `codex-lb`:
+
+```bash
+CODEX_BACKEND=codex-lb
+CODEX_LB_CODEX_BASE_URL=http://127.0.0.1:2455/backend-api/codex
+# If codex-lb API key auth is enabled:
+CODEX_LB_ENV_KEY=CODEX_LB_API_KEY
+CODEX_LB_API_KEY=sk-clb-...
+```
+
+When enabled, the bridge writes the official Codex CLI provider block into its isolated `CODEX_HOME/config.toml` after desktop context sync. It does not modify the desktop `~/.codex/config.toml`.
 
 ### Context Usage And Manual Compaction
 

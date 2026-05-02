@@ -21,6 +21,15 @@ const RECOMMENDED_MODELS = [
 ];
 const QUICK_MODELS = RECOMMENDED_MODELS.map((model) => model.id);
 const QUICK_EFFORTS = ["low", "medium", "high", "xhigh"];
+const AUTO_ROUTE_MODES = ["off", "suggest", "auto"];
+const DEFAULT_AUTO_ROUTE_MODE = "off";
+const AUTO_ROUTE_PRESETS = {
+  simple: { model: "gpt-5.2", effort: "low", label: "simple" },
+  coding: { model: "gpt-5.4", effort: "high", label: "coding" },
+  complex: { model: "gpt-5.5", effort: "xhigh", label: "complex" },
+};
+const EXTENSION_LIST_LIMIT = 50;
+const EXTENSION_MENTION_LIMIT = 8;
 const DEFAULT_CONTEXT_SOFT_RATIO = 0.70;
 const DEFAULT_CONTEXT_HARD_RATIO = 0.82;
 const DEFAULT_CONTEXT_EMERGENCY_RATIO = 0.90;
@@ -345,52 +354,110 @@ function prioritizeAccountProfiles(profiles) {
   return [...preferred, ...lastResort];
 }
 
+function normalizeProfileIdSet(value) {
+  if (!value) return new Set();
+  if (value instanceof Set) return value;
+  return new Set(Array.isArray(value) ? value.filter(Boolean) : [value].filter(Boolean));
+}
+
+function orderAccountProfilesForFailover(profiles, {
+  attemptedProfileIds = new Set(),
+  isBlocked = () => false,
+} = {}) {
+  const attempted = normalizeProfileIdSet(attemptedProfileIds);
+  const candidates = prioritizeAccountProfiles(profiles)
+    .filter((profile) => profile?.profileId && !attempted.has(profile.profileId));
+  const available = candidates.filter((profile) => !isBlocked(profile));
+  return available.length ? available : candidates;
+}
+
+function normalizeAccountSourcePaths(sourcePath) {
+  return [...new Set(String(sourcePath || "")
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => resolveUserPath(item))
+    .filter(Boolean))];
+}
+
+function accountSourceLabel(resolvedPath) {
+  const parts = path.resolve(resolvedPath).split(path.sep);
+  const agentsIndex = parts.lastIndexOf("agents");
+  if (agentsIndex >= 0 && parts[agentsIndex + 1]) {
+    return parts[agentsIndex + 1].replace(/[^A-Za-z0-9_.-]/g, "-");
+  }
+  return path.basename(path.dirname(resolvedPath)).replace(/[^A-Za-z0-9_.-]/g, "-") || "source";
+}
+
 function loadCodexAccountProfiles(sourcePath, { lastResortAccounts = "" } = {}) {
-  if (!sourcePath) return [];
-  const resolved = resolveUserPath(sourcePath);
-  const parsed = loadJsonFile(resolved);
-  if (!parsed || typeof parsed !== "object") return [];
-  const profileMap =
-    parsed.profiles && typeof parsed.profiles === "object" ? parsed.profiles : parsed;
-  const items = [];
-  const seen = new Set();
+  const sourcePaths = normalizeAccountSourcePaths(sourcePath);
+  if (!sourcePaths.length) return [];
+  const candidates = [];
   const lastResortSelectors = normalizeAccountSelectorList(lastResortAccounts);
 
-  for (const [profileId, profile] of Object.entries(profileMap)) {
-    if (!profile || typeof profile !== "object") continue;
-    if (profile.provider !== "openai-codex" || profile.type !== "oauth") continue;
-    if (typeof profile.access !== "string" || typeof profile.refresh !== "string") continue;
+  for (const resolved of sourcePaths) {
+    const parsed = loadJsonFile(resolved);
+    if (!parsed || typeof parsed !== "object") continue;
+    const profileMap =
+      parsed.profiles && typeof parsed.profiles === "object" ? parsed.profiles : parsed;
+    const sourceLabel = accountSourceLabel(resolved);
 
-    const jwt = parseJwtPayload(profile.access);
-    const authInfo = jwt?.["https://api.openai.com/auth"] || {};
-    const profileInfo = jwt?.["https://api.openai.com/profile"] || {};
-    const accountId =
-      (typeof profile.accountId === "string" && profile.accountId) ||
-      (typeof authInfo.chatgpt_account_id === "string" && authInfo.chatgpt_account_id) ||
-      null;
-    const email =
-      (typeof profileInfo.email === "string" && profileInfo.email) ||
-      (typeof jwt?.email === "string" && jwt.email) ||
-      null;
-    const label = email || accountId || profileId;
-    const shortLabel = truncateLabel(label, 24);
+    for (const [profileId, profile] of Object.entries(profileMap)) {
+      if (!profile || typeof profile !== "object") continue;
+      if (profile.provider !== "openai-codex" || profile.type !== "oauth") continue;
+      if (typeof profile.access !== "string" || typeof profile.refresh !== "string") continue;
 
-    const dedupeKey = `${accountId || "none"}:${profile.refresh.slice(-16)}`;
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
+      const jwt = parseJwtPayload(profile.access);
+      const authInfo = jwt?.["https://api.openai.com/auth"] || {};
+      const profileInfo = jwt?.["https://api.openai.com/profile"] || {};
+      const accountId =
+        (typeof profile.accountId === "string" && profile.accountId) ||
+        (typeof authInfo.chatgpt_account_id === "string" && authInfo.chatgpt_account_id) ||
+        null;
+      const email =
+        (typeof profileInfo.email === "string" && profileInfo.email) ||
+        (typeof jwt?.email === "string" && jwt.email) ||
+        null;
+      const label = email || accountId || profileId;
+      const shortLabel = truncateLabel(label, 24);
 
-    const item = {
-      profileId,
-      accountId,
-      label,
-      shortLabel,
-      access: profile.access,
-      refresh: profile.refresh,
-      expires: Number.isFinite(profile.expires) ? profile.expires : getJwtExpiryMs(profile.access),
-      sourcePath: resolved,
-    };
-    item.lastResort = isAccountProfileLastResort(item, lastResortSelectors);
-    items.push(item);
+      const item = {
+        profileId,
+        sourceProfileId: profileId,
+        sourceLabel,
+        accountId,
+        label,
+        shortLabel,
+        access: profile.access,
+        refresh: profile.refresh,
+        expires: Number.isFinite(profile.expires) ? profile.expires : getJwtExpiryMs(profile.access),
+        sourcePath: resolved,
+      };
+      item.lastResort = isAccountProfileLastResort(item, lastResortSelectors);
+      candidates.push(item);
+    }
+  }
+
+  const byIdentity = new Map();
+  for (const item of candidates) {
+    const key = item.accountId
+      ? `account:${item.accountId}`
+      : `refresh:${item.refresh.slice(-24)}`;
+    const existing = byIdentity.get(key);
+    if (!existing || Number(item.expires || 0) > Number(existing.expires || 0)) {
+      byIdentity.set(key, item);
+    }
+  }
+
+  const items = [...byIdentity.values()];
+  const profileIdCounts = items.reduce((counts, item) => {
+    counts[item.sourceProfileId] = Number(counts[item.sourceProfileId] || 0) + 1;
+    return counts;
+  }, {});
+  for (const item of items) {
+    if (profileIdCounts[item.sourceProfileId] > 1) {
+      item.profileId = `${item.sourceProfileId}@${item.sourceLabel}`;
+    }
   }
 
   return sortAccountProfilesByPriority(items);
@@ -489,6 +556,130 @@ function atomicWriteJson(filePath, data) {
   fs.renameSync(tmpPath, filePath);
 }
 
+function atomicWriteText(filePath, text) {
+  ensureDir(path.dirname(filePath));
+  const tmpPath = `${filePath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmpPath, text);
+  fs.renameSync(tmpPath, filePath);
+}
+
+function configureCodexLbProvider({
+  codexHome,
+  enabled,
+  baseUrl = "http://127.0.0.1:2455/backend-api/codex",
+  provider = "codex-lb",
+  envKey = "",
+  logger = () => {},
+} = {}) {
+  if (!enabled) return { configured: false, reason: "disabled" };
+
+  const configPath = path.join(codexHome, "config.toml");
+  const existing = readTextFile(configPath) || "";
+  const legacyMarkerStart = "# BEGIN telegram-codex-bridge codex-lb";
+  const legacyMarkerEnd = "# END telegram-codex-bridge codex-lb";
+  const rootMarkerStart = "# BEGIN telegram-codex-bridge codex-lb root";
+  const rootMarkerEnd = "# END telegram-codex-bridge codex-lb root";
+  const providerMarkerStart = "# BEGIN telegram-codex-bridge codex-lb provider";
+  const providerMarkerEnd = "# END telegram-codex-bridge codex-lb provider";
+  const markerPattern = (start, end) => new RegExp(
+    `^${escapeRegExp(start)}\\n[\\s\\S]*?^${escapeRegExp(end)}\\n?`,
+    "m",
+  );
+  const safeProvider = String(provider || "codex-lb").replace(/[^A-Za-z0-9_.-]/g, "-") || "codex-lb";
+  const safeBaseUrl = String(baseUrl || "http://127.0.0.1:2455/backend-api/codex").replace(/"/g, '\\"');
+  const safeEnvKey = String(envKey || "").trim().replace(/"/g, '\\"');
+  const envKeyLine = safeEnvKey ? `env_key = "${safeEnvKey}"\n` : "";
+  const rootBlock = [
+    rootMarkerStart,
+    `model_provider = "${safeProvider}"`,
+    rootMarkerEnd,
+  ].join("\n");
+  const providerBlock = [
+    providerMarkerStart,
+    `[model_providers.${safeProvider}]`,
+    'name = "OpenAI"',
+    `base_url = "${safeBaseUrl}"`,
+    'wire_api = "responses"',
+    envKeyLine.trimEnd(),
+    "supports_websockets = true",
+    "requires_openai_auth = true",
+    providerMarkerEnd,
+    "",
+  ].filter((line) => line !== "").join("\n");
+
+  let cleaned = existing
+    .replace(markerPattern(legacyMarkerStart, legacyMarkerEnd), "")
+    .replace(markerPattern(rootMarkerStart, rootMarkerEnd), "")
+    .replace(markerPattern(providerMarkerStart, providerMarkerEnd), "")
+    .trim();
+
+  const firstTableMatch = cleaned.match(/^\s*\[[^\n]+]\s*$/m);
+  const firstTableIndex = firstTableMatch ? firstTableMatch.index : cleaned.length;
+  const rootPart = cleaned
+    .slice(0, firstTableIndex)
+    .replace(/^\s*model_provider\s*=.*(?:\n|$)/gm, "")
+    .trimEnd();
+  const tablePart = cleaned.slice(firstTableIndex).trimStart();
+  const next = [
+    rootPart,
+    rootBlock,
+    tablePart,
+    providerBlock,
+  ].filter((part) => part && part.trim()).join("\n\n") + "\n";
+  if (next !== existing) {
+    atomicWriteText(configPath, next);
+  }
+  logger(`Configured Codex provider ${safeProvider} at ${safeBaseUrl}`);
+  return { configured: true, configPath, provider: safeProvider, baseUrl: safeBaseUrl };
+}
+
+function applyCodexBackendSessionBoundary(storeData, {
+  enabled,
+  provider = "codex-lb",
+  baseUrl = "http://127.0.0.1:2455/backend-api/codex",
+  logger = () => {},
+} = {}) {
+  if (!storeData || typeof storeData !== "object") return { changed: false, resetCount: 0 };
+  if (!storeData.bridge || typeof storeData.bridge !== "object") storeData.bridge = {};
+
+  const current = enabled
+    ? {
+        mode: "codex-lb",
+        provider: String(provider || "codex-lb"),
+        baseUrl: String(baseUrl || "http://127.0.0.1:2455/backend-api/codex"),
+        configVersion: 2,
+      }
+    : { mode: "default" };
+  const previous = storeData.bridge.codexBackendConfig && typeof storeData.bridge.codexBackendConfig === "object"
+    ? storeData.bridge.codexBackendConfig
+    : null;
+  const changed = !previous
+    || previous.mode !== current.mode
+    || previous.provider !== current.provider
+    || previous.baseUrl !== current.baseUrl
+    || previous.configVersion !== current.configVersion;
+
+  let resetCount = 0;
+  if (changed && current.mode === "codex-lb") {
+    for (const session of Object.values(storeData.sessions || {})) {
+      if (!session || typeof session !== "object" || !session.threadId) continue;
+      session.threadId = null;
+      clearSessionContextTracking(session, { clearSummary: false, clearHistory: false });
+      session.updatedAt = nowIso();
+      resetCount += 1;
+    }
+  }
+
+  storeData.bridge.codexBackendConfig = {
+    ...current,
+    updatedAt: nowIso(),
+  };
+  if (resetCount) {
+    logger(`Reset ${resetCount} saved Codex thread(s) after backend switch to ${current.provider} at ${current.baseUrl}`);
+  }
+  return { changed, resetCount, current, previous };
+}
+
 function safeJsonParse(line) {
   try {
     return JSON.parse(line);
@@ -497,11 +688,46 @@ function safeJsonParse(line) {
   }
 }
 
+function takeUtf8Prefix(text, maxBytes) {
+  let out = "";
+  let used = 0;
+  for (const char of String(text || "")) {
+    const bytes = Buffer.byteLength(char, "utf8");
+    if (used + bytes > maxBytes) break;
+    out += char;
+    used += bytes;
+  }
+  return out;
+}
+
+function takeUtf8Suffix(text, maxBytes) {
+  let out = "";
+  let used = 0;
+  const chars = Array.from(String(text || ""));
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    const char = chars[index];
+    const bytes = Buffer.byteLength(char, "utf8");
+    if (used + bytes > maxBytes) break;
+    out = char + out;
+    used += bytes;
+  }
+  return out;
+}
+
 function truncateMiddle(text, maxLen) {
-  if (text.length <= maxLen) return text;
-  const headLen = Math.floor((maxLen - 10) / 2);
-  const tailLen = maxLen - 10 - headLen;
-  return `${text.slice(0, headLen)}\n…(truncated)…\n${text.slice(-tailLen)}`;
+  const value = String(text || "");
+  const limit = Number(maxLen);
+  if (!Number.isFinite(limit) || limit <= 0) return "";
+  if (value.length <= limit && Buffer.byteLength(value, "utf8") <= limit) return value;
+  const marker = "\n…(truncated)…\n";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  if (limit <= markerBytes + 8) {
+    return takeUtf8Prefix(value, limit);
+  }
+  const availableBytes = limit - markerBytes;
+  const headBytes = Math.floor(availableBytes / 2);
+  const tailBytes = availableBytes - headBytes;
+  return `${takeUtf8Prefix(value, headBytes)}${marker}${takeUtf8Suffix(value, tailBytes)}`;
 }
 
 function formatRelativeAge(ms) {
@@ -1192,6 +1418,242 @@ function normalizeEffortLevel(input) {
   return VALID_EFFORTS.has(canonical) ? canonical : null;
 }
 
+function normalizeAutoRouteMode(input, fallback = DEFAULT_AUTO_ROUTE_MODE) {
+  const trimmed = String(input || "").trim().toLowerCase().replace(/_/g, "-");
+  if (!trimmed) return fallback;
+  const aliases = {
+    "1": "auto",
+    "true": "auto",
+    yes: "auto",
+    on: "auto",
+    enabled: "auto",
+    enable: "auto",
+    preview: "suggest",
+    dry: "suggest",
+    "dry-run": "suggest",
+    "0": "off",
+    "false": "off",
+    no: "off",
+    disabled: "off",
+    disable: "off",
+  };
+  const canonical = aliases[trimmed] || trimmed;
+  return AUTO_ROUTE_MODES.includes(canonical) ? canonical : fallback;
+}
+
+function slugifyExtensionName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function extractExtensionMentionSlugs(text) {
+  const rawText = String(text || "");
+  const re = /(^|[\s([{"'`，。！？；：、])\$([A-Za-z0-9][A-Za-z0-9_.:-]{0,80})/g;
+  const slugs = [];
+  const seen = new Set();
+  let match;
+  while ((match = re.exec(rawText)) !== null) {
+    const slug = slugifyExtensionName(match[2]);
+    if (/^\d+$/.test(slug)) continue;
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    slugs.push(slug);
+  }
+  return slugs;
+}
+
+function normalizeExtensionListData(result) {
+  if (Array.isArray(result)) return result;
+  if (Array.isArray(result?.data)) return result.data;
+  if (Array.isArray(result?.items)) return result.items;
+  if (Array.isArray(result?.servers)) return result.servers;
+  if (Array.isArray(result?.plugins)) return result.plugins;
+  if (Array.isArray(result?.marketplaces)) return result.marketplaces;
+  return [];
+}
+
+function compactOneLine(value, maxLen = 90) {
+  return truncateMiddle(String(value || "").replace(/\s+/g, " ").trim(), maxLen);
+}
+
+function extensionStateText(item) {
+  const parts = [];
+  if (typeof item?.enabled === "boolean") parts.push(item.enabled ? "enabled" : "disabled");
+  if (typeof item?.isEnabled === "boolean") parts.push(item.isEnabled ? "enabled" : "disabled");
+  if (typeof item?.isAccessible === "boolean") parts.push(item.isAccessible ? "accessible" : "needs auth");
+  if (item?.status) parts.push(String(item.status));
+  if (item?.availability && item.availability !== "AVAILABLE") parts.push(String(item.availability));
+  return parts.length ? ` [${parts.join(", ")}]` : "";
+}
+
+function extractSkillEntries(skillsResult) {
+  const entries = [];
+  for (const group of normalizeExtensionListData(skillsResult)) {
+    const cwd = group?.cwd || group?.path || null;
+    const skills = Array.isArray(group?.skills) ? group.skills : Array.isArray(group?.data) ? group.data : [];
+    for (const skill of skills) {
+      if (!skill || typeof skill !== "object") continue;
+      entries.push({ cwd, skill });
+    }
+  }
+  return entries;
+}
+
+function formatSkillsListText(skillsResult, { error = null, maxItems = 20 } = {}) {
+  if (error) return `Skills unavailable: ${compactOneLine(error, 120)}`;
+  const entries = extractSkillEntries(skillsResult);
+  const lines = [`Skills (${entries.length})`];
+  if (!entries.length) {
+    lines.push("- none reported by Codex app-server");
+    return lines.join("\n");
+  }
+  for (const { skill } of entries.slice(0, maxItems)) {
+    const name = skill.name || skill.id || path.basename(path.dirname(skill.path || "")) || "(unnamed)";
+    const desc = compactOneLine(skill.description || skill.summary || skill.shortDescription || "", 100);
+    lines.push(`- ${name}${extensionStateText(skill)}${desc ? ` - ${desc}` : ""}`);
+  }
+  if (entries.length > maxItems) lines.push(`... ${entries.length - maxItems} more`);
+  return lines.join("\n");
+}
+
+function formatAppsListText(appsResult, { error = null, maxItems = 20 } = {}) {
+  if (error) return `Apps unavailable: ${compactOneLine(error, 120)}`;
+  const apps = normalizeExtensionListData(appsResult);
+  const lines = [`Apps (${apps.length})`];
+  if (!apps.length) {
+    lines.push("- none reported by Codex app-server");
+    return lines.join("\n");
+  }
+  for (const app of apps.slice(0, maxItems)) {
+    const name = app.name || app.id || "(unnamed)";
+    const slug = slugifyExtensionName(name);
+    const id = app.id ? ` (${app.id})` : "";
+    const desc = compactOneLine(app.description || "", 100);
+    lines.push(`- $${slug}${id}${extensionStateText(app)}${desc ? ` - ${desc}` : ""}`);
+  }
+  if (apps.length > maxItems) lines.push(`... ${apps.length - maxItems} more`);
+  return lines.join("\n");
+}
+
+function extractMcpServerEntries(mcpResult) {
+  const raw = normalizeExtensionListData(mcpResult);
+  const entries = [];
+  for (const item of raw) {
+    if (Array.isArray(item?.servers)) {
+      for (const server of item.servers) entries.push(server);
+    } else if (Array.isArray(item?.mcpServers)) {
+      for (const server of item.mcpServers) entries.push(server);
+    } else {
+      entries.push(item);
+    }
+  }
+  return entries.filter((entry) => entry && typeof entry === "object");
+}
+
+function formatMcpListText(mcpResult, { error = null, maxItems = 20 } = {}) {
+  if (error) return `MCP unavailable: ${compactOneLine(error, 120)}`;
+  const servers = extractMcpServerEntries(mcpResult);
+  const lines = [`MCP servers (${servers.length})`];
+  if (!servers.length) {
+    lines.push("- none configured");
+    return lines.join("\n");
+  }
+  for (const server of servers.slice(0, maxItems)) {
+    const name = server.name || server.server || server.id || "(unnamed)";
+    const tools = Array.isArray(server.tools) ? server.tools.length : Number(server.toolCount || 0);
+    const resources = Array.isArray(server.resources) ? server.resources.length : Number(server.resourceCount || 0);
+    const detail = [
+      tools ? `${tools} tools` : null,
+      resources ? `${resources} resources` : null,
+    ].filter(Boolean).join(", ");
+    lines.push(`- ${name}${extensionStateText(server)}${detail ? ` - ${detail}` : ""}`);
+  }
+  if (servers.length > maxItems) lines.push(`... ${servers.length - maxItems} more`);
+  return lines.join("\n");
+}
+
+function extractPluginEntries(pluginResult) {
+  const raw = normalizeExtensionListData(pluginResult);
+  const entries = [];
+  for (const item of raw) {
+    if (Array.isArray(item?.plugins)) {
+      for (const plugin of item.plugins) {
+        entries.push({ ...plugin, marketplaceName: plugin.marketplaceName || item.name || item.marketplaceName });
+      }
+    } else {
+      entries.push(item);
+    }
+  }
+  return entries.filter((entry) => entry && typeof entry === "object");
+}
+
+function formatPluginsListText(pluginResult, { error = null, maxItems = 20 } = {}) {
+  if (error) return `Plugins unavailable: ${compactOneLine(error, 120)}`;
+  const plugins = extractPluginEntries(pluginResult);
+  const lines = [`Plugins (${plugins.length})`];
+  if (!plugins.length) {
+    lines.push("- none reported by Codex app-server");
+    return lines.join("\n");
+  }
+  for (const plugin of plugins.slice(0, maxItems)) {
+    const name = plugin.name || plugin.id || plugin.pluginName || "(unnamed)";
+    const marketplace = plugin.marketplaceName || plugin.marketplace || plugin.source || "";
+    const slug = marketplace ? `${name}@${marketplace}` : name;
+    const desc = compactOneLine(plugin.description || plugin.summary || plugin.shortDescription || "", 100);
+    lines.push(`- ${slug}${extensionStateText(plugin)}${desc ? ` - ${desc}` : ""}`);
+  }
+  if (plugins.length > maxItems) lines.push(`... ${plugins.length - maxItems} more`);
+  return lines.join("\n");
+}
+
+function buildExtensionMentionInputItems(text, { skillsResult = null, appsResult = null, pluginsResult = null } = {}) {
+  const wanted = new Set(extractExtensionMentionSlugs(text));
+  if (!wanted.size) return [];
+  const items = [];
+  const seenPaths = new Set();
+  const pushMention = (item) => {
+    if (!item?.path || seenPaths.has(item.path)) return;
+    seenPaths.add(item.path);
+    items.push(item);
+  };
+
+  for (const app of normalizeExtensionListData(appsResult)) {
+    const name = app?.name || app?.id;
+    const id = app?.id;
+    if (!name || !id) continue;
+    const aliases = [slugifyExtensionName(name), slugifyExtensionName(id)].filter(Boolean);
+    if (!aliases.some((alias) => wanted.has(alias))) continue;
+    pushMention({ type: "mention", name, path: `app://${id}` });
+  }
+
+  for (const { skill } of extractSkillEntries(skillsResult)) {
+    const name = skill?.name || skill?.id || path.basename(path.dirname(skill?.path || ""));
+    const skillPath = skill?.path || skill?.sourcePath;
+    if (!name || !skillPath) continue;
+    const aliases = [slugifyExtensionName(name), slugifyExtensionName(skill?.id)].filter(Boolean);
+    if (!aliases.some((alias) => wanted.has(alias))) continue;
+    pushMention({ type: "skill", name, path: skillPath });
+  }
+
+  for (const plugin of extractPluginEntries(pluginsResult)) {
+    const name = plugin?.name || plugin?.pluginName || plugin?.id;
+    const marketplace = plugin?.marketplaceName || plugin?.marketplace || plugin?.source;
+    if (!name || !marketplace) continue;
+    const aliases = [
+      slugifyExtensionName(name),
+      slugifyExtensionName(`${name}@${marketplace}`),
+      slugifyExtensionName(plugin?.id),
+    ].filter(Boolean);
+    if (!aliases.some((alias) => wanted.has(alias))) continue;
+    pushMention({ type: "mention", name, path: `plugin://${name}@${marketplace}` });
+  }
+
+  return items.slice(0, EXTENSION_MENTION_LIMIT);
+}
+
 function parseModelCommandArgs(rawArgs) {
   const parts = String(rawArgs || "").trim().split(/\s+/).filter(Boolean);
   if (!parts.length) {
@@ -1216,6 +1678,173 @@ function parseModelCommandArgs(rawArgs) {
   }
 
   return { model, effort, error: null };
+}
+
+function matchFirstPattern(text, patterns) {
+  const normalized = String(text || "");
+  return (patterns || []).find((pattern) => pattern.test(normalized)) || null;
+}
+
+function buildTruthProfileRouteHaystack(profile) {
+  if (!profile || typeof profile !== "object") return "";
+  const sources = profile.sources || {};
+  return [
+    profile.id,
+    profile.name,
+    profile.root,
+    profile.projectRoot,
+    sources.canonicalRepo,
+    sources.installedServiceCopy,
+    ...(sources.liveRuntime || []),
+    ...(sources.stateFiles || []),
+    ...(sources.logs || []),
+    ...(sources.launchAgents || []),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function classifyTurnDifficulty({ text, session = null, truthProfile = null } = {}) {
+  const rawText = String(text || "").trim();
+  const lowerText = rawText.toLowerCase();
+  const profileText = buildTruthProfileRouteHaystack(truthProfile || session?.truthProfile);
+  const reasons = [];
+  const pushReason = (reason) => {
+    if (reason && !reasons.includes(reason)) reasons.push(reason);
+  };
+
+  const highRiskPatterns = [
+    /\b(live|prod|production|mainnet|deploy|release|rollback|restart|kill|launchctl|launchd|systemd|crontab|cron)\b/i,
+    /\b(git\s+push|push\s+to\s+github|merge|rebase|force\s+push)\b/i,
+    /\b(auth|token|credential|secret|api[_ -]?key|permission|sandbox|approval)\b/i,
+    /\b(binance|deribit|trading|futures|options|position|order|risk|hedge|openclaw)\b/i,
+    /\b(rm\s+-|delete|remove|wipe|drop|truncate|destructive)\b/i,
+    /线上|生产|实盘|部署|发布|回滚|重启|删除|权限|凭证|密钥|账号|交易|风控|仓位|下单|对冲|推送到github|push到github/i,
+  ];
+  const complexPatterns = [
+    /\b(root cause|why.*fail|stuck|blocked|incident|audit|review|architecture|migration|refactor)\b/i,
+    /\b(source[- ]of[- ]truth|truth profile|multi[- ]repo|cross[- ]repo|runtime|service copy)\b/i,
+    /\b(orchestrator|routing|failover|recovery|concurrency|race condition|state machine)\b/i,
+    /根因|为何|为什么|卡在哪里|失败在哪里|审阅|审计|架构|迁移|重构|全范围|真相源|运行时|可行性/i,
+  ];
+  const codingPatterns = [
+    /\b(implement|fix|debug|test|code|repo|file|path|patch|diff|bug|error|exception|stack|log|npm|node|python|script|ci)\b/i,
+    /实现|修复|调试|测试|代码|仓库|文件|路径|日志|报错|异常|脚本|改动|落地/i,
+  ];
+  const simplePatterns = [
+    /\b(translate|rewrite|summari[sz]e|format|explain|what is|define|list)\b/i,
+    /翻译|改写|润色|总结|格式化|解释一下|是什么|列一下/i,
+  ];
+
+  const highRiskMatch = matchFirstPattern(rawText, highRiskPatterns);
+  const complexMatch = matchFirstPattern(rawText, complexPatterns);
+  const codingMatch = matchFirstPattern(rawText, codingPatterns);
+  const simpleMatch = matchFirstPattern(rawText, simplePatterns);
+  const tradingProfile = /\b(binance|deribit|trading|stage6|openclaw-binance|openclaw-deribit)\b/i.test(profileText);
+  const bridgeRuntimeProfile = /\btelegram-codex-bridge|launchagent|service|runtime\b/i.test(profileText);
+  const liveQuery = /\b(live|runtime|service|launch|current|status|auth|token|deploy|restart)\b/i.test(lowerText)
+    || /当前|现在|运行时|服务|认证|部署|重启|状态|线上|生产/i.test(rawText);
+  const multiRepoQuery = /\b(multi[- ]repo|cross[- ]repo|multiple repos|repo split)\b/i.test(lowerText)
+    || /多仓库|跨仓库|多个仓库/i.test(rawText);
+
+  if (highRiskMatch) pushReason("high-risk keyword");
+  if (complexMatch) pushReason("complex/root-cause keyword");
+  if (codingMatch) pushReason("coding/debug keyword");
+  if (simpleMatch) pushReason("simple text task keyword");
+  if (rawText.length > 1800) pushReason("long user input");
+  if (multiRepoQuery) pushReason("multi-repo scope");
+  if (tradingProfile) pushReason("trading/runtime truth profile");
+  if (bridgeRuntimeProfile && liveQuery) pushReason("bridge runtime/source-of-truth query");
+
+  let tier = "coding";
+  if (
+    highRiskMatch
+    || complexMatch
+    || rawText.length > 1800
+    || multiRepoQuery
+    || (tradingProfile && (codingMatch || liveQuery || lowerText.includes("risk")))
+    || (bridgeRuntimeProfile && liveQuery)
+  ) {
+    tier = "complex";
+  } else if (codingMatch) {
+    tier = "coding";
+  } else if (simpleMatch && rawText.length <= 600 && !truthProfile?.sources?.liveRuntime?.length) {
+    tier = "simple";
+  }
+
+  if (!reasons.length) pushReason("default coding route");
+  const preset = AUTO_ROUTE_PRESETS[tier] || AUTO_ROUTE_PRESETS.coding;
+  return {
+    tier,
+    model: preset.model,
+    effort: preset.effort,
+    reasons: reasons.slice(0, 6),
+  };
+}
+
+function applyAutoRouteDecision(session, decision, {
+  mode = session?.autoRouteMode,
+  observedAt = nowIso(),
+} = {}) {
+  if (!session || typeof session !== "object" || !decision) return null;
+  const normalizedMode = normalizeAutoRouteMode(mode, DEFAULT_AUTO_ROUTE_MODE);
+  if (normalizedMode === "off") return null;
+  const locked = Boolean(session.autoRouteLocked);
+  const previousModel = session.model;
+  const previousEffort = session.effort;
+  const applied = normalizedMode === "auto" && !locked;
+  if (applied) {
+    session.model = decision.model;
+    session.effort = decision.effort;
+  }
+  const changed = applied && (previousModel !== session.model || previousEffort !== session.effort);
+  const result = {
+    mode: normalizedMode,
+    locked,
+    applied,
+    changed,
+    tier: decision.tier,
+    model: decision.model,
+    effort: decision.effort,
+    previousModel,
+    previousEffort,
+    reasons: decision.reasons || [],
+    routedAt: observedAt,
+  };
+  session.lastAutoRoute = result;
+  return result;
+}
+
+function formatAutoRouteDecisionText(session, decision = null, result = null) {
+  const last = result || session?.lastAutoRoute || null;
+  const route = decision || last || null;
+  const mode = normalizeAutoRouteMode(session?.autoRouteMode, DEFAULT_AUTO_ROUTE_MODE);
+  const lines = [
+    `autoRoute: ${mode}`,
+    `autoRouteLocked: ${session?.autoRouteLocked ? "yes" : "no"}`,
+    `current model: ${session?.model || "(unknown)"}`,
+    `current effort: ${session?.effort || "(unknown)"}`,
+  ];
+  if (route) {
+    lines.push("");
+    lines.push(`recommended: ${route.model} / ${route.effort}`);
+    lines.push(`tier: ${route.tier}`);
+    if (last) {
+      lines.push(`applied: ${last.applied ? "yes" : "no"}`);
+      lines.push(`changed: ${last.changed ? "yes" : "no"}`);
+      if (last.routedAt) lines.push(`routedAt: ${last.routedAt}`);
+    }
+    const reasons = route.reasons || [];
+    if (reasons.length) {
+      lines.push("reasons:");
+      for (const reason of reasons) lines.push(`- ${reason}`);
+    }
+  } else {
+    lines.push("");
+    lines.push("No route has been classified yet.");
+  }
+  lines.push("");
+  lines.push("Use: /autoroute <off|suggest|auto>, /autoroute lock, /autoroute unlock");
+  lines.push("Preview: /route <message>");
+  return lines.join("\n");
 }
 
 function formatPercent(ratio) {
@@ -1353,6 +1982,32 @@ function shouldTreatTextAsContextFailure(text, compactionPendingReason = null) {
   return false;
 }
 
+function extractGenericErrorText(err) {
+  const parts = [];
+  if (typeof err === "string") parts.push(err);
+  if (err?.message) parts.push(String(err.message));
+  if (err?.rpcError?.message) parts.push(String(err.rpcError.message));
+  if (err?.rpcError?.code !== undefined && err?.rpcError?.code !== null) {
+    parts.push(String(err.rpcError.code));
+  }
+  const data = err?.rpcError?.data;
+  if (typeof data === "string") {
+    parts.push(data);
+  } else if (data !== undefined) {
+    try {
+      parts.push(JSON.stringify(data));
+    } catch {
+      parts.push(String(data));
+    }
+  }
+  return parts.filter(Boolean).join(" | ");
+}
+
+function isMissingThreadRequestError(err) {
+  const text = extractGenericErrorText(err);
+  return /(?:^|\b)thread not found(?:\b|:)/i.test(text);
+}
+
 function isAccountAuthFailureText(text) {
   if (!text) return false;
   return ACCOUNT_AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(String(text)));
@@ -1378,7 +2033,7 @@ function buildAuthRecoveryReplayTask(inputMeta, source = "auth_failure", created
   if (!inputMeta?.text) return null;
   const authReplayCount = Number(inputMeta.authReplayCount || 0);
   if (authReplayCount >= 1) return null;
-  return {
+  const task = {
     text: inputMeta.text,
     attemptedProfileIds: inputMeta.attemptedProfileIds || [],
     kind: inputMeta.kind || "user",
@@ -1388,6 +2043,9 @@ function buildAuthRecoveryReplayTask(inputMeta, source = "auth_failure", created
     source,
     createdAt,
   };
+  const threadRetryCount = Number(inputMeta.threadRetryCount || 0);
+  if (threadRetryCount) task.threadRetryCount = threadRetryCount;
+  return task;
 }
 
 function getReplayableAuthRecoveryTaskFromRuntime(rt) {
@@ -1895,6 +2553,26 @@ function normalizeSessionState(session, defaults) {
   session.personality = session.personality || defaults.personality;
   session.approvalPolicy = session.approvalPolicy || defaults.approvalPolicy;
   session.sandboxMode = session.sandboxMode || defaults.sandboxMode;
+  session.autoRouteMode = normalizeAutoRouteMode(
+    session.autoRouteMode || defaults.autoRouteMode,
+    defaults.autoRouteMode || DEFAULT_AUTO_ROUTE_MODE,
+  );
+  session.autoRouteLocked = Boolean(session.autoRouteLocked);
+  session.lastAutoRoute = session.lastAutoRoute && typeof session.lastAutoRoute === "object"
+    ? {
+        mode: normalizeAutoRouteMode(session.lastAutoRoute.mode, session.autoRouteMode),
+        locked: Boolean(session.lastAutoRoute.locked),
+        applied: Boolean(session.lastAutoRoute.applied),
+        changed: Boolean(session.lastAutoRoute.changed),
+        tier: typeof session.lastAutoRoute.tier === "string" ? session.lastAutoRoute.tier : null,
+        model: typeof session.lastAutoRoute.model === "string" ? session.lastAutoRoute.model : null,
+        effort: typeof session.lastAutoRoute.effort === "string" ? session.lastAutoRoute.effort : null,
+        previousModel: typeof session.lastAutoRoute.previousModel === "string" ? session.lastAutoRoute.previousModel : null,
+        previousEffort: typeof session.lastAutoRoute.previousEffort === "string" ? session.lastAutoRoute.previousEffort : null,
+        reasons: normalizeStringList(session.lastAutoRoute.reasons),
+        routedAt: typeof session.lastAutoRoute.routedAt === "string" ? session.lastAutoRoute.routedAt : null,
+      }
+    : null;
   session.updatedAt = session.updatedAt || nowIso();
   session.contextWindow = Number.isFinite(Number(session.contextWindow)) && Number(session.contextWindow) > 0
     ? Number(session.contextWindow)
@@ -2015,8 +2693,15 @@ function buildHelpText() {
     "/model <5.2|5.4|5.5|id> [effort] - set model, optionally with reasoning effort",
     "/effort <none|minimal|low|medium|high|xhigh> - set reasoning effort",
     "/think <none|minimal|low|medium|high|xhigh> - alias for /effort",
+    "/autoroute <off|suggest|auto> - set automatic model/effort routing",
+    "/route <message> - preview the model/effort route for a message",
     "/models - show recommended model ids and aliases",
     "/efforts - show reasoning effort options",
+    "/extensions - show app-server skills/apps/MCP/plugin inventory",
+    "/skills - list available Codex skills for this cwd",
+    "/apps - list available Codex apps/connectors",
+    "/mcp - list configured MCP servers",
+    "/plugins - list discovered plugin marketplaces/plugins",
     "/accounts - show available Codex accounts",
     "/account <id|index> - switch Codex account without dropping the thread",
     "/menu - open the quick settings panel",
@@ -2095,6 +2780,7 @@ function buildMenuText(session, rt, page = MENU_PAGES.MAIN, meta = {}) {
     `truth: ${session.truthProfile?.name || "(unbound)"}`,
     `model: ${session.model}`,
     `effort: ${session.effort}`,
+    `route: ${session.autoRouteMode}${session.autoRouteLocked ? " (locked)" : ""}`,
     accountLine,
     `thread: ${session.threadId || "(none)"}`,
     `turn: ${rt.activeTurnId || "(none)"}`,
@@ -2132,6 +2818,7 @@ function buildMenuText(session, rt, page = MENU_PAGES.MAIN, meta = {}) {
       "- 自定义模型继续用 /model <id>",
       "- 可用 /model 5.4 xhigh 同时切模型和思考等级",
       "- 自定义 effort 继续用 /effort <level> 或 /think <level>",
+      "- 自动路由用 /autoroute <off|suggest|auto>，预览用 /route <message>",
     ]).join("\n");
   }
 
@@ -2213,6 +2900,13 @@ function buildMenuKeyboard(page = MENU_PAGES.MAIN, meta = {}) {
       inline_keyboard: [
         modelButtons,
         ...chunkArray(effortButtons, 2),
+        [
+          { text: "Route off", callback_data: "menu|autoroute|off" },
+          { text: "Route suggest", callback_data: "menu|autoroute|suggest" },
+        ],
+        [
+          { text: "Route auto", callback_data: "menu|autoroute|auto" },
+        ],
         [
           { text: "Back", callback_data: `menu|open|${MENU_PAGES.MAIN}` },
           { text: "Refresh", callback_data: "menu|refresh" },
@@ -2544,6 +3238,20 @@ async function main() {
   if (contextSyncReport.skippedReason) {
     console.log(`Desktop Codex context sync skipped: ${contextSyncReport.skippedReason}`);
   }
+  const codexBackendMode = String(process.env.CODEX_BACKEND || process.env.CODEX_PROVIDER || "").trim().toLowerCase();
+  const codexLbEnabled = codexBackendMode === "codex-lb" || parseBooleanEnv(process.env.CODEX_LB_ENABLED, false);
+  const codexLbBaseUrl = process.env.CODEX_LB_CODEX_BASE_URL
+    || process.env.CODEX_LB_BASE_URL
+    || "http://127.0.0.1:2455/backend-api/codex";
+  const codexLbProvider = process.env.CODEX_LB_PROVIDER || "codex-lb";
+  const codexLbReport = configureCodexLbProvider({
+    codexHome,
+    enabled: codexLbEnabled,
+    baseUrl: codexLbBaseUrl,
+    provider: codexLbProvider,
+    envKey: process.env.CODEX_LB_ENV_KEY || (process.env.CODEX_LB_API_KEY ? "CODEX_LB_API_KEY" : ""),
+    logger: (line) => console.log(line),
+  });
   const defaultSourceRegistryPath = path.join(__dirname, "config", "source-registry.json");
   const sourceRegistryPath = process.env.SOURCE_REGISTRY_PATH
     || process.env.TRUTH_SOURCE_REGISTRY
@@ -2599,6 +3307,7 @@ async function main() {
     effort: process.env.CODEX_EFFORT || "xhigh",
     summary: process.env.CODEX_SUMMARY || "concise",
     personality: process.env.CODEX_PERSONALITY || "friendly",
+    autoRouteMode: normalizeAutoRouteMode(process.env.CODEX_AUTO_ROUTE, DEFAULT_AUTO_ROUTE_MODE),
     approvalPolicy: process.env.CODEX_APPROVAL_POLICY || "untrusted",
     sandboxMode: process.env.CODEX_SANDBOX || "workspace-write",
     autoApprove: process.env.AUTO_APPROVE === "1" || process.env.AUTO_APPROVE === "true",
@@ -2619,6 +3328,13 @@ async function main() {
       store.markDirty();
     }
   }
+  const backendBoundary = applyCodexBackendSessionBoundary(store.data, {
+    enabled: codexLbEnabled,
+    provider: codexLbReport.provider || codexLbProvider,
+    baseUrl: codexLbReport.baseUrl || codexLbBaseUrl,
+    logger: (line) => console.log(line),
+  });
+  if (backendBoundary.changed) store.markDirty();
   store.saveThrottled();
   const pollTimeoutSeconds = Math.max(
     1,
@@ -2696,9 +3412,10 @@ async function main() {
     const profileMap =
       parsed.profiles && typeof parsed.profiles === "object" ? parsed.profiles : parsed;
     if (!profileMap || typeof profileMap !== "object") return;
-    const existing = profileMap[profile.profileId];
+    const sourceProfileId = profile.sourceProfileId || profile.profileId;
+    const existing = profileMap[sourceProfileId];
     if (!existing || typeof existing !== "object") return;
-    profileMap[profile.profileId] = {
+    profileMap[sourceProfileId] = {
       ...existing,
       type: "oauth",
       provider: "openai-codex",
@@ -2855,7 +3572,6 @@ async function main() {
     const selectable = (profile) => (
       profile && isAccountProfileSelectable(profile, { allowBlocked: false })
     );
-    const nonExpired = (profile) => profile && !isAccountProfileExpiredForSelection(profile);
     const hasPreferredSelectable = accountProfiles.some((profile) => !profile.lastResort && selectable(profile));
     const canUseCandidate = (profile) => profile && (!profile.lastResort || !hasPreferredSelectable);
 
@@ -2879,9 +3595,20 @@ async function main() {
 
     const priorityProfiles = prioritizeAccountProfiles(accountProfiles);
     return priorityProfiles.find((profile) => selectable(profile))
-      || priorityProfiles.find((profile) => nonExpired(profile))
-      || priorityProfiles[0]
-      || null;
+      || priorityProfiles.find((profile) => !isAccountProfileExpiredForSelection(profile))
+      || null
+  }
+
+  function isProfilePreferredOverCurrent(candidate, current) {
+    if (!candidate) return false;
+    if (!current) return true;
+    if (candidate.profileId === current.profileId) return false;
+    if (!isAccountProfileSelectable(current, { allowBlocked: false })) return true;
+    return Boolean(current.lastResort && !candidate.lastResort);
+  }
+
+  function getStoredAccountProfile() {
+    return findAccountProfile(store.data.bridge?.currentAccountProfileId) || null;
   }
 
   function writeAuthForProfile(profile) {
@@ -2906,8 +3633,7 @@ async function main() {
   }
 
   function buildAccountMeta() {
-    const currentProfileId = store.data.bridge?.currentAccountProfileId || null;
-    const currentProfile = findAccountProfile(currentProfileId) || resolveInitialAccountProfile();
+    const currentProfile = getCurrentAccountProfile();
     const runtime = reconcileRuntimeAccountBinding();
     return {
       currentAccountProfileId: currentProfile?.profileId || null,
@@ -2929,29 +3655,15 @@ async function main() {
   }
 
   function getCurrentAccountProfile() {
-    return findAccountProfile(store.data.bridge?.currentAccountProfileId)
-      || resolveInitialAccountProfile()
-      || null;
+    const current = getStoredAccountProfile();
+    const preferred = resolveInitialAccountProfile();
+    return isProfilePreferredOverCurrent(preferred, current)
+      ? preferred
+      : current || preferred || null;
   }
 
   function extractCodexErrorText(err) {
-    const parts = [];
-    if (err?.message) parts.push(String(err.message));
-    if (err?.rpcError?.message) parts.push(String(err.rpcError.message));
-    if (err?.rpcError?.code !== undefined && err?.rpcError?.code !== null) {
-      parts.push(String(err.rpcError.code));
-    }
-    const data = err?.rpcError?.data;
-    if (typeof data === "string") {
-      parts.push(data);
-    } else if (data !== undefined) {
-      try {
-        parts.push(JSON.stringify(data));
-      } catch {
-        parts.push(String(data));
-      }
-    }
-    return parts.filter(Boolean).join(" | ");
+    return extractGenericErrorText(err);
   }
 
   function isAccountFailoverError(err) {
@@ -3019,22 +3731,13 @@ async function main() {
   }
 
   function listFallbackProfiles(currentProfileId, attemptedProfileIds = new Set()) {
-    const startIndex = accountProfiles.findIndex((profile) => profile.profileId === currentProfileId);
-    const filterProfiles = (profiles) => profiles.filter((profile) => !attemptedProfileIds.has(profile.profileId));
-    const skipExpired = (profiles) => profiles.filter((profile) => !isAccountProfileExpiredForSelection(profile));
-    const skipBlocked = (profiles) => profiles.filter((profile) => !isAccountProfileTemporarilyBlocked(profile));
-    if (startIndex < 0) {
-      const fresh = skipExpired(filterProfiles(accountProfiles));
-      const available = skipBlocked(fresh);
-      return available.length ? prioritizeAccountProfiles(available) : prioritizeAccountProfiles(fresh);
-    }
-    const rotated = [
-      ...accountProfiles.slice(startIndex + 1),
-      ...accountProfiles.slice(0, startIndex),
-    ];
-    const fresh = skipExpired(filterProfiles(prioritizeAccountProfiles(rotated)));
-    const available = skipBlocked(fresh);
-    return available.length ? available : fresh;
+    return orderAccountProfilesForFailover(accountProfiles, {
+      attemptedProfileIds: new Set(uniqueStrings([
+        currentProfileId,
+        ...Array.from(attemptedProfileIds || []),
+      ])),
+      isBlocked: isAccountProfileTemporarilyBlocked,
+    });
   }
 
   async function verifySwitchedAccount(profile) {
@@ -3227,6 +3930,7 @@ async function main() {
           kind: inputMeta.kind || "user",
           silent: Boolean(inputMeta.silent),
           contextRetryCount: Number(inputMeta.contextRetryCount || 0),
+          threadRetryCount: Number(inputMeta.threadRetryCount || 0),
           attemptedProfileIds: uniqueStrings([
             ...attempted,
             nextProfile.profileId,
@@ -3290,22 +3994,28 @@ async function main() {
   }
 
   async function ensureHealthyStartupAccount() {
-    if (!autoAccountFailover || accountProfiles.length < 2) return;
+    if (!autoAccountFailover || accountProfiles.length < 2) return true;
     const currentProfile = getCurrentAccountProfile();
-    if (!currentProfile) return;
+    if (!currentProfile) return true;
+    markCodexBackendRecovering("startup account health check");
 
     try {
       await verifySwitchedAccount(currentProfile);
       reconcileRuntimeAccountBinding({ expectedProfile: currentProfile, strict: true });
       store.data.bridge.currentAccountProfileId = currentProfile.profileId;
       markAccountProfileHealthy(currentProfile);
+      recordCodexBackendHealthy({ recoveredProfileId: currentProfile.profileId });
       store.markDirty();
       store.saveThrottled();
-      return;
+      return true;
     } catch (err) {
       if (!isAccountRecoveryError(err)) {
+        recordCodexBackendFailure(extractCodexErrorText(err), {
+          auth: isAccountAuthFailure(err),
+          state: "unhealthy",
+        });
         console.warn("Initial account health check failed, but not with a recognized account error:", err.message);
-        return;
+        return false;
       }
       markProfileForRecoveryError(currentProfile, err);
       console.warn(`Initial account ${currentProfile.profileId} failed health check:`, err.message);
@@ -3317,12 +4027,14 @@ async function main() {
       try {
         await switchAccountProfile(nextProfile);
         console.warn(`Recovered bridge startup onto ${nextProfile.profileId}`);
-        return;
+        return true;
       } catch (err) {
         markProfileForRecoveryError(nextProfile, err);
         console.warn(`Fallback startup account ${nextProfile.profileId} failed health check:`, err.message);
       }
     }
+    markCodexBackendRecoveryFailed("Every configured Codex account failed startup health check.");
+    return false;
   }
 
   function recordContextUsageForSession(session, params) {
@@ -3438,6 +4150,7 @@ async function main() {
           kind: retryTask.kind || "user",
           silent: Boolean(retryTask.silent),
           contextRetryCount: Number(retryTask.contextRetryCount || 0),
+          threadRetryCount: Number(retryTask.threadRetryCount || 0),
         });
       } catch (err) {
         await telegram.sendMessage({
@@ -4158,6 +4871,124 @@ async function main() {
     return countQueuedTasks(rt);
   }
 
+  function appListParams(session, { forceRefetch = false } = {}) {
+    const params = {
+      cursor: null,
+      limit: EXTENSION_LIST_LIMIT,
+      forceRefetch: Boolean(forceRefetch),
+    };
+    if (session?.threadId) params.threadId = session.threadId;
+    return params;
+  }
+
+  function mcpListParams(session) {
+    const params = {
+      cursor: null,
+      limit: EXTENSION_LIST_LIMIT,
+    };
+    if (session?.threadId) params.threadId = session.threadId;
+    return params;
+  }
+
+  function pluginListParams() {
+    return {
+      cursor: null,
+      limit: EXTENSION_LIST_LIMIT,
+    };
+  }
+
+  function skillsListParams(session, { forceReload = false } = {}) {
+    return {
+      cwds: [session?.cwd || defaults.cwd],
+      forceReload: Boolean(forceReload),
+    };
+  }
+
+  async function requestExtensionInventory(kind, session, opts = {}) {
+    if (kind === "skills") {
+      return codex.request("skills/list", skillsListParams(session, opts));
+    }
+    if (kind === "apps") {
+      return codex.request("app/list", appListParams(session, opts));
+    }
+    if (kind === "mcp") {
+      return codex.request("mcpServerStatus/list", mcpListParams(session));
+    }
+    if (kind === "plugins") {
+      return codex.request("plugin/list", pluginListParams());
+    }
+    throw new Error(`Unknown extension inventory kind: ${kind}`);
+  }
+
+  async function buildMentionItemsForText(text, session) {
+    if (!extractExtensionMentionSlugs(text).length) return [];
+    const [skills, apps, plugins] = await Promise.allSettled([
+      requestExtensionInventory("skills", session),
+      requestExtensionInventory("apps", session),
+      requestExtensionInventory("plugins", session),
+    ]);
+    const mentionItems = buildExtensionMentionInputItems(text, {
+      skillsResult: skills.status === "fulfilled" ? skills.value : null,
+      appsResult: apps.status === "fulfilled" ? apps.value : null,
+      pluginsResult: plugins.status === "fulfilled" ? plugins.value : null,
+    });
+    if (!mentionItems.length && [skills, apps, plugins].some((item) => item.status === "rejected")) {
+      console.warn("Extension mention resolution had inventory errors:", [skills, apps, plugins]
+        .filter((item) => item.status === "rejected")
+        .map((item) => item.reason?.message || String(item.reason))
+        .join("; "));
+    }
+    return mentionItems;
+  }
+
+  function formatInventoryByKind(kind, result, error = null) {
+    if (kind === "skills") return formatSkillsListText(result, { error });
+    if (kind === "apps") return formatAppsListText(result, { error });
+    if (kind === "mcp") return formatMcpListText(result, { error });
+    if (kind === "plugins") return formatPluginsListText(result, { error });
+    return error ? compactOneLine(error, 120) : "(unknown inventory)";
+  }
+
+  async function sendExtensionInventory({ chatId, session, kind, force = false }) {
+    try {
+      const result = await requestExtensionInventory(kind, session, {
+        forceReload: force,
+        forceRefetch: force,
+      });
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: truncateMiddle(formatInventoryByKind(kind, result), 3900),
+      });
+    } catch (err) {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: truncateMiddle(formatInventoryByKind(kind, null, err.message || String(err)), 3900),
+      });
+    }
+  }
+
+  async function sendAllExtensionInventories({ chatId, session, force = false }) {
+    const kinds = ["skills", "apps", "mcp", "plugins"];
+    const settled = await Promise.allSettled(kinds.map((kind) => requestExtensionInventory(kind, session, {
+      forceReload: force,
+      forceRefetch: force,
+    })));
+    const sections = kinds.map((kind, index) => {
+      const item = settled[index];
+      if (item.status === "fulfilled") return formatInventoryByKind(kind, item.value);
+      return formatInventoryByKind(kind, null, item.reason?.message || String(item.reason));
+    });
+    sections.push(
+      "",
+      "Mention path is prewired for plain messages that include $app, $skill, or $plugin names when app-server can resolve them.",
+      "Install/enable actions stay explicit; this command is read-only.",
+    );
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: truncateMiddle(sections.join("\n\n"), 3900),
+    });
+  }
+
   function enqueuePendingTask(rt, text) {
     if (!Array.isArray(rt.pendingTasks)) rt.pendingTasks = [];
     if (!Number.isFinite(rt.queuedTaskSeq)) rt.queuedTaskSeq = 1;
@@ -4504,6 +5335,7 @@ async function main() {
             silent: Boolean(replayTask.silent),
             contextRetryCount: Number(replayTask.contextRetryCount || 0),
             authReplayCount: Number(replayTask.authReplayCount || 0),
+            threadRetryCount: Number(replayTask.threadRetryCount || 0),
             skipBackendRecoveryWait: true,
           });
         } catch (err) {
@@ -4533,7 +5365,6 @@ async function main() {
       ? listFallbackProfiles(currentProfile?.profileId, attempted)
       : [];
     const shouldRetryCurrent = currentProfile
-      && !isAccountProfileExpiredForSelection(currentProfile)
       && (!isAccountAuthFailureText(reason) || fallbackProfiles.length === 0);
 
     if (shouldRetryCurrent) {
@@ -4657,12 +5488,9 @@ async function main() {
     reloadAccountProfiles({ reason: "switchAccountProfile", silent: true });
     const resolvedProfile = profile?.profileId ? findAccountProfile(profile.profileId) : null;
     const effectiveProfile = resolvedProfile || profile;
-    if (isAccountProfileExpiredForSelection(effectiveProfile)) {
-      throw new Error(`Codex account ${effectiveProfile.profileId || "unknown"} has an expired access token. Run /authsync or sign in again before selecting it.`);
-    }
 
     stopTypingForAllChats();
-    const previousProfile = getCurrentAccountProfile();
+    const previousProfile = getStoredAccountProfile();
     const previousAuth = readCodexAuth(runtimeAuthPath);
     codexBackendTransitionDepth += 1;
     try {
@@ -4808,7 +5636,15 @@ async function main() {
   }
 
   await startCodexServer();
-  await ensureHealthyStartupAccount();
+  codexBackendRecoveryPromise = ensureHealthyStartupAccount()
+    .catch((err) => {
+      markCodexBackendRecoveryFailed(err.message || String(err));
+      console.error("Startup account health check failed:", err);
+      return false;
+    })
+    .finally(() => {
+      codexBackendRecoveryPromise = null;
+    });
 
   async function notifyUnauthorizedChat(chatId) {
     if (unauthorizedNotified.has(chatId)) return;
@@ -4857,6 +5693,27 @@ async function main() {
     return startFreshThread(session, chatId);
   }
 
+  async function ensurePreferredAccountBeforeTurn(chatId) {
+    const current = getStoredAccountProfile();
+    const preferred = resolveInitialAccountProfile();
+    if (!isProfilePreferredOverCurrent(preferred, current)) return current || preferred || null;
+    const reason = !current
+      ? "no current account"
+      : current.lastResort && !preferred.lastResort
+        ? "leaving last-resort account"
+        : "current account is expired, blocked, or unavailable";
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: `Codex account rotation: ${reason}; switching to ${preferred.shortLabel}.`,
+    });
+    try {
+      return await switchAccountProfile(preferred);
+    } catch (err) {
+      markProfileForRecoveryError(preferred, err);
+      throw err;
+    }
+  }
+
   async function maybeStartQueuedTask({ chatId, session }) {
     const rt = getRuntime(chatId);
     if (isChatBusy(rt)) return false;
@@ -4882,10 +5739,14 @@ async function main() {
     silent = false,
     contextRetryCount = 0,
     authReplayCount = 0,
+    threadRetryCount = 0,
     skipBackendRecoveryWait = false,
   }) {
     if (!skipBackendRecoveryWait) {
       await waitForCodexBackendRecovery();
+    }
+    if (kind === "user") {
+      await ensurePreferredAccountBeforeTurn(chatId);
     }
     const rt = getRuntime(chatId);
     const currentProfile = getCurrentAccountProfile();
@@ -4899,6 +5760,7 @@ async function main() {
       silent,
       contextRetryCount,
       authReplayCount,
+      threadRetryCount,
     };
 
     try {
@@ -4953,6 +5815,24 @@ async function main() {
         return;
       }
 
+      const truthResolved = kind === "user"
+        ? ensureSessionTruthProfile(session, {
+            reason: "turn-start",
+            bootstrapPending: true,
+          })
+        : null;
+      const routeDecision = kind === "user"
+        ? classifyTurnDifficulty({ text, session, truthProfile: truthResolved?.profile })
+        : null;
+      const routeResult = routeDecision
+        ? applyAutoRouteDecision(session, routeDecision)
+        : null;
+      if (routeResult) {
+        session.updatedAt = nowIso();
+        store.markDirty();
+        store.saveThrottled();
+      }
+
       const threadId = await ensureThread(session, chatId);
       if (threadId === AUTH_RECOVERY_HANDOFF) {
         return;
@@ -4962,6 +5842,10 @@ async function main() {
       if (rt.activeTurnId) {
         rt.turnInputMetaByTurnId[rt.activeTurnId] = { ...rt.pendingInputMeta };
         rt.pendingInputMeta = null;
+        const steerInputItems = [
+          { type: "text", text },
+          ...await buildMentionItemsForText(text, session),
+        ];
 
         const steerResult = await requestWithAccountFailover({
           chatId,
@@ -4969,7 +5853,7 @@ async function main() {
           run: async () => codex.request("turn/steer", {
             threadId,
             expectedTurnId: rt.activeTurnId,
-            input: [{ type: "text", text }],
+            input: steerInputItems,
           }),
         });
         if (steerResult === AUTH_RECOVERY_HANDOFF) {
@@ -4981,12 +5865,6 @@ async function main() {
 
       let inputText = text;
       let appliedTruthBootstrap = false;
-      const truthResolved = kind === "user"
-        ? ensureSessionTruthProfile(session, {
-            reason: "turn-start",
-            bootstrapPending: true,
-          })
-        : null;
       let appliedSummaryBootstrap = false;
       if (kind === "user" && session.pendingSummaryBootstrap?.text) {
         inputText = buildCompactionBootstrapText(session.pendingSummaryBootstrap, text);
@@ -4996,6 +5874,10 @@ async function main() {
         inputText = buildTruthBootstrapText(truthResolved, inputText);
         appliedTruthBootstrap = true;
       }
+      const inputItems = [
+        { type: "text", text: inputText },
+        ...await buildMentionItemsForText(inputText, session),
+      ];
 
       rt.items = {};
       rt.turnDiffByTurnId = {};
@@ -5009,7 +5891,7 @@ async function main() {
         run: async () => {
           const result = await codex.request("turn/start", {
             threadId,
-            input: [{ type: "text", text: inputText }],
+            input: inputItems,
             cwd: session.cwd,
             model: session.model,
             effort: session.effort,
@@ -5044,6 +5926,36 @@ async function main() {
       }
     } catch (err) {
       const pendingMeta = rt.pendingInputMeta?.text === text ? rt.pendingInputMeta : null;
+      if (
+        kind === "user"
+        && isMissingThreadRequestError(err)
+        && Number(pendingMeta?.threadRetryCount || threadRetryCount || 0) < 1
+      ) {
+        rt.pendingInputMeta = null;
+        session.threadId = null;
+        session.updatedAt = nowIso();
+        store.markDirty();
+        store.saveThrottled();
+        console.warn("Stored Codex thread is missing; starting a fresh thread and retrying once:", err.message);
+        const freshThreadId = await startFreshThread(session, chatId, {
+          announceText: () => "Codex 后端重启后旧 thread 已失效，已自动新建 thread 并重试这条消息。",
+        });
+        if (freshThreadId === AUTH_RECOVERY_HANDOFF) {
+          return;
+        }
+        return startOrSteerTurn({
+          chatId,
+          session,
+          text,
+          attemptedProfileIds: pendingMeta?.attemptedProfileIds || attemptedProfileIds || [],
+          kind,
+          silent,
+          contextRetryCount: Number(pendingMeta?.contextRetryCount || contextRetryCount || 0),
+          authReplayCount: Number(pendingMeta?.authReplayCount || authReplayCount || 0),
+          threadRetryCount: Number(pendingMeta?.threadRetryCount || threadRetryCount || 0) + 1,
+          skipBackendRecoveryWait: true,
+        });
+      }
       if (
         kind === "user"
         && !rt.activeTurnId
@@ -5488,6 +6400,65 @@ async function main() {
       return;
     }
 
+    if (trimmed === "/autoroute") {
+      await telegram.sendMessage({ chat_id: chatId, text: formatAutoRouteDecisionText(session) });
+      return;
+    }
+
+    if (trimmed.startsWith("/autoroute ")) {
+      const arg = trimmed.slice("/autoroute ".length).trim();
+      if (arg === "lock" || arg === "manual") {
+        session.autoRouteLocked = true;
+      } else if (arg === "unlock") {
+        session.autoRouteLocked = false;
+      } else {
+        const nextMode = normalizeAutoRouteMode(arg, null);
+        if (!nextMode) {
+          await telegram.sendMessage({
+            chat_id: chatId,
+            text: "Invalid auto route mode. Use one of: off, suggest, auto, lock, unlock.",
+          });
+          return;
+        }
+        session.autoRouteMode = nextMode;
+        if (nextMode !== "off") session.autoRouteLocked = false;
+      }
+      session.updatedAt = nowIso();
+      store.markDirty();
+      store.saveThrottled();
+      await telegram.sendMessage({ chat_id: chatId, text: formatAutoRouteDecisionText(session) });
+      return;
+    }
+
+    if (trimmed === "/route") {
+      await telegram.sendMessage({ chat_id: chatId, text: formatAutoRouteDecisionText(session) });
+      return;
+    }
+
+    if (trimmed.startsWith("/route ")) {
+      const previewText = trimmed.slice("/route ".length).trim();
+      const resolved = ensureSessionTruthProfile(session, { reason: "/route", bootstrapPending: false });
+      const decision = classifyTurnDifficulty({
+        text: previewText,
+        session,
+        truthProfile: resolved?.profile,
+      });
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: formatAutoRouteDecisionText(session, decision, {
+          mode: "suggest",
+          locked: session.autoRouteLocked,
+          applied: false,
+          changed: false,
+          tier: decision.tier,
+          model: decision.model,
+          effort: decision.effort,
+          reasons: decision.reasons,
+        }),
+      });
+      return;
+    }
+
     if (trimmed === "/models") {
       await telegram.sendMessage({ chat_id: chatId, text: buildModelsText() });
       return;
@@ -5495,6 +6466,63 @@ async function main() {
 
     if (trimmed === "/efforts") {
       await telegram.sendMessage({ chat_id: chatId, text: buildEffortsText() });
+      return;
+    }
+
+    if (trimmed === "/extensions" || trimmed === "/extensions refresh") {
+      await sendAllExtensionInventories({
+        chatId,
+        session,
+        force: trimmed.endsWith(" refresh"),
+      });
+      return;
+    }
+
+    if (trimmed === "/skills" || trimmed === "/skills refresh") {
+      await sendExtensionInventory({
+        chatId,
+        session,
+        kind: "skills",
+        force: trimmed.endsWith(" refresh"),
+      });
+      return;
+    }
+
+    if (trimmed === "/apps" || trimmed === "/apps refresh") {
+      await sendExtensionInventory({
+        chatId,
+        session,
+        kind: "apps",
+        force: trimmed.endsWith(" refresh"),
+      });
+      return;
+    }
+
+    if (trimmed === "/mcp" || trimmed === "/mcp status") {
+      await sendExtensionInventory({ chatId, session, kind: "mcp" });
+      return;
+    }
+
+    if (trimmed === "/mcp reload") {
+      try {
+        await codex.request("config/mcpServer/reload", {});
+        await telegram.sendMessage({ chat_id: chatId, text: "MCP server config reload queued." });
+      } catch (err) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `MCP reload failed: ${truncateMiddle(err.message || String(err), 1000)}`,
+        });
+      }
+      return;
+    }
+
+    if (trimmed === "/plugins" || trimmed === "/plugins refresh") {
+      await sendExtensionInventory({
+        chatId,
+        session,
+        kind: "plugins",
+        force: trimmed.endsWith(" refresh"),
+      });
       return;
     }
 
@@ -5619,6 +6647,8 @@ async function main() {
           `truthBootstrapPending: ${session.truthProfile?.bootstrapPending ? "yes" : "no"}`,
           `model: ${session.model}`,
           `effort: ${session.effort}`,
+          `autoRoute: ${session.autoRouteMode}${session.autoRouteLocked ? " (locked)" : ""}`,
+          `lastAutoRoute: ${session.lastAutoRoute ? `${session.lastAutoRoute.tier} -> ${session.lastAutoRoute.model}/${session.lastAutoRoute.effort} (${session.lastAutoRoute.applied ? "applied" : "preview"})` : "(none)"}`,
           `account: ${meta.currentAccountLabel || "(default)"}`,
           `accountFailover: ${meta.autoAccountFailover ? "on" : "off"}`,
           `runtimeAccountProfileId: ${meta.runtimeAccountProfileId || "(unknown)"}`,
@@ -5665,6 +6695,12 @@ async function main() {
       await startOrSteerTurn({ chatId, session, text: trimmed });
     } catch (err) {
       stopTyping(chatId);
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: `处理失败：${truncateMiddle(err.message || String(err), 1200)}`,
+      }).catch((notifyErr) => {
+        console.warn(`Failed to notify chat ${chatId} about handler error:`, notifyErr.message);
+      });
       throw err;
     }
   }
@@ -5792,6 +6828,22 @@ async function main() {
           return;
         }
 
+        if (actionType === "autoroute" && value) {
+          const nextMode = normalizeAutoRouteMode(value, null);
+          if (!nextMode) {
+            await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "Invalid route mode", show_alert: true });
+            return;
+          }
+          session.autoRouteMode = nextMode;
+          if (nextMode !== "off") session.autoRouteLocked = false;
+          session.updatedAt = nowIso();
+          store.markDirty();
+          store.saveThrottled();
+          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `route => ${session.autoRouteMode}`, show_alert: false });
+          await renderMenuMessage(chatId, cbq.message.message_id);
+          return;
+        }
+
         if (actionType === "account" && value) {
           const profile = findAccountProfile(value);
           if (!profile) {
@@ -5900,6 +6952,8 @@ module.exports = {
     shouldAutoCompactDecision,
     isContextFailurePatternMatch,
     shouldTreatTextAsContextFailure,
+    extractGenericErrorText,
+    isMissingThreadRequestError,
     extractTelemetryThreadId,
     isAccountAuthFailureText,
     isAccessExpiryExpired,
@@ -5908,15 +6962,32 @@ module.exports = {
     isAccountProfileLastResort,
     sortAccountProfilesByPriority,
     prioritizeAccountProfiles,
+    orderAccountProfilesForFailover,
+    normalizeAccountSourcePaths,
+    loadCodexAccountProfiles,
+    configureCodexLbProvider,
+    applyCodexBackendSessionBoundary,
     buildAuthRecoveryReplayTask,
     getReplayableAuthRecoveryTaskFromRuntime,
     summarizeCodexBackendHealth,
+    truncateMiddle,
     buildCompactionBootstrapText,
     countQueuedTasks,
     normalizeSessionState,
     normalizeModelId,
     normalizeEffortLevel,
+    normalizeAutoRouteMode,
+    slugifyExtensionName,
+    extractExtensionMentionSlugs,
+    buildExtensionMentionInputItems,
+    formatSkillsListText,
+    formatAppsListText,
+    formatMcpListText,
+    formatPluginsListText,
     parseModelCommandArgs,
+    classifyTurnDifficulty,
+    applyAutoRouteDecision,
+    formatAutoRouteDecisionText,
     buildSourceRegistry,
     normalizeSourceProfile,
     findSourceProfileForPath,
