@@ -1,5 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -88,4 +89,70 @@ test("thread list and handback command support CLI handoff", () => {
     }),
     "cd '/tmp/has '\\'' quote' && codex resume 'thr_1'",
   );
+});
+
+test("project thread state preserves per-project thread ids", () => {
+  const session = {
+    cwd: "/repo/a",
+    threadId: "thread-a",
+    truthProfile: {
+      id: "repo-a",
+      name: "Repo A",
+      projectRoot: "/repo/a",
+    },
+    contextTokens: 123,
+    projectThreads: {},
+  };
+
+  const saved = _test.rememberProjectThreadState(session, { observedAt: "2026-05-03T00:00:00.000Z" });
+  assert.equal(saved.key, "profile:repo-a");
+
+  session.cwd = "/repo/b";
+  session.threadId = "thread-b";
+  session.truthProfile = {
+    id: "repo-b",
+    name: "Repo B",
+    projectRoot: "/repo/b",
+  };
+  _test.rememberProjectThreadState(session, { observedAt: "2026-05-03T00:00:01.000Z" });
+
+  session.cwd = "/repo/a";
+  session.threadId = null;
+  session.contextTokens = null;
+  session.truthProfile = {
+    id: "repo-a",
+    name: "Repo A",
+    projectRoot: "/repo/a",
+  };
+
+  const restored = _test.restoreProjectThreadState(session);
+  assert.equal(restored.key, "profile:repo-a");
+  assert.equal(session.threadId, "thread-a");
+  assert.equal(session.contextTokens, 123);
+});
+
+test("workspace root conflict detects nested active workspaces", () => {
+  assert.equal(_test.workspaceRootsConflict("/repo", "/repo/subdir"), true);
+  assert.equal(_test.workspaceRootsConflict("/repo/a", "/repo/b"), false);
+  assert.equal(
+    _test.workspaceLockRootForSession({
+      cwd: "/repo/subdir",
+      truthProfile: { projectRoot: "/repo" },
+    }),
+    "/repo",
+  );
+});
+
+test("detectTestCommand finds package test script only", () => {
+  assert.equal(_test.detectTestCommand(""), null);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-test-command-"));
+  assert.equal(_test.detectTestCommand(root), null);
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({
+    scripts: { test: "node --test" },
+  }));
+  assert.deepEqual(_test.detectTestCommand(root), {
+    command: "npm",
+    args: ["test"],
+    label: "npm test",
+  });
 });

@@ -114,6 +114,8 @@ codex app-server --listen stdio://
 - `/sessions`：列出当前 cwd 下最近的 Codex sessions
 - `/resume <index|threadId>`：把当前 Telegram 会话绑定到已有 Codex thread
 - `/handback`：打印可在本机终端执行的 `codex resume` 命令
+- `/continue <message>`：当同一 workspace 另一个 chat 正在跑任务时，强制继续一次自然语言 turn
+- `/diff`、`/git status`、`/test`、`/review`、`/rollback`：显式工程命令；自然语言交互不受影响
 - `/models`：查看推荐模型；内置快捷别名 `5.2 / 5.4 / 5.5`
 - `/model 5.4`：切模型（会保存成 `gpt-5.4`）
 - `/model 5.5 xhigh`：同时切模型和思考等级
@@ -133,7 +135,9 @@ codex app-server --listen stdio://
 
 扩展命令默认只读，不会安装或启用插件。普通消息里如果写入 `$app`、`$skill` 或 `$plugin` 名称，bridge 会尽量把它转换成 Codex app-server 的精确 `mention` input；如果当前 app-server 不支持对应列表接口，会降级为普通文本。
 
-桌面端体验相关命令优先围绕“选对项目、接上已有 thread、能随时交还本机 Codex”设计。`/projects` 使用同一份 source registry，避免 Telegram 会话长期停在 `/Users/wukong`；`/sessions` 和 `/resume` 走 app-server 的 thread 列表/恢复接口；`/handback` 用于从 Telegram 切回本机 CLI。
+桌面端体验相关命令优先围绕“选对项目、接上已有 thread、能随时交还本机 Codex”设计。`/projects` 使用同一份 source registry，避免 Telegram 会话长期停在 `/Users/wukong`；`/sessions` 和 `/resume` 走 app-server 的 thread 列表/恢复接口；`/handback` 用于从 Telegram 切回本机 CLI。bridge 会按 chat + project 保存 thread，切回项目时优先恢复该项目的 thread；同一 workspace 有其他 chat 正在运行时，普通自然语言任务默认挡住，显式 `/continue` 才会绕过。
+
+显式工程命令是增加项，不改变普通自然语言路径。`/diff` 和 `/git status` 是只读；`/test` 只在当前 cwd 有 `package.json` 的 `scripts.test` 时运行 `npm test`；`/review` 会用 Codex review 当前工作树 diff；`/rollback` 只输出候选回滚命令，不自动执行 destructive 操作。
 
 ### 群聊行为
 
@@ -418,6 +422,8 @@ codex app-server --listen stdio://
 - `/sessions`: list recent Codex sessions for the current cwd
 - `/resume <index|threadId>`: bind this Telegram chat to an existing Codex thread
 - `/handback`: print a local `codex resume` command for the current thread
+- `/continue <message>`: force one natural-language turn when another chat is busy in the same workspace
+- `/diff`, `/git status`, `/test`, `/review`, `/rollback`: explicit engineering commands; plain natural-language interaction is unchanged
 - `/models`: show recommended models; built-in short aliases are `5.2 / 5.4 / 5.5`
 - `/model 5.4`: switch model (stored as `gpt-5.4`)
 - `/model 5.5 xhigh`: switch model and reasoning effort together
@@ -437,7 +443,9 @@ Automatic routing is off by default so upgrades do not change existing chat beha
 
 Extension commands are read-only by default and never install or enable plugins. When a plain message includes `$app`, `$skill`, or `$plugin` names, the bridge best-effort converts them into precise Codex app-server `mention` input; if the active app-server does not support the matching list method, the text is sent unchanged.
 
-Desktop-parity commands focus on choosing the right project, attaching existing threads, and handing work back to local Codex. `/projects` uses the same source registry so Telegram chats do not stay stuck at `/Users/wukong`; `/sessions` and `/resume` use app-server thread listing/resume; `/handback` is the Telegram-to-local CLI bridge.
+Desktop-parity commands focus on choosing the right project, attaching existing threads, and handing work back to local Codex. `/projects` uses the same source registry so Telegram chats do not stay stuck at `/Users/wukong`; `/sessions` and `/resume` use app-server thread listing/resume; `/handback` is the Telegram-to-local CLI bridge. The bridge stores threads per chat + project and restores the project thread when you switch back. If another chat has an active turn in the same workspace, plain natural-language tasks are blocked by default; `/continue` bypasses that guard for one turn.
+
+Explicit engineering commands are additive and do not change the plain natural-language path. `/diff` and `/git status` are read-only; `/test` runs `npm test` only when the current cwd has `package.json` with `scripts.test`; `/review` asks Codex to review the current working tree diff; `/rollback` prints candidate rollback commands and does not execute destructive operations.
 
 ### Group behavior
 

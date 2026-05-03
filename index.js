@@ -30,6 +30,21 @@ const AUTO_ROUTE_PRESETS = {
 };
 const EXTENSION_LIST_LIMIT = 50;
 const EXTENSION_MENTION_LIMIT = 8;
+const PROJECT_THREAD_STATE_FIELDS = [
+  "threadId",
+  "contextWindow",
+  "contextTokens",
+  "lastTurnTokens",
+  "lastTokenObservedAt",
+  "contextUsageRatio",
+  "compactionPending",
+  "compactionPendingReason",
+  "lastCompactionAt",
+  "compactionGeneration",
+  "compactionSummary",
+  "preCompactionThreadId",
+  "pendingSummaryBootstrap",
+];
 const DEFAULT_CONTEXT_SOFT_RATIO = 0.70;
 const DEFAULT_CONTEXT_HARD_RATIO = 0.82;
 const DEFAULT_CONTEXT_EMERGENCY_RATIO = 0.90;
@@ -1752,6 +1767,82 @@ function buildHandbackCommand({ cwd, threadId }) {
   return `cd ${shellSingleQuote(cwd || ".")} && codex resume ${shellSingleQuote(threadId)}`;
 }
 
+function projectThreadKeyForSession(session) {
+  const truth = session?.truthProfile || {};
+  if (truth.id && truth.projectRoot) return `profile:${truth.id}`;
+  const cwd = normalizeAbsolutePath(session?.cwd);
+  return cwd ? `cwd:${cwd}` : null;
+}
+
+function normalizeProjectThreads(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized = {};
+  for (const [key, snapshot] of Object.entries(value)) {
+    if (!key || !snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) continue;
+    normalized[key] = {
+      cwd: typeof snapshot.cwd === "string" ? snapshot.cwd : null,
+      projectName: typeof snapshot.projectName === "string" ? snapshot.projectName : null,
+      truthProfileId: typeof snapshot.truthProfileId === "string" ? snapshot.truthProfileId : null,
+      updatedAt: typeof snapshot.updatedAt === "string" ? snapshot.updatedAt : null,
+    };
+    for (const field of PROJECT_THREAD_STATE_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(snapshot, field)) {
+        normalized[key][field] = snapshot[field];
+      }
+    }
+  }
+  return normalized;
+}
+
+function captureProjectThreadState(session, { observedAt = nowIso() } = {}) {
+  if (!session || typeof session !== "object") return null;
+  const snapshot = {
+    cwd: session.cwd || null,
+    projectName: session.truthProfile?.name || null,
+    truthProfileId: session.truthProfile?.id || null,
+    updatedAt: observedAt,
+  };
+  for (const field of PROJECT_THREAD_STATE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(session, field)) {
+      snapshot[field] = session[field];
+    }
+  }
+  return snapshot;
+}
+
+function rememberProjectThreadState(session, { observedAt = nowIso() } = {}) {
+  const key = projectThreadKeyForSession(session);
+  if (!key) return null;
+  session.projectThreads = normalizeProjectThreads(session.projectThreads);
+  session.projectThreads[key] = captureProjectThreadState(session, { observedAt });
+  return { key, snapshot: session.projectThreads[key] };
+}
+
+function restoreProjectThreadState(session) {
+  const key = projectThreadKeyForSession(session);
+  if (!key) return null;
+  session.projectThreads = normalizeProjectThreads(session.projectThreads);
+  const snapshot = session.projectThreads[key];
+  if (!snapshot) return null;
+  for (const field of PROJECT_THREAD_STATE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(snapshot, field)) {
+      session[field] = snapshot[field];
+    }
+  }
+  return { key, snapshot };
+}
+
+function workspaceLockRootForSession(session) {
+  return normalizeAbsolutePath(session?.truthProfile?.projectRoot || session?.cwd);
+}
+
+function workspaceRootsConflict(leftRoot, rightRoot) {
+  const left = normalizeAbsolutePath(leftRoot);
+  const right = normalizeAbsolutePath(rightRoot);
+  if (!left || !right) return false;
+  return isPathWithin(left, right) || isPathWithin(right, left);
+}
+
 function normalizeThreadListData(result) {
   const items = normalizeExtensionListData(result);
   return items
@@ -1778,6 +1869,15 @@ function formatThreadListText(result, { currentThreadId = null, currentCwd = "",
   lines.push("");
   lines.push("Use /resume <index|threadId> to attach this chat to a session.");
   return lines.join("\n");
+}
+
+function detectTestCommand(cwd) {
+  const root = normalizeAbsolutePath(cwd);
+  if (!root) return null;
+  const packageJsonPath = path.join(root, "package.json");
+  const parsed = loadJsonFile(packageJsonPath);
+  if (parsed?.scripts?.test) return { command: "npm", args: ["test"], label: "npm test" };
+  return null;
 }
 
 function parseModelCommandArgs(rawArgs) {
@@ -2673,6 +2773,7 @@ function normalizeSessionState(session, defaults) {
   if (!session || typeof session !== "object") return session;
   session.threadId = session.threadId || null;
   session.cwd = session.cwd || defaults.cwd;
+  session.projectThreads = normalizeProjectThreads(session.projectThreads);
   session.model = session.model || defaults.model;
   session.effort = session.effort || defaults.effort;
   session.summary = session.summary || defaults.summary;
@@ -2820,6 +2921,12 @@ function buildHelpText() {
     "/sessions - list recent Codex sessions for this cwd",
     "/resume <index|threadId> - attach this chat to an existing Codex session",
     "/handback - print a local `codex resume` command for the current thread",
+    "/continue <message> - bypass a same-workspace active-turn guard for one message",
+    "/diff - show current git diff preview",
+    "/git status - show current git status",
+    "/test - run the repo test script when available",
+    "/review - ask Codex to review the current working tree diff",
+    "/rollback - show rollback candidate commands without executing them",
     "/model <5.2|5.4|5.5|id> [effort] - set model, optionally with reasoning effort",
     "/effort <none|minimal|low|medium|high|xhigh> - set reasoning effort",
     "/think <none|minimal|low|medium|high|xhigh> - alias for /effort",
@@ -4563,6 +4670,9 @@ async function main() {
           delete rt.groupAgentMessageByTurnId[turn.id];
           delete rt.groupAgentMessagePendingByTurnId[turn.id];
         }
+        rememberProjectThreadState(session);
+        store.markDirty();
+        store.saveThrottled();
         return;
       }
 
@@ -5185,9 +5295,189 @@ async function main() {
     const resumedThreadId = result?.thread?.id || result?.threadId || result?.thread?.threadId || threadId;
     session.threadId = resumedThreadId;
     session.updatedAt = nowIso();
+    rememberProjectThreadState(session);
     store.markDirty();
     store.saveThrottled();
     return resumedThreadId;
+  }
+
+  function findActiveWorkspaceConflict(chatId, session) {
+    const root = workspaceLockRootForSession(session);
+    if (!root) return null;
+    for (const [otherChatId, otherSession] of Object.entries(store.data.sessions || {})) {
+      if (String(otherChatId) === String(chatId)) continue;
+      const rt = runtimeByChat.get(Number(otherChatId));
+      if (!rt?.activeTurnId) continue;
+      const otherRoot = workspaceLockRootForSession(otherSession);
+      if (!workspaceRootsConflict(root, otherRoot)) continue;
+      return {
+        chatId: otherChatId,
+        activeTurnId: rt.activeTurnId,
+        cwd: otherSession?.cwd || "(unknown)",
+        root: otherRoot,
+      };
+    }
+    return null;
+  }
+
+  async function maybeBlockWorkspaceConflict({ chatId, session, ignore = false, commandLabel = "task" }) {
+    if (ignore) return false;
+    const conflict = findActiveWorkspaceConflict(chatId, session);
+    if (!conflict) return false;
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: [
+        `Workspace is busy in chat ${conflict.chatId}.`,
+        `root: ${conflict.root}`,
+        `activeTurnId: ${conflict.activeTurnId}`,
+        "",
+        `This ${commandLabel} was not started. Use /continue <message> to force a one-off natural-language turn anyway.`,
+      ].join("\n"),
+    });
+    return true;
+  }
+
+  function execFileCapture(command, args, {
+    cwd,
+    timeoutMs = 60_000,
+    maxBuffer = 1024 * 1024,
+  } = {}) {
+    return new Promise((resolve) => {
+      execFile(command, args, {
+        cwd,
+        env: process.env,
+        timeout: timeoutMs,
+        maxBuffer,
+      }, (error, stdout, stderr) => {
+        resolve({
+          command,
+          args,
+          cwd,
+          exitCode: error?.code ?? 0,
+          signal: error?.signal || null,
+          timedOut: Boolean(error?.killed && error?.signal === "SIGTERM"),
+          stdout: String(stdout || ""),
+          stderr: String(stderr || ""),
+          errorMessage: error?.message || null,
+        });
+      });
+    });
+  }
+
+  function formatCommandResult(result, { title = "Command result", maxLen = 3600 } = {}) {
+    const body = [
+      `${title}`,
+      `$ ${[result.command, ...(result.args || [])].join(" ")}`,
+      `cwd: ${result.cwd}`,
+      `exit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}`,
+      "",
+      result.stdout.trim() ? result.stdout.trim() : null,
+      result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : null,
+      result.errorMessage && result.exitCode !== 0 ? `error: ${result.errorMessage}` : null,
+    ].filter(Boolean).join("\n");
+    return truncateMiddle(body, maxLen);
+  }
+
+  async function sendGitStatus({ chatId, session }) {
+    const result = await execFileCapture("git", ["status", "--short", "--branch"], {
+      cwd: session.cwd,
+      timeoutMs: 20_000,
+    });
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: formatCommandResult(result, { title: "Git status" }),
+    });
+  }
+
+  async function sendDiffPreview({ chatId, session }) {
+    const stat = await execFileCapture("git", ["diff", "--stat"], {
+      cwd: session.cwd,
+      timeoutMs: 20_000,
+    });
+    const stagedStat = await execFileCapture("git", ["diff", "--cached", "--stat"], {
+      cwd: session.cwd,
+      timeoutMs: 20_000,
+    });
+    if (isGroupChat(chatId)) {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: truncateMiddle([
+          "Git diff summary",
+          "",
+          "unstaged:",
+          stat.stdout.trim() || "(none)",
+          "",
+          "staged:",
+          stagedStat.stdout.trim() || "(none)",
+          "",
+          "Full diff is hidden in group chats.",
+        ].join("\n"), 3900),
+      });
+      return;
+    }
+    const diff = await execFileCapture("git", ["diff", "--"], {
+      cwd: session.cwd,
+      timeoutMs: 20_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: truncateMiddle([
+        "Git diff preview",
+        "",
+        "unstaged stat:",
+        stat.stdout.trim() || "(none)",
+        "",
+        "staged stat:",
+        stagedStat.stdout.trim() || "(none)",
+        "",
+        diff.stdout.trim() || "(no unstaged diff)",
+      ].join("\n"), 3900),
+    });
+  }
+
+  async function runRepoTests({ chatId, session }) {
+    if (await maybeBlockWorkspaceConflict({ chatId, session, commandLabel: "/test" })) return;
+    const detected = detectTestCommand(session.cwd);
+    if (!detected) {
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: "No supported test command detected for this cwd. Currently supports package.json scripts.test.",
+      });
+      return;
+    }
+    await telegram.sendMessage({ chat_id: chatId, text: `Running ${detected.label}…` });
+    const result = await execFileCapture(detected.command, detected.args, {
+      cwd: session.cwd,
+      timeoutMs: 120_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: formatCommandResult(result, { title: "Test result" }),
+    });
+  }
+
+  async function sendRollbackPreview({ chatId, session }) {
+    const status = await execFileCapture("git", ["status", "--short"], {
+      cwd: session.cwd,
+      timeoutMs: 20_000,
+    });
+    await telegram.sendMessage({
+      chat_id: chatId,
+      text: truncateMiddle([
+        "Rollback preview only; no changes were made.",
+        `cwd: ${session.cwd}`,
+        "",
+        "Current changes:",
+        status.stdout.trim() || "(clean)",
+        "",
+        "Candidate commands to run locally after review:",
+        "git restore --staged .",
+        "git restore .",
+        "git clean -nd   # preview untracked removals",
+      ].join("\n"), 3900),
+    });
   }
 
   function enqueuePendingTask(rt, text) {
@@ -5793,6 +6083,7 @@ async function main() {
         if (!threadId) throw new Error("thread/start did not return a thread id");
         session.threadId = threadId;
         clearSessionContextTracking(session, { clearSummary: false, clearHistory: false });
+        rememberProjectThreadState(session);
         const rt = getRuntime(chatId);
         rt.activeTurnId = null;
         rt.pendingInputMeta = null;
@@ -5942,6 +6233,7 @@ async function main() {
     authReplayCount = 0,
     threadRetryCount = 0,
     skipBackendRecoveryWait = false,
+    ignoreWorkspaceLock = false,
   }) {
     if (!skipBackendRecoveryWait) {
       await waitForCodexBackendRecovery();
@@ -6032,6 +6324,15 @@ async function main() {
         session.updatedAt = nowIso();
         store.markDirty();
         store.saveThrottled();
+      }
+
+      if (
+        kind === "user"
+        && !rt.activeTurnId
+        && await maybeBlockWorkspaceConflict({ chatId, session, ignore: ignoreWorkspaceLock })
+      ) {
+        rt.pendingInputMeta = null;
+        return;
       }
 
       const threadId = await ensureThread(session, chatId);
@@ -6509,19 +6810,31 @@ async function main() {
     if (trimmed === "/new") {
       await resetSessionThread(chatId, session);
       await ensureThread(session, chatId);
+      rememberProjectThreadState(session);
+      store.markDirty();
+      store.saveThrottled();
       return;
     }
 
     if (trimmed.startsWith("/cwd ")) {
+      rememberProjectThreadState(session);
       const resolved = setSessionCwdWithTruth(session, trimmed.slice("/cwd ".length).trim(), {
         reason: "/cwd",
         bootstrapPending: true,
       });
+      const restored = restoreProjectThreadState(session);
+      if (!restored) {
+        session.threadId = null;
+        clearSessionContextTracking(session, { clearSummary: true, clearHistory: true });
+      }
+      store.markDirty();
+      store.saveThrottled();
       await telegram.sendMessage({
         chat_id: chatId,
         text: [
           `cwd set to: ${session.cwd}`,
           `truth profile: ${resolved.profile.name} (${resolved.profile.id})`,
+          restored ? `restored thread: ${session.threadId || "(none)"}` : "restored thread: (none)",
           "Next user turn will include a source-of-truth bootstrap.",
         ].join("\n"),
       });
@@ -6537,6 +6850,7 @@ async function main() {
     }
 
     if (trimmed.startsWith("/project ")) {
+      rememberProjectThreadState(session);
       const selected = resolveProjectSelector(sourceRegistry, trimmed.slice("/project ".length));
       if (selected.type === "error") {
         await telegram.sendMessage({ chat_id: chatId, text: truncateMiddle(selected.error, 3900) });
@@ -6548,6 +6862,7 @@ async function main() {
         bootstrapPending: true,
       });
       await resetSessionThread(chatId, session);
+      const restored = restoreProjectThreadState(session);
       session.truthProfile.bootstrapPending = true;
       store.markDirty();
       store.saveThrottled();
@@ -6557,7 +6872,7 @@ async function main() {
           `project switched to: ${session.cwd}`,
           `truth profile: ${resolved.profile.name} (${resolved.profile.id})`,
           selected.type === "profile" ? `selected: ${selected.profile.id}` : null,
-          "Started with a fresh thread next time you message.",
+          restored ? `restored thread: ${session.threadId || "(none)"}` : "No saved thread for this project; next message starts fresh.",
         ].filter(Boolean).join("\n"),
       });
       return;
@@ -6598,6 +6913,54 @@ async function main() {
           ? ["Run locally:", command].join("\n")
           : "No current Codex thread. Send a task or use /new first.",
       });
+      return;
+    }
+
+    if (trimmed.startsWith("/continue ")) {
+      const continuedText = trimmed.slice("/continue ".length).trim();
+      if (!continuedText) {
+        await telegram.sendMessage({ chat_id: chatId, text: "Usage: /continue <message>" });
+        return;
+      }
+      await startOrSteerTurn({
+        chatId,
+        session,
+        text: continuedText,
+        ignoreWorkspaceLock: true,
+      });
+      return;
+    }
+
+    if (trimmed === "/git status" || trimmed === "/status git") {
+      await sendGitStatus({ chatId, session });
+      return;
+    }
+
+    if (trimmed === "/diff" || trimmed === "/git diff") {
+      await sendDiffPreview({ chatId, session });
+      return;
+    }
+
+    if (trimmed === "/test") {
+      await runRepoTests({ chatId, session });
+      return;
+    }
+
+    if (trimmed === "/review") {
+      await startOrSteerTurn({
+        chatId,
+        session,
+        text: [
+          "Review the current working tree diff for this repository.",
+          "Use code-review stance: findings first, prioritize bugs/regressions/missing tests, include file/line references when possible.",
+          "Do not edit files unless I explicitly ask after the review.",
+        ].join("\n"),
+      });
+      return;
+    }
+
+    if (trimmed === "/rollback") {
+      await sendRollbackPreview({ chatId, session });
       return;
     }
 
@@ -6897,6 +7260,8 @@ async function main() {
           `cwd: ${session.cwd}`,
           `truthProfile: ${session.truthProfile?.name || "(unbound)"} (${session.truthProfile?.id || "none"})`,
           `truthRoot: ${session.truthProfile?.projectRoot || "(unknown)"}`,
+          `projectThreadKey: ${projectThreadKeyForSession(session) || "(none)"}`,
+          `savedProjectThreads: ${Object.keys(session.projectThreads || {}).length}`,
           `truthRefreshedAt: ${session.truthProfile?.lastRefreshedAt || "(never)"}`,
           `truthBootstrapPending: ${session.truthProfile?.bootstrapPending ? "yes" : "no"}`,
           `model: ${session.model}`,
@@ -7242,8 +7607,15 @@ module.exports = {
     formatProjectListText,
     resolveProjectSelector,
     buildHandbackCommand,
+    projectThreadKeyForSession,
+    normalizeProjectThreads,
+    rememberProjectThreadState,
+    restoreProjectThreadState,
+    workspaceLockRootForSession,
+    workspaceRootsConflict,
     normalizeThreadListData,
     formatThreadListText,
+    detectTestCommand,
     parseModelCommandArgs,
     classifyTurnDifficulty,
     applyAutoRouteDecision,
