@@ -100,6 +100,8 @@ codex app-server --listen stdio://
 
 ### 常用命令
 
+完整白话版命令说明见：[docs/COMMANDS.md](docs/COMMANDS.md)。
+
 - 直接发送文本：发起一次 Codex `turn/start`
 - `/menu`：打开快捷按钮面板
 - `/status`：查看当前 `thread / model / effort / cwd`，以及最近一次上下文占用观测
@@ -407,6 +409,8 @@ codex app-server --listen stdio://
 - So your local `codex` / `codex-cli` version directly determines whether `app-server` can start correctly and which protocol features are available.
 
 ### Common commands
+
+Plain-language command guide: [docs/COMMANDS.md](docs/COMMANDS.md).
 
 - Send plain text: start a Codex `turn/start`
 - `/menu`: open the shortcut button panel

@@ -156,3 +156,12 @@ test("detectTestCommand finds package test script only", () => {
     label: "npm test",
   });
 });
+
+test("help text is localized for Telegram users", () => {
+  const text = _test.buildHelpText();
+  assert.match(text, /Telegram Codex Bridge 命令/);
+  assert.match(text, /直接发送普通文字/);
+  assert.match(text, /\/review - 让 Codex review 当前工作树 diff，只审查不改文件/);
+  assert.doesNotMatch(text, /Tip: just send plain text/);
+  assert.doesNotMatch(text, /start a new Codex thread/);
+});
