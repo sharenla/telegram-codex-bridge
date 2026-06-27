@@ -52,6 +52,24 @@ const COMPACTION_SUMMARY_FORMAT = "five-section-markdown";
 const COMPACTION_SUMMARY_VERSION = 1;
 const SOURCE_TRUTH_BOOTSTRAP_VERSION = 1;
 const DEFAULT_BRIDGE_LAUNCH_AGENT = "com.sharenla.telegram-codex-bridge";
+const DERIBIT_STRATEGY_PROFILE_IDS = new Set([
+  "trading-deribit",
+  "openclaw-deribit-stage6",
+]);
+const DERIBIT_STRATEGY_DEPLOY_SIGNAL =
+  /\b(deribit|stage6|live|prod|production|deploy|release|drift|strategy|risk|config|daemon|watch)\b|策略|风控|实盘|部署|上线|重启|参数|阈值|开仓|下单|放量|热补丁|漂移/i;
+const DERIBIT_WRITELIKE_COMMAND_SIGNAL =
+  /\b(apply_patch|sed\s+-i|perl\s+-pi|python(?:3|\d+(?:\.\d+)?)?\s+-c|node\s+-e|tee|cp|mv|rm|install|rsync|scp|touch|truncate|chmod|chown|mkdir|ln\s+-sfn|systemctl\s+(?:restart|stop|start|reload)|crontab)\b|>\s*\/|>>\s*\//i;
+const DERIBIT_RELEASE_SAFE_COMMAND_SIGNAL =
+  /\bscripts\/vps\/(?:deploy-release|drift-check)\.sh\b/;
+const DERIBIT_RESTART_COMMAND_SIGNAL =
+  /\bscripts\/vps\/deploy-release\.sh\b[\s\S]*--restart-main-services\s+true\b|\bsystemctl\s+(?:restart|stop|start|reload)\b[\s\S]*com\.wukong\.deribit/i;
+const DERIBIT_LIVE_RUNTIME_PATH_SIGNAL =
+  /\/srv\/deribit-options-seller\/current|\/Users\/wukong\/openclaw-deribit-stage6/i;
+const DERIBIT_LIVE_MONOLITH_SIGNAL =
+  /deribit_options_seller\.mjs/i;
+const DERIBIT_SHARED_MUTABLE_PATH_SIGNAL =
+  /\/srv\/deribit-options-seller\/shared\/(?:config|state)|\/Users\/wukong\/openclaw-deribit-stage6\/(?:configs|tmp\/state|tmp\/logs)|(?:^|\s)shared\/(?:config|state)\//i;
 const COMPACTION_SECTION_TITLES = [
   "当前目标",
   "已完成进展",
@@ -772,6 +790,76 @@ function formatTimestamp(ms) {
 
 function isGroupChat(chatId) {
   return Number(chatId) < 0;
+}
+
+function isDeribitStrategyProfile(sessionOrProfile) {
+  const profileId = String(sessionOrProfile?.truthProfile?.id || sessionOrProfile?.id || "").trim();
+  return DERIBIT_STRATEGY_PROFILE_IDS.has(profileId);
+}
+
+function hasDeribitStrategyDeploySignal(text) {
+  return DERIBIT_STRATEGY_DEPLOY_SIGNAL.test(String(text || ""));
+}
+
+function shouldInjectDeribitStrategyDeployWorkflow(session, text, kind = "user") {
+  if (kind !== "user") return false;
+  if (!isDeribitStrategyProfile(session)) return false;
+  const rawText = String(text || "");
+  if (/Bridge Deribit strategy deploy guard:/i.test(rawText)) return false;
+  return hasDeribitStrategyDeploySignal(rawText);
+}
+
+function buildDeribitStrategyDeployWorkflowText(userText) {
+  return [
+    "Bridge Deribit strategy deploy guard:",
+    "- For any Deribit live strategy/code/config change, do not edit `/srv/deribit-options-seller/current` or `/Users/wukong/openclaw-deribit-stage6` in place.",
+    "- Do not write shared config/env/state directly. Use `/Users/wukong/trading-deribit` on `main`, then push `origin/main` before deploying.",
+    "- Gate before commit: `.mjs`/`.py` changes require `./scripts/smoke-check.sh` plus relevant `node --test`; config-only changes may use the config fast path.",
+    "- Commit only the intended clean diff, push `origin/main`, deploy from that pushed commit with `scripts/vps/deploy-release.sh <ssh_target> --restart-main-services true` only inside an owner-approved restart window, then run `scripts/vps/drift-check.sh <ssh_target>`.",
+    "- `ok=drift_check_passed` is required after every deploy. Telegram receipt must include commit SHA and release stamp; drift failure means backfill the live change as an incident, not another hot patch.",
+    "",
+    `User message: ${String(userText || "")}`,
+  ].join("\n");
+}
+
+function commandLooksDeribitWriteLike(command) {
+  const text = String(command || "");
+  if (
+    DERIBIT_RELEASE_SAFE_COMMAND_SIGNAL.test(text)
+    && !DERIBIT_LIVE_RUNTIME_PATH_SIGNAL.test(text)
+    && !DERIBIT_SHARED_MUTABLE_PATH_SIGNAL.test(text)
+  ) {
+    return false;
+  }
+  return DERIBIT_WRITELIKE_COMMAND_SIGNAL.test(text);
+}
+
+function buildDeribitRestartApprovalReason({ session = null, command = "" } = {}) {
+  if (!isDeribitStrategyProfile(session)) return null;
+  const text = String(command || "");
+  if (!DERIBIT_RESTART_COMMAND_SIGNAL.test(text)) return null;
+  return "Deribit trading service restart requires manual owner approval for the active restart window.";
+}
+
+function buildDeribitLiveHotPatchBlockReason({ session = null, command = "", fileTitle = "" } = {}) {
+  if (!isDeribitStrategyProfile(session)) return null;
+  const text = [command, fileTitle].filter(Boolean).join("\n");
+  if (!text.trim()) return null;
+  const fileChange = Boolean(fileTitle);
+  const writeLike = fileChange || commandLooksDeribitWriteLike(command);
+  if (!writeLike) return null;
+
+  const touchesLiveMonolith = DERIBIT_LIVE_RUNTIME_PATH_SIGNAL.test(text)
+    && DERIBIT_LIVE_MONOLITH_SIGNAL.test(text);
+  if (touchesLiveMonolith) {
+    return "Blocked Deribit live hot patch: edit trading-deribit main, commit, push origin/main, deploy-release, then drift-check instead of changing the live monolith in place.";
+  }
+
+  if (DERIBIT_SHARED_MUTABLE_PATH_SIGNAL.test(text)) {
+    return "Blocked Deribit shared config/state/env write: this workflow must not modify shared runtime config, env, state, or logs.";
+  }
+
+  return null;
 }
 
 function escapeRegExp(value) {
@@ -4900,12 +4988,24 @@ async function main() {
       const autoApprove = defaults.autoApprove;
 
       if (method === "item/commandExecution/requestApproval") {
-        if (autoApprove) return { ok: true, result: { decision: "acceptForSession" } };
+        const cmd = params?.command || "(unknown command)";
+        const blockedReason = buildDeribitLiveHotPatchBlockReason({ session, command: cmd });
+        if (blockedReason) {
+          if (chatId) {
+            await telegram.sendMessage({ chat_id: chatId, text: blockedReason });
+          }
+          return { ok: true, result: { decision: "decline" } };
+        }
+        const restartApprovalReason = buildDeribitRestartApprovalReason({ session, command: cmd });
+        if (autoApprove && !restartApprovalReason) return { ok: true, result: { decision: "acceptForSession" } };
         if (!chatId) return { ok: true, result: { decision: "decline" } };
         stopTyping(chatId);
 
-        const cmd = params?.command || "(unknown command)";
-        const reason = params?.reason ? `\nReason: ${params.reason}` : "";
+        const reasonLines = [
+          restartApprovalReason ? `Guard: ${restartApprovalReason}` : "",
+          params?.reason ? `Reason: ${params.reason}` : "",
+        ].filter(Boolean);
+        const reason = reasonLines.length ? `\n${reasonLines.join("\n")}` : "";
         const { token, promise } = waitForTelegramAction({ kind: "approval", chatId });
         await telegram.sendMessage({
           chat_id: chatId,
@@ -4926,11 +5026,18 @@ async function main() {
       }
 
       if (method === "item/fileChange/requestApproval") {
+        const title = params?.title || "File changes";
+        const blockedReason = buildDeribitLiveHotPatchBlockReason({ session, fileTitle: title });
+        if (blockedReason) {
+          if (chatId) {
+            await telegram.sendMessage({ chat_id: chatId, text: blockedReason });
+          }
+          return { ok: true, result: { decision: "decline" } };
+        }
         if (autoApprove) return { ok: true, result: { decision: "acceptForSession" } };
         if (!chatId) return { ok: true, result: { decision: "decline" } };
         stopTyping(chatId);
 
-        const title = params?.title || "File changes";
         const reason = params?.reason ? `\nReason: ${params.reason}` : "";
         const { token, promise } = waitForTelegramAction({ kind: "approval", chatId });
         await telegram.sendMessage({
@@ -6376,6 +6483,9 @@ async function main() {
         inputText = buildTruthBootstrapText(truthResolved, inputText);
         appliedTruthBootstrap = true;
       }
+      if (shouldInjectDeribitStrategyDeployWorkflow(session, inputText, kind)) {
+        inputText = buildDeribitStrategyDeployWorkflowText(inputText);
+      }
       const inputItems = [
         { type: "text", text: inputText },
         ...await buildMentionItemsForText(inputText, session),
@@ -7627,6 +7737,13 @@ module.exports = {
     refreshSessionTruthProfile,
     formatTruthProfileText,
     buildTruthBootstrapText,
+    isDeribitStrategyProfile,
+    hasDeribitStrategyDeploySignal,
+    shouldInjectDeribitStrategyDeployWorkflow,
+    buildDeribitStrategyDeployWorkflowText,
+    commandLooksDeribitWriteLike,
+    buildDeribitRestartApprovalReason,
+    buildDeribitLiveHotPatchBlockReason,
     filterDesktopCodexConfigToml,
     syncDesktopCodexContext,
     resolveAgentMessageTurnId,

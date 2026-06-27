@@ -106,6 +106,128 @@ test("truth bootstrap includes source rules and user message", () => {
   assert.match(text, /User message: Why is the bot silent\?/);
 });
 
+test("Deribit source profile requires main write-through deploy discipline", () => {
+  const registryPath = path.join(__dirname, "..", "config", "source-registry.json");
+  const registry = JSON.parse(fs.readFileSync(registryPath, "utf8"));
+  const deribit = registry.projects.find((project) => project.id === "trading-deribit");
+  const runtime = registry.projects.find((project) => project.id === "openclaw-deribit-stage6");
+
+  assert.ok(deribit);
+  assert.ok(runtime);
+  assert.match(deribit.mustCheckBeforeAnswer.join("\n"), /push origin main/);
+  assert.match(deribit.mustCheckBeforeAnswer.join("\n"), /deploy-release\.sh/);
+  assert.match(deribit.mustCheckBeforeAnswer.join("\n"), /drift-check\.sh ok=drift_check_passed/);
+  assert.match(deribit.neverAssume.join("\n"), /Do not edit \/srv\/deribit-options-seller\/current/);
+  assert.match(runtime.mustCheckBeforeAnswer.join("\n"), /do not patch this runtime tree/);
+  assert.match(runtime.neverAssume.join("\n"), /Do not treat openclaw-deribit-stage6 as the canonical source/);
+});
+
+test("Deribit strategy deploy workflow is injected for live strategy changes", () => {
+  const session = {
+    truthProfile: { id: "trading-deribit" },
+  };
+
+  assert.equal(
+    _test.shouldInjectDeribitStrategyDeployWorkflow(session, "把 Deribit live 策略参数部署上线", "user"),
+    true,
+  );
+  assert.equal(
+    _test.shouldInjectDeribitStrategyDeployWorkflow(session, "把 Deribit live 策略参数部署上线", "autoCompaction"),
+    false,
+  );
+
+  const text = _test.buildDeribitStrategyDeployWorkflowText("把风险阈值调一下");
+  assert.match(text, /origin\/main/);
+  assert.match(text, /deploy-release\.sh/);
+  assert.match(text, /drift-check\.sh/);
+  assert.match(text, /commit SHA and release stamp/);
+  assert.match(text, /push `origin\/main`/);
+});
+
+test("Deribit live hot patch blocker rejects current and shared writes", () => {
+  const session = {
+    truthProfile: { id: "trading-deribit" },
+  };
+
+  assert.match(
+    _test.buildDeribitLiveHotPatchBlockReason({
+      session,
+      command: "ssh deribit-stage6 sudo cp /tmp/x /srv/deribit-options-seller/current/skills/deribit-options-seller/scripts/deribit_options_seller.mjs",
+    }),
+    /live hot patch/,
+  );
+  assert.match(
+    _test.buildDeribitLiveHotPatchBlockReason({
+      session,
+      fileTitle: "/Users/wukong/openclaw-deribit-stage6/skills/deribit-options-seller/scripts/deribit_options_seller.mjs",
+    }),
+    /live hot patch/,
+  );
+  assert.match(
+    _test.buildDeribitLiveHotPatchBlockReason({
+      session,
+      command: "ssh deribit-stage6 sudo tee /srv/deribit-options-seller/shared/config/deribit-options-seller.config.json",
+    }),
+    /shared config\/state\/env/,
+  );
+  assert.equal(
+    _test.buildDeribitLiveHotPatchBlockReason({
+      session,
+      command: "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true",
+    }),
+    null,
+  );
+  assert.equal(
+    _test.buildDeribitLiveHotPatchBlockReason({
+      session,
+      command: "scripts/vps/drift-check.sh deribit-stage6",
+    }),
+    null,
+  );
+  assert.match(
+    _test.buildDeribitLiveHotPatchBlockReason({
+      session,
+      command: "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true && sudo rm /srv/deribit-options-seller/current/skills/deribit-options-seller/scripts/deribit_options_seller.mjs",
+    }),
+    /live hot patch/,
+  );
+  assert.match(
+    _test.buildDeribitLiveHotPatchBlockReason({
+      session,
+      command: "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true > /srv/deribit-options-seller/shared/config/override.json",
+    }),
+    /shared config\/state\/env/,
+  );
+});
+
+test("Deribit trading service restarts require manual owner approval", () => {
+  const session = {
+    truthProfile: { id: "trading-deribit" },
+  };
+
+  assert.match(
+    _test.buildDeribitRestartApprovalReason({
+      session,
+      command: "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true",
+    }),
+    /manual owner approval/,
+  );
+  assert.match(
+    _test.buildDeribitRestartApprovalReason({
+      session,
+      command: "ssh deribit-stage6 sudo systemctl restart com.wukong.deribit-options-seller.watch.service",
+    }),
+    /manual owner approval/,
+  );
+  assert.equal(
+    _test.buildDeribitRestartApprovalReason({
+      session,
+      command: "scripts/vps/drift-check.sh deribit-stage6",
+    }),
+    null,
+  );
+});
+
 test("desktop context sync preserves auth while copying memories and safe config", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-context-sync-"));
   const desktopHome = path.join(root, "desktop");

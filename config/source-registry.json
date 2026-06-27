@@ -241,15 +241,22 @@
       "sources": {
         "canonicalRepo": "/Users/wukong/trading-deribit",
         "liveRuntime": [
-          "/Users/wukong/openclaw-deribit-stage6"
+          "/Users/wukong/openclaw-deribit-stage6",
+          "/srv/deribit-options-seller/current"
         ],
         "stateFiles": [
           "/Users/wukong/openclaw-deribit-stage6/tmp/state",
           "/Users/wukong/openclaw-deribit-stage6/configs",
-          "/Users/wukong/openclaw-deribit-stage6/configs/layered/current"
+          "/Users/wukong/openclaw-deribit-stage6/configs/layered/current",
+          "/srv/deribit-options-seller/shared/state/history.db",
+          "/srv/deribit-options-seller/shared/state/nav-state.json",
+          "/srv/deribit-options-seller/shared/state/notification-outbox.jsonl"
         ],
         "logs": [
           "/Users/wukong/openclaw-deribit-stage6/tmp/logs"
+        ],
+        "remoteHosts": [
+          "deribit-stage6"
         ],
         "launchAgents": [
           "com.wukong.deribit-options-seller.daemon",
@@ -259,12 +266,20 @@
         ]
       },
       "mustCheckBeforeAnswer": [
+        "Before any Deribit live strategy/code/config change, read /Users/wukong/trading-deribit/docs/strategy-iteration/WORKFLOW-CHANGE-via-branch.md and /Users/wukong/trading-deribit/docs/tech-debt-remediation/deploy-discipline.md.",
+        "For Deribit live changes, edit only the /Users/wukong/trading-deribit worktree on main, commit the intended clean diff, push origin main, deploy with scripts/vps/deploy-release.sh, then require scripts/vps/drift-check.sh ok=drift_check_passed.",
         "For live Deribit behavior, inspect openclaw-deribit-stage6 runtime state/configs/logs before trading-deribit research docs.",
-        "Keep research, shadow, and live execution roles distinct."
+        "Keep research, shadow, and live execution roles distinct.",
+        "For NAV or investor-share questions, use the fund accounting CLI first: deribit-options-seller.sh fund-share-report or fund-open-day-confirm --dry-run true.",
+        "On production, verify deribit-stage6:/srv/deribit-options-seller/shared/state/history.db and do not derive investor shares from nav-state.json alone."
       ],
       "neverAssume": [
+        "Do not edit /srv/deribit-options-seller/current or /Users/wukong/openclaw-deribit-stage6 in place for strategy changes.",
+        "Do not write shared config/env/state for this workflow; live config/state are runtime truth surfaces, not deployment payload.",
+        "Do not restart Deribit watch/daemon unless the same request explicitly states this is an owner-approved restart window.",
         "Do not infer live strategy from research repo names.",
-        "Do not blend shadow and live promotion boundaries."
+        "Do not blend shadow and live promotion boundaries.",
+        "Do not hand-calculate subscription shares from a mutated nav-state denominator when fund accounting commands exist."
       ]
     },
     {
@@ -297,10 +312,14 @@
         ]
       },
       "mustCheckBeforeAnswer": [
+        "For strategy/code/config changes, do not patch this runtime tree; switch to /Users/wukong/trading-deribit on main, commit, push origin main, deploy-release, then drift-check.",
         "For live gate, report, NAV, or strategy incidents, inspect tmp/state, configs/layered/current, tmp/logs, and LaunchAgents.",
         "Answer exact gate/state questions from live state first, then explain strategy implications."
       ],
       "neverAssume": [
+        "Do not treat openclaw-deribit-stage6 as the canonical source for live strategy changes.",
+        "Do not edit /srv/deribit-options-seller/current or this runtime checkout in place.",
+        "Do not write shared config/env/state or restart Deribit services outside an owner-approved window.",
         "Do not hand-write investor reports when the formal route exists.",
         "Do not change live risk or execution rules without explicit approval."
       ]
