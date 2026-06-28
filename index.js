@@ -64,6 +64,11 @@ const DERIBIT_RELEASE_SAFE_COMMAND_SIGNAL =
   /\bscripts\/vps\/(?:deploy-release|drift-check)\.sh\b/;
 const DERIBIT_RESTART_COMMAND_SIGNAL =
   /\bscripts\/vps\/deploy-release\.sh\b[\s\S]*--restart-main-services\s+true\b|\bsystemctl\s+(?:restart|stop|start|reload)\b[\s\S]*com\.wukong\.deribit/i;
+const DERIBIT_DEPLOY_RELEASE_RESTART_COMMAND_SIGNAL =
+  /\bscripts\/vps\/deploy-release\.sh\b[\s\S]*--restart-main-services\s+true\b/i;
+const DERIBIT_APPROVAL_GATE_COMMAND_SIGNAL =
+  /\bpython3\s+scripts\/strategy_approval_gate\.py\b/i;
+const DERIBIT_APPROVAL_GATE_FRESH_MS = 30 * 60 * 1000;
 const DERIBIT_LIVE_RUNTIME_PATH_SIGNAL =
   /\/srv\/deribit-options-seller\/current|\/Users\/wukong\/openclaw-deribit-stage6/i;
 const DERIBIT_LIVE_MONOLITH_SIGNAL =
@@ -814,11 +819,89 @@ function buildDeribitStrategyDeployWorkflowText(userText) {
     "Bridge Deribit strategy deploy guard:",
     "- For any Deribit live strategy/code/config change, do not edit `/srv/deribit-options-seller/current` or `/Users/wukong/openclaw-deribit-stage6` in place.",
     "- Do not write shared config/env/state directly. Use `/Users/wukong/trading-deribit` on `main`, then push `origin/main` before deploying.",
-    "- Gate before commit: `.mjs`/`.py` changes require `./scripts/smoke-check.sh` plus relevant `node --test`; config-only changes may use the config fast path.",
-    "- Commit only the intended clean diff, push `origin/main`, deploy from that pushed commit with `scripts/vps/deploy-release.sh <ssh_target> --restart-main-services true` only inside an owner-approved restart window, then run `scripts/vps/drift-check.sh <ssh_target>`.",
-    "- `ok=drift_check_passed` is required after every deploy. Telegram receipt must include commit SHA and release stamp; drift failure means backfill the live change as an incident, not another hot patch.",
+    "- Before implementation, run `python3 scripts/strategy_approval_gate.py validate-ticket --ticket <ticket> --stage implementation`; for code/config edits also run `--check-worktree-scope` before commit.",
+    "- Gate before commit: `.mjs`/`.py` changes require `./scripts/smoke-check.sh` plus relevant `node --test`; config-only changes may use the config fast path named in the ticket.",
+    "- Commit only the intended clean diff, push `origin/main`, then before deploy run `python3 scripts/strategy_approval_gate.py validate-ticket --ticket <ticket> --stage deploy --check-git`.",
+    "- Deploy from that pushed commit with `scripts/vps/deploy-release.sh <ssh_target> --restart-main-services true` only inside an owner-approved restart window, then run `scripts/vps/drift-check.sh <ssh_target>`.",
+    "- After deploy, write the deploy receipt and run `python3 scripts/strategy_approval_gate.py validate-receipt --ticket <ticket> --receipt <receipt>`; any failed gate means stop and report.",
+    "- `ok=drift_check_passed` is required after every deploy. Telegram receipt must include ticket id, commit SHA and release stamp, validation commands/results, and drift-check status; drift failure means backfill the live change as an incident, not another hot patch.",
     "",
     `User message: ${String(userText || "")}`,
+  ].join("\n");
+}
+
+function normalizeGateCommand(command) {
+  return String(command || "").replace(/\s+/g, " ").trim();
+}
+
+function commandLooksApprovalGate(command, { stage = "", receipt = false, checkGit = false } = {}) {
+  const text = normalizeGateCommand(command);
+  if (!DERIBIT_APPROVAL_GATE_COMMAND_SIGNAL.test(text)) return false;
+  if (receipt && !/\bvalidate-receipt\b/.test(text)) return false;
+  if (stage && !(new RegExp(`\\bvalidate-ticket\\b[\\s\\S]*(?:^|\\s)--stage\\s+${escapeRegExp(stage)}(?:\\s|$)`)).test(text)) {
+    return false;
+  }
+  if (checkGit && !/(?:^|\s)--check-git(?:\s|$)/.test(text)) return false;
+  return true;
+}
+
+function getDeribitApprovalGateState(session) {
+  if (!session || typeof session !== "object") return {};
+  if (!session.deribitApprovalGate || typeof session.deribitApprovalGate !== "object") {
+    session.deribitApprovalGate = {};
+  }
+  return session.deribitApprovalGate;
+}
+
+function markDeribitApprovalGateSuccess(session, key, command) {
+  if (!session || !key) return null;
+  const state = getDeribitApprovalGateState(session);
+  state[key] = {
+    at: Date.now(),
+    command: normalizeGateCommand(command),
+  };
+  session.updatedAt = nowIso();
+  return state[key];
+}
+
+function hasFreshDeribitApprovalGate(session, key, nowMs = Date.now()) {
+  const state = session?.deribitApprovalGate;
+  const entry = state && typeof state === "object" ? state[key] : null;
+  const at = Number(entry?.at || 0);
+  return at > 0 && nowMs - at <= DERIBIT_APPROVAL_GATE_FRESH_MS;
+}
+
+function observeDeribitApprovalGateOutput({ session = null, command = "", output = "" } = {}) {
+  if (!isDeribitStrategyProfile(session)) return null;
+  const text = String(output || "");
+  if (!/ok=(?:ticket_valid|receipt_valid)\b/.test(text)) return null;
+  if (commandLooksApprovalGate(command, { stage: "implementation" })) {
+    return markDeribitApprovalGateSuccess(session, "implementation", command);
+  }
+  if (commandLooksApprovalGate(command, { stage: "deploy", checkGit: true })) {
+    return markDeribitApprovalGateSuccess(session, "deploy", command);
+  }
+  if (commandLooksApprovalGate(command, { receipt: true })) {
+    return markDeribitApprovalGateSuccess(session, "receipt", command);
+  }
+  return null;
+}
+
+function commandHasInlineDeployGate(command) {
+  return commandLooksApprovalGate(command, { stage: "deploy", checkGit: true })
+    && DERIBIT_DEPLOY_RELEASE_RESTART_COMMAND_SIGNAL.test(String(command || ""));
+}
+
+function buildDeribitDeployGateBlockReason({ session = null, command = "" } = {}) {
+  if (!isDeribitStrategyProfile(session)) return null;
+  const text = String(command || "");
+  if (!DERIBIT_DEPLOY_RELEASE_RESTART_COMMAND_SIGNAL.test(text)) return null;
+  if (commandHasInlineDeployGate(text)) return null;
+  if (hasFreshDeribitApprovalGate(session, "deploy")) return null;
+  return [
+    "Blocked Deribit deploy: run and pass the deploy approval gate first.",
+    "`python3 scripts/strategy_approval_gate.py validate-ticket --ticket <ticket> --stage deploy --check-git`",
+    "Then rerun deploy-release from the pushed `origin/main` commit inside the owner-approved restart window.",
   ].join("\n");
 }
 
@@ -4789,7 +4872,9 @@ async function main() {
               kind: "command",
               messageId: null,
               header: "",
+              command: item.command || "",
               buffer: "",
+              gateBuffer: "",
               redacted: true,
               silent: true,
             };
@@ -4802,16 +4887,16 @@ async function main() {
             ? summarizeGroupCommand(item.command)
             : [header, cwdLine].filter(Boolean).join("\n");
           if (redacted && shouldSuppressDuplicateGroupProgress(rt, text, "command")) {
-            rt.items[item.id] = { kind: "command", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
+            rt.items[item.id] = { kind: "command", messageId: null, header: text, command: item.command || "", buffer: "", gateBuffer: "", redacted, suppressedDuplicate: true };
             return;
           }
           if (redacted && hasSeenGroupVisibleText(rt, text)) {
-            rt.items[item.id] = { kind: "command", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
+            rt.items[item.id] = { kind: "command", messageId: null, header: text, command: item.command || "", buffer: "", gateBuffer: "", redacted, suppressedDuplicate: true };
             return;
           }
           const sent = await telegram.sendMessage({ chat_id: chatId, text });
           if (redacted) rememberGroupVisibleText(rt, text);
-          rt.items[item.id] = { kind: "command", messageId: sent.message_id, header: text, buffer: "", redacted };
+          rt.items[item.id] = { kind: "command", messageId: sent.message_id, header: text, command: item.command || "", buffer: "", gateBuffer: "", redacted };
           return;
         }
 
@@ -4938,9 +5023,15 @@ async function main() {
         const { threadId, itemId, delta } = params;
         const chatId = chatIdForThread(threadId);
         if (!chatId) return;
+        const session = getOrCreateSession(chatId);
         const rt = getRuntime(chatId);
         const entry = rt.items?.[itemId];
         if (!entry) return;
+        entry.gateBuffer = truncateMiddle(`${entry.gateBuffer || ""}${String(delta || "")}`, 4000);
+        if (observeDeribitApprovalGateOutput({ session, command: entry.command || entry.header || "", output: entry.gateBuffer })) {
+          store.markDirty();
+          store.saveThrottled();
+        }
         if (entry.redacted) return;
         entry.buffer += delta;
         scheduleEdit({
@@ -4993,6 +5084,13 @@ async function main() {
         if (blockedReason) {
           if (chatId) {
             await telegram.sendMessage({ chat_id: chatId, text: blockedReason });
+          }
+          return { ok: true, result: { decision: "decline" } };
+        }
+        const deployGateBlockReason = buildDeribitDeployGateBlockReason({ session, command: cmd });
+        if (deployGateBlockReason) {
+          if (chatId) {
+            await telegram.sendMessage({ chat_id: chatId, text: deployGateBlockReason });
           }
           return { ok: true, result: { decision: "decline" } };
         }
@@ -7741,6 +7839,10 @@ module.exports = {
     hasDeribitStrategyDeploySignal,
     shouldInjectDeribitStrategyDeployWorkflow,
     buildDeribitStrategyDeployWorkflowText,
+    commandLooksApprovalGate,
+    observeDeribitApprovalGateOutput,
+    hasFreshDeribitApprovalGate,
+    buildDeribitDeployGateBlockReason,
     commandLooksDeribitWriteLike,
     buildDeribitRestartApprovalReason,
     buildDeribitLiveHotPatchBlockReason,

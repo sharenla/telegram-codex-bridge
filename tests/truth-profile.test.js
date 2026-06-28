@@ -138,10 +138,66 @@ test("Deribit strategy deploy workflow is injected for live strategy changes", (
 
   const text = _test.buildDeribitStrategyDeployWorkflowText("把风险阈值调一下");
   assert.match(text, /origin\/main/);
+  assert.match(text, /strategy_approval_gate\.py/);
+  assert.match(text, /--stage implementation/);
+  assert.match(text, /--stage deploy --check-git/);
+  assert.match(text, /validate-receipt/);
   assert.match(text, /deploy-release\.sh/);
   assert.match(text, /drift-check\.sh/);
   assert.match(text, /commit SHA and release stamp/);
   assert.match(text, /push `origin\/main`/);
+});
+
+test("Deribit deploy-release is blocked until deploy ticket gate passed", () => {
+  const session = {
+    truthProfile: { id: "trading-deribit" },
+  };
+  const deployCommand = "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true";
+
+  assert.match(
+    _test.buildDeribitDeployGateBlockReason({ session, command: deployCommand }),
+    /deploy approval gate/,
+  );
+
+  assert.equal(
+    _test.observeDeribitApprovalGateOutput({
+      session,
+      command: "python3 scripts/strategy_approval_gate.py validate-ticket --ticket docs/strategy-iteration/approved/S10.ticket.json --stage deploy --check-git",
+      output: "ok=ticket_valid ticketId=S10 stage=deploy",
+    }) !== null,
+    true,
+  );
+  assert.equal(_test.hasFreshDeribitApprovalGate(session, "deploy"), true);
+  assert.equal(_test.buildDeribitDeployGateBlockReason({ session, command: deployCommand }), null);
+
+  const inlineCommand = [
+    "python3 scripts/strategy_approval_gate.py validate-ticket --ticket docs/strategy-iteration/approved/S10.ticket.json --stage deploy --check-git",
+    "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true",
+  ].join(" && ");
+  assert.equal(_test.buildDeribitDeployGateBlockReason({
+    session: { truthProfile: { id: "trading-deribit" } },
+    command: inlineCommand,
+  }), null);
+});
+
+test("Deribit approval gate output records implementation and receipt gates", () => {
+  const session = {
+    truthProfile: { id: "trading-deribit" },
+  };
+
+  _test.observeDeribitApprovalGateOutput({
+    session,
+    command: "python3 scripts/strategy_approval_gate.py validate-ticket --ticket docs/strategy-iteration/approved/S10.ticket.json --stage implementation",
+    output: "ok=ticket_valid ticketId=S10 stage=implementation",
+  });
+  _test.observeDeribitApprovalGateOutput({
+    session,
+    command: "python3 scripts/strategy_approval_gate.py validate-receipt --ticket docs/strategy-iteration/approved/S10.ticket.json --receipt docs/strategy-iteration/deploy-receipts/S10.receipt.json",
+    output: "ok=receipt_valid ticketId=S10 releaseStamp=stamp",
+  });
+
+  assert.equal(_test.hasFreshDeribitApprovalGate(session, "implementation"), true);
+  assert.equal(_test.hasFreshDeribitApprovalGate(session, "receipt"), true);
 });
 
 test("Deribit live hot patch blocker rejects current and shared writes", () => {
