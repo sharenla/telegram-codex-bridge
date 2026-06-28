@@ -180,6 +180,76 @@ test("Deribit deploy-release is blocked until deploy ticket gate passed", () => 
   }), null);
 });
 
+test("Deribit approval ticket path is extracted and normalized", () => {
+  const ticketPath = "docs/strategy-iteration/approved/S10-live-iv-relative-gate-20260628.ticket.json";
+  assert.equal(
+    _test.extractDeribitApprovalTicketPath(`请按 --ticket ${ticketPath} 处理`),
+    ticketPath,
+  );
+  assert.equal(
+    _test.extractDeribitApprovalTicketPath("docs/strategy-iteration/approved/../secret.ticket.json"),
+    "",
+  );
+  assert.equal(
+    _test.extractDeribitApprovalTicketPath("docs/strategy-iteration/approved/S10.ticket.json/evil"),
+    "",
+  );
+  assert.equal(
+    _test.getDeribitApprovalTicketPath({ deribitApprovalTicketPath: "docs/strategy-iteration/approved/S10.ticket.json/evil" }),
+    "",
+  );
+  assert.equal(
+    _test.buildDeribitApprovalGateCommand(ticketPath, { stage: "deploy", checkGit: true }),
+    `python3 scripts/strategy_approval_gate.py validate-ticket --ticket ${ticketPath} --stage deploy --check-git`,
+  );
+});
+
+test("Deribit deploy approval gate auto-runs from remembered ticket", async () => {
+  const ticketPath = "docs/strategy-iteration/approved/S10-live-iv-relative-gate-20260628.ticket.json";
+  const session = {
+    cwd: "/Users/wukong/trading-deribit",
+    truthProfile: { id: "trading-deribit" },
+  };
+  _test.rememberDeribitApprovalTicketPath(session, ticketPath);
+  const calls = [];
+  const result = await _test.runDeribitDeployApprovalGateForCommand({
+    session,
+    command: "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true",
+    runner: async (args) => {
+      calls.push(args);
+      return {
+        ok: true,
+        command: _test.buildDeribitApprovalGateCommand(args.ticketPath, { stage: args.stage, checkGit: args.checkGit }),
+        output: "ok=ticket_valid ticketId=S10 stage=deploy",
+      };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].ticketPath, ticketPath);
+  assert.equal(calls[0].stage, "deploy");
+  assert.equal(calls[0].checkGit, true);
+  assert.equal(_test.hasFreshDeribitApprovalGate(session, "deploy"), true);
+});
+
+test("Deribit deploy approval gate fails closed without ticket", async () => {
+  const session = {
+    cwd: "/Users/wukong/trading-deribit",
+    truthProfile: { id: "trading-deribit" },
+  };
+  const result = await _test.runDeribitDeployApprovalGateForCommand({
+    session,
+    command: "scripts/vps/deploy-release.sh deribit-stage6 --restart-main-services true",
+    runner: async () => {
+      throw new Error("runner should not be called");
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /missing approved strategy ticket path/);
+});
+
 test("Deribit approval gate output records implementation and receipt gates", () => {
   const session = {
     truthProfile: { id: "trading-deribit" },
