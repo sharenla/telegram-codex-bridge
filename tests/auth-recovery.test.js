@@ -256,6 +256,20 @@ test("configureCodexLbProvider writes isolated Codex CLI provider block", () => 
   assert.match(text, /requires_openai_auth = true/);
 });
 
+test("bridge account failover is disabled when codex-lb owns account routing", () => {
+  assert.equal(_test.isAccountFailoverText("Rate limit exceeded. Try again in 5623s"), true);
+  assert.equal(_test.shouldUseBridgeAccountFailover({
+    autoAccountFailover: true,
+    accountProfilesLength: 3,
+    codexLbEnabled: false,
+  }), true);
+  assert.equal(_test.shouldUseBridgeAccountFailover({
+    autoAccountFailover: true,
+    accountProfilesLength: 3,
+    codexLbEnabled: true,
+  }), false);
+});
+
 test("applyCodexBackendSessionBoundary resets saved threads when enabling codex-lb", () => {
   const storeData = {
     bridge: {},

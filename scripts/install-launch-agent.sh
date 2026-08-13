@@ -35,13 +35,15 @@ resolve_node_bin() {
 NODE_BIN="$(resolve_node_bin)"
 if [[ -n "${CODEX_BIN:-}" ]]; then
   CODEX_BIN="${CODEX_BIN}"
-elif [[ -x "/Applications/Codex.app/Contents/Resources/codex" ]]; then
-  CODEX_BIN="/Applications/Codex.app/Contents/Resources/codex"
+elif [[ -x "/Applications/ChatGPT.app/Contents/Resources/codex" ]]; then
+  CODEX_BIN="/Applications/ChatGPT.app/Contents/Resources/codex"
+elif [[ -x "${HOME}/.npm-global/bin/codex" ]]; then
+  CODEX_BIN="${HOME}/.npm-global/bin/codex"
 else
   CODEX_BIN="$(command -v codex || true)"
 fi
-if [[ -z "${CODEX_BIN}" ]]; then
-  echo "codex binary not found" >&2
+if [[ -z "${CODEX_BIN}" || ! -x "${CODEX_BIN}" ]]; then
+  echo "codex binary not found or not executable: ${CODEX_BIN:-<empty>}" >&2
   exit 1
 fi
 

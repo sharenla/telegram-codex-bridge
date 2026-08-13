@@ -6,6 +6,30 @@ const path = require("node:path");
 
 const { _test } = require("../index.js");
 
+test("Codex CLI discovery respects explicit, ChatGPT, npm, and PATH priority", () => {
+  const chatGptBin = "/Applications/ChatGPT.app/Contents/Resources/codex";
+  const npmBin = "/Users/test/.npm-global/bin/codex";
+  const available = new Set([chatGptBin, npmBin]);
+
+  assert.equal(_test.resolveCodexBin({
+    env: { CODEX_BIN: "/custom/codex" },
+    existsSync: (candidate) => available.has(candidate),
+  }), "/custom/codex");
+  assert.equal(_test.resolveCodexBin({
+    env: { HOME: "/Users/test" },
+    existsSync: (candidate) => available.has(candidate),
+  }), chatGptBin);
+  assert.equal(_test.resolveCodexBin({
+    env: { HOME: "/Users/test" },
+    existsSync: (candidate) => candidate === npmBin,
+  }), npmBin);
+  assert.equal(_test.resolveCodexBin({
+    env: {},
+    existsSync: () => false,
+    pathFallback: "/usr/local/bin/codex",
+  }), "/usr/local/bin/codex");
+});
+
 test("project selector resolves source profiles by index, id, and path fallback", () => {
   const root = path.join(os.tmpdir(), "bridge-project-picker");
   const registry = {
@@ -36,10 +60,7 @@ test("project selector resolves source profiles by index, id, and path fallback"
     _test.resolveProjectSelector(registry, path.join(root, ".hermes", "profiles", "agent-team-orchestrator")).profile.id,
     "agent-team",
   );
-  assert.deepEqual(
-    _test.resolveProjectSelector(registry, "/tmp/unknown"),
-    { type: "path", path: "/tmp/unknown", selector: "/tmp/unknown" },
-  );
+  assert.equal(_test.resolveProjectSelector(registry, "/tmp/unknown").type, "error");
 });
 
 test("project list marks selectable profiles and explains switch command", () => {

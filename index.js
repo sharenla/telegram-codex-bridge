@@ -52,6 +52,9 @@ const COMPACTION_SUMMARY_FORMAT = "five-section-markdown";
 const COMPACTION_SUMMARY_VERSION = 1;
 const SOURCE_TRUTH_BOOTSTRAP_VERSION = 1;
 const DEFAULT_BRIDGE_LAUNCH_AGENT = "com.sharenla.telegram-codex-bridge";
+const DEFAULT_CHAT_PROJECT_PROFILE_IDS = new Map([
+  ["-1003791245514", "trading-deribit"],
+]);
 const DERIBIT_STRATEGY_PROFILE_IDS = new Set([
   "trading-deribit",
   "openclaw-deribit-stage6",
@@ -108,6 +111,15 @@ const ACCOUNT_FAILOVER_PATTERNS = [
   /overloaded/i,
   /billing/i,
 ];
+function shouldUseBridgeAccountFailover({ autoAccountFailover, accountProfilesLength, codexLbEnabled } = {}) {
+  return Boolean(autoAccountFailover && !codexLbEnabled && Number(accountProfilesLength || 0) >= 2);
+}
+
+function isAccountFailoverText(text) {
+  if (!text) return false;
+  return ACCOUNT_FAILOVER_PATTERNS.some((pattern) => pattern.test(String(text)));
+}
+
 const CONTEXT_FAILURE_PATTERNS = [
   /\bcontext(?:ual)?\s+(?:window|length)\b/i,
   /\bmaximum context length\b/i,
@@ -278,14 +290,23 @@ function resolveTelegramProxyConfig() {
   return detectLocalTelegramProxy();
 }
 
-function resolveCodexBin() {
-  const fromEnv = resolveUserPath(process.env.CODEX_BIN || "");
+function resolveCodexBin({
+  env = process.env,
+  existsSync = fs.existsSync,
+  pathFallback = "codex",
+} = {}) {
+  const fromEnv = resolveUserPath(env.CODEX_BIN || "");
   if (fromEnv) return fromEnv;
 
-  const appBundleBin = "/Applications/Codex.app/Contents/Resources/codex";
-  if (fs.existsSync(appBundleBin)) return appBundleBin;
+  const bundledBins = [
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    path.join(env.HOME || os.homedir(), ".npm-global/bin/codex"),
+  ];
+  for (const bundledBin of bundledBins) {
+    if (existsSync(bundledBin)) return bundledBin;
+  }
 
-  return "codex";
+  return pathFallback;
 }
 
 function safeBase64UrlDecode(value) {
@@ -1025,7 +1046,6 @@ function buildDeribitDeployGateBlockReason({ session = null, command = "" } = {}
     "Then rerun deploy-release from the pushed `origin/main` commit inside the owner-approved restart window.",
   ].join("\n");
 }
-
 function commandLooksDeribitWriteLike(command) {
   const text = String(command || "");
   if (
@@ -1066,6 +1086,11 @@ function buildDeribitLiveHotPatchBlockReason({ session = null, command = "", fil
   return null;
 }
 
+function shouldRedactCodexTurnOutput(chatId) {
+  const numericChatId = Number(chatId);
+  if (!Number.isFinite(numericChatId)) return false;
+  return numericChatId !== 0;
+}
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -1085,44 +1110,113 @@ function isReplyToBot(message, botId) {
   return Number(message?.reply_to_message?.from?.id) === Number(botId);
 }
 
-function shouldHandleTelegramMessage(message, botIdentity) {
+function evaluateTelegramMessageDirection(message, botIdentity) {
   const chatType = message?.chat?.type;
-  if (!chatType || chatType === "private") return true;
+  if (!chatType || chatType === "private") {
+    return { shouldHandle: true, reason: "private_or_unknown_chat" };
+  }
 
   const text = String(message?.text || "").trim();
-  if (!text) return false;
+  if (!text) {
+    return { shouldHandle: false, reason: "group_text_empty" };
+  }
 
   if (botIdentity?.username && text.toLowerCase().includes(`@${botIdentity.username.toLowerCase()}`)) {
-    return true;
+    return { shouldHandle: true, reason: "group_text_mention" };
   }
 
   if (botIdentity?.id && isReplyToBot(message, botIdentity.id)) {
-    return true;
+    return { shouldHandle: true, reason: "reply_to_current_bot" };
   }
 
-  return false;
+  return { shouldHandle: false, reason: "group_text_not_directed" };
+}
+
+function shouldHandleTelegramMessage(message, botIdentity) {
+  return evaluateTelegramMessageDirection(message, botIdentity).shouldHandle;
+}
+
+function toNumericIdOrNull(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function shouldLogIgnoredGroupReplyDiagnostic(message, direction) {
+  if (direction?.shouldHandle) return false;
+  const chatType = message?.chat?.type;
+  if (chatType !== "group" && chatType !== "supergroup") return false;
+  const text = String(message?.text || "").trim();
+  if (!text) return false;
+  return Boolean(message?.reply_to_message);
+}
+
+function buildIgnoredGroupReplyDiagnosticMeta({ message, botIdentity, reason }) {
+  const reply = message?.reply_to_message;
+  const text = String(message?.text || "");
+  return {
+    chatId: toNumericIdOrNull(message?.chat?.id),
+    messageId: toNumericIdOrNull(message?.message_id),
+    textLength: text.length,
+    replyFromId: toNumericIdOrNull(reply?.from?.id),
+    replyFromUsername: reply?.from?.username ? String(reply.from.username) : null,
+    replySenderChatId: toNumericIdOrNull(reply?.sender_chat?.id),
+    replyMessageId: toNumericIdOrNull(reply?.message_id),
+    botId: toNumericIdOrNull(botIdentity?.id),
+    botUsername: botIdentity?.username ? String(botIdentity.username) : null,
+    reason: reason || "group_text_not_directed",
+  };
+}
+
+function logIgnoredGroupReplyDiagnostic(message, botIdentity, reason) {
+  const meta = buildIgnoredGroupReplyDiagnosticMeta({ message, botIdentity, reason });
+  console.warn(`[ignored-group-reply] ${JSON.stringify(meta)}`);
 }
 
 function summarizeGroupCommand(command) {
   const lowered = String(command || "").toLowerCase();
   if (/\b(rg|grep|find|ls|tree|cat|sed|awk|head|tail|stat|wc)\b/.test(lowered)) {
-    return "正在查看项目文件和内容，具体命令已在群里隐藏。";
+    return "正在查看项目文件和内容，具体命令已隐藏。";
   }
   if (/\b(git|diff)\b/.test(lowered)) {
-    return "正在检查仓库状态，具体命令已在群里隐藏。";
+    return "正在检查仓库状态，具体命令已隐藏。";
   }
   if (/\b(npm|pnpm|yarn|bun|node|python|pytest|jest|vitest|cargo|go test|make|uv)\b/.test(lowered)) {
-    return "正在运行脚本或验证步骤，具体命令已在群里隐藏。";
+    return "正在运行脚本或验证步骤，具体命令已隐藏。";
   }
-  return "正在执行一步命令，具体命令已在群里隐藏。";
+  return "正在执行一步命令，具体命令已隐藏。";
 }
 
 function summarizeGroupFileChange(title) {
   const lowered = String(title || "").toLowerCase();
   if (/\b(readme|docs?|guide|manual)\b/.test(lowered)) {
-    return "正在整理说明文档，具体文件名已在群里隐藏。";
+    return "正在整理说明文档，具体文件名已隐藏。";
   }
-  return "正在整理文件改动，具体文件名已在群里隐藏。";
+  return "正在整理文件改动，具体文件名已隐藏。";
+}
+
+function buildTurnCommandExecutionHeader({ chatId, command, cwd, sessionCwd }) {
+  if (shouldRedactCodexTurnOutput(chatId)) {
+    return summarizeGroupCommand(command);
+  }
+  const header = command ? `$ ${command}` : "[commandExecution]";
+  const cwdLine = cwd ? `cwd: ${cwd}` : sessionCwd ? `cwd: ${sessionCwd}` : null;
+  return [header, cwdLine].filter(Boolean).join("\n");
+}
+
+function buildTurnFileChangeHeader({ chatId, title }) {
+  if (shouldRedactCodexTurnOutput(chatId)) {
+    return summarizeGroupFileChange(title);
+  }
+  return title || "[fileChange]";
+}
+
+function buildTurnDiffPreviewText(chatId, diff) {
+  const source = String(diff || "");
+  if (!source.trim()) return "";
+  if (shouldRedactCodexTurnOutput(chatId)) {
+    return "本轮包含代码改动，具体 diff 已隐藏。";
+  }
+  return `Turn diff (preview):\n\n${truncateMiddle(source, 3500)}`;
 }
 
 function sanitizeGroupAgentLine(line) {
@@ -1130,7 +1224,7 @@ function sanitizeGroupAgentLine(line) {
   const trimmed = value.trim();
   if (!trimmed) return "";
   if (/^(diff --git|index [0-9a-f]+\.\.[0-9a-f]+|@@|--- |\+\+\+ )/.test(trimmed)) return "";
-  if (/^\$ /.test(trimmed)) return "正在执行命令，具体命令已在群里隐藏。";
+  if (/^\$ /.test(trimmed)) return "正在执行命令，具体命令已隐藏。";
   if (/^cwd:\s+/i.test(trimmed)) return "";
 
   value = value.replace(/`[^`\n]+`/g, "（代码或路径细节已隐藏）");
@@ -1168,7 +1262,7 @@ function sanitizeGroupAgentText(text) {
 
   const result = deduped.join("\n").trim();
   if (result) return result;
-  return "正在继续处理，代码和路径细节已在群里隐藏。";
+  return "正在继续处理，代码和路径细节已隐藏。";
 }
 
 function shouldSuppressDuplicateGroupProgress(rt, text, bucket = "general") {
@@ -1970,6 +2064,46 @@ function listSelectableSourceProfiles(registry, { includeHome = false } = {}) {
   });
 }
 
+function findSourceProfileById(registry, profileId) {
+  const wanted = String(profileId || "").trim();
+  if (!wanted) return null;
+  return (Array.isArray(registry?.profiles) ? registry.profiles : [])
+    .find((profile) => profile?.id === wanted) || null;
+}
+
+function resolveDefaultChatProjectProfile(registry, chatId) {
+  const profileId = DEFAULT_CHAT_PROJECT_PROFILE_IDS.get(String(chatId));
+  return profileId ? findSourceProfileById(registry, profileId) : null;
+}
+
+function applyDefaultChatProjectBinding(session, registry, chatId, {
+  reason = "chat-default-project",
+  bootstrapPending = true,
+  resetThreadOnChange = true,
+} = {}) {
+  const profile = resolveDefaultChatProjectProfile(registry, chatId);
+  if (!profile || !session || typeof session !== "object") {
+    return { changed: false, profile: null };
+  }
+  const nextCwd = normalizeAbsolutePath(profile.root);
+  const currentCwd = normalizeAbsolutePath(session.cwd);
+  const currentProfileId = session.truthProfile?.id || null;
+  const changed = currentCwd !== nextCwd || currentProfileId !== profile.id;
+  if (!changed) {
+    return { changed: false, profile };
+  }
+  session.cwd = nextCwd;
+  if (resetThreadOnChange) {
+    session.threadId = null;
+  }
+  refreshSessionTruthProfile(session, registry, {
+    reason,
+    bootstrapPending,
+  });
+  session.updatedAt = nowIso();
+  return { changed: true, profile };
+}
+
 function sourceProfileBadges(profile) {
   const sources = profile?.sources || {};
   return [
@@ -2047,7 +2181,14 @@ function resolveProjectSelector(registry, selector) {
     };
   }
 
-  return { type: "path", path: raw, selector: raw };
+  const resolvedPath = normalizeAbsolutePath(raw);
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+    return {
+      type: "error",
+      error: `Project path does not exist: ${resolvedPath || raw}`,
+    };
+  }
+  return { type: "path", path: resolvedPath, selector: raw };
 }
 
 function shellSingleQuote(value) {
@@ -2964,14 +3105,54 @@ function buildTruthBootstrapText(resolvedTruth, userText) {
 function filterDesktopCodexConfigToml(text) {
   const dropRootKeys = new Set(["approval_policy", "sandbox_mode", "notify"]);
   let inRoot = true;
+  let skipDroppedValueDepth = 0;
+  const bracketDelta = (value) => {
+    let delta = 0;
+    let inSingle = false;
+    let inDouble = false;
+    let escaped = false;
+    for (const ch of String(value || "")) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (inDouble && ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (!inDouble && ch === "'") {
+        inSingle = !inSingle;
+        continue;
+      }
+      if (!inSingle && ch === "\"") {
+        inDouble = !inDouble;
+        continue;
+      }
+      if (inSingle || inDouble) continue;
+      if (ch === "[" || ch === "{") delta += 1;
+      if (ch === "]" || ch === "}") delta -= 1;
+    }
+    return delta;
+  };
   return String(text || "")
     .split(/\r?\n/)
     .filter((line) => {
       const trimmed = line.trim();
+      if (skipDroppedValueDepth > 0) {
+        if (/^\[/.test(trimmed)) {
+          skipDroppedValueDepth = 0;
+          inRoot = false;
+          return true;
+        }
+        skipDroppedValueDepth = Math.max(0, skipDroppedValueDepth + bracketDelta(trimmed));
+        return false;
+      }
       if (/^\[/.test(trimmed)) inRoot = false;
       if (!inRoot) return true;
-      const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*=/);
-      return !(match && dropRootKeys.has(match[1]));
+      const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*=(.*)$/);
+      if (!match || !dropRootKeys.has(match[1])) return true;
+      skipDroppedValueDepth = Math.max(0, bracketDelta(match[2]));
+      return false;
     })
     .join("\n")
     .replace(/\n*$/, "\n");
@@ -3239,7 +3420,7 @@ function buildHelpText() {
     "群聊里只有 @bot 或直接回复 bot 的消息才会触发；私聊不受影响。",
     "群聊中如果当前任务还在跑，新任务会排队，不会直接改写当前任务。",
     "如果你想临时改方向，先发 /stop，再发新任务。",
-    "群聊会自动隐藏代码、路径、命令输出和 diff，只保留进度描述；私聊保持完整。",
+    "群聊和私聊的 Codex turn 过程消息都会隐藏代码、路径、命令输出和 diff，只保留进度描述。",
     "",
     "提示：直接发送普通文字，就是和 Codex 自然语言对话。",
   ].join("\n");
@@ -3847,9 +4028,16 @@ async function main() {
     emergency: parseRatioEnv(process.env.CONTEXT_EMERGENCY_RATIO, DEFAULT_CONTEXT_EMERGENCY_RATIO),
   };
   const autoCompact = parseBooleanEnv(process.env.AUTO_COMPACT, false);
-  for (const session of Object.values(store.data.sessions || {})) {
+  for (const [chatId, session] of Object.entries(store.data.sessions || {})) {
     normalizeSessionState(session, defaults);
-    if (!session.truthProfile) {
+    const defaultBinding = applyDefaultChatProjectBinding(session, sourceRegistry, chatId, {
+      reason: "startup-default-chat-project",
+      bootstrapPending: true,
+      resetThreadOnChange: true,
+    });
+    if (defaultBinding.changed) {
+      store.markDirty();
+    } else if (!session.truthProfile) {
       refreshSessionTruthProfile(session, sourceRegistry, {
         reason: "startup",
         bootstrapPending: true,
@@ -4195,11 +4383,18 @@ async function main() {
     return extractGenericErrorText(err);
   }
 
+  function bridgeAccountFailoverEnabled() {
+    return shouldUseBridgeAccountFailover({
+      autoAccountFailover,
+      accountProfilesLength: accountProfiles.length,
+      codexLbEnabled,
+    });
+  }
+
   function isAccountFailoverError(err) {
-    if (!autoAccountFailover || accountProfiles.length < 2) return false;
+    if (!bridgeAccountFailoverEnabled()) return false;
     const text = extractCodexErrorText(err);
-    if (!text) return false;
-    return ACCOUNT_FAILOVER_PATTERNS.some((pattern) => pattern.test(text));
+    return isAccountFailoverText(text);
   }
 
   function isAccountAuthFailure(err) {
@@ -4241,12 +4436,11 @@ async function main() {
   }
 
   function isUsageLimitTurn(turn) {
-    if (!autoAccountFailover || accountProfiles.length < 2) return false;
+    if (!bridgeAccountFailoverEnabled()) return false;
     const codexErrorInfo = turn?.error?.codexErrorInfo;
     if (typeof codexErrorInfo === "string" && codexErrorInfo === "usageLimitExceeded") return true;
     const text = extractTurnErrorText(turn);
-    if (!text) return false;
-    return ACCOUNT_FAILOVER_PATTERNS.some((pattern) => pattern.test(text));
+    return isAccountFailoverText(text);
   }
 
   function isLikelyContextTurnFailure(turn, session) {
@@ -4395,6 +4589,7 @@ async function main() {
   const codexEnv = { ...process.env, CODEX_HOME: codexHome };
 
   const codexBin = resolveCodexBin();
+  console.log(`Codex CLI: ${codexBin}`);
 
   async function requestSupervisorRestart(reason) {
     if (restartRequested) return;
@@ -4900,7 +5095,7 @@ async function main() {
               await telegram.sendMessage({ chat_id: chatId, text });
             } else if (!silentTurn) {
               const rawDetail = extractTurnErrorText(turn);
-              const detail = isGroupChat(chatId) ? sanitizeGroupAgentText(rawDetail) : rawDetail;
+              const detail = shouldRedactCodexTurnOutput(chatId) ? sanitizeGroupAgentText(rawDetail) : rawDetail;
               const hint = isRemoteCompactTransportFailureText(rawDetail)
                 ? buildRemoteCompactFailureHint({ hasSpareAccounts: autoAccountFailover && accountProfiles.length > 1 })
                 : null;
@@ -4908,9 +5103,9 @@ async function main() {
               const text = detail
                 ? `Turn ${status}: ${truncateMiddle(detail, maxDetailLen)}${hint ? `\n\n${hint}` : ""}`
                 : `Turn ${status}.${hint ? `\n\n${hint}` : ""}`;
-              if (!(isGroupChat(chatId) && hasSeenGroupVisibleText(rt, text))) {
+              if (!(shouldRedactCodexTurnOutput(chatId) && hasSeenGroupVisibleText(rt, text))) {
                 await telegram.sendMessage({ chat_id: chatId, text });
-                if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
+                if (shouldRedactCodexTurnOutput(chatId)) rememberGroupVisibleText(rt, text);
               }
             }
           }
@@ -4918,12 +5113,10 @@ async function main() {
 
         const diff = rt.turnDiffByTurnId?.[turn?.id];
         if (!silentTurn && diff && typeof diff === "string" && diff.trim()) {
-          const text = isGroupChat(chatId)
-            ? "本轮包含代码改动，具体 diff 已在群里隐藏。"
-            : `Turn diff (preview):\n\n${truncateMiddle(diff, 3500)}`;
-          if (!(isGroupChat(chatId) && hasSeenGroupVisibleText(rt, text))) {
+          const text = buildTurnDiffPreviewText(chatId, diff);
+          if (!(shouldRedactCodexTurnOutput(chatId) && hasSeenGroupVisibleText(rt, text))) {
             await telegram.sendMessage({ chat_id: chatId, text });
-            if (isGroupChat(chatId)) rememberGroupVisibleText(rt, text);
+            if (shouldRedactCodexTurnOutput(chatId)) rememberGroupVisibleText(rt, text);
           }
         }
 
@@ -5001,12 +5194,13 @@ async function main() {
             };
             return;
           }
-          const redacted = isGroupChat(chatId);
-          const header = item.command ? `$ ${item.command}` : "[commandExecution]";
-          const cwdLine = item.cwd ? `cwd: ${item.cwd}` : session.cwd ? `cwd: ${session.cwd}` : null;
-          const text = redacted
-            ? summarizeGroupCommand(item.command)
-            : [header, cwdLine].filter(Boolean).join("\n");
+          const redacted = shouldRedactCodexTurnOutput(chatId);
+          const text = buildTurnCommandExecutionHeader({
+            chatId,
+            command: item.command,
+            cwd: item.cwd,
+            sessionCwd: session.cwd,
+          });
           if (redacted && shouldSuppressDuplicateGroupProgress(rt, text, "command")) {
             rt.items[item.id] = { kind: "command", messageId: null, header: text, command: item.command || "", buffer: "", gateBuffer: "", redacted, suppressedDuplicate: true };
             return;
@@ -5034,8 +5228,8 @@ async function main() {
             return;
           }
           const title = item.title || "[fileChange]";
-          const redacted = isGroupChat(chatId);
-          const text = redacted ? summarizeGroupFileChange(title) : title;
+          const redacted = shouldRedactCodexTurnOutput(chatId);
+          const text = buildTurnFileChangeHeader({ chatId, title });
           if (redacted && shouldSuppressDuplicateGroupProgress(rt, text, "fileChange")) {
             rt.items[item.id] = { kind: "fileChange", messageId: null, header: text, buffer: "", redacted, suppressedDuplicate: true };
             return;
@@ -5879,12 +6073,23 @@ async function main() {
     const existing = store.data.sessions[key];
     if (existing && typeof existing === "object") {
       const session = normalizeSessionState(existing, defaults);
-      ensureSessionTruthProfile(session, { reason: "session", bootstrapPending: false });
+      const defaultBinding = applyDefaultChatProjectBinding(session, sourceRegistry, chatId, {
+        reason: "session-default-chat-project",
+        bootstrapPending: true,
+        resetThreadOnChange: true,
+      });
+      if (defaultBinding.changed) {
+        store.markDirty();
+        store.saveThrottled();
+      } else {
+        ensureSessionTruthProfile(session, { reason: "session", bootstrapPending: false });
+      }
       return session;
     }
+    const defaultProfile = resolveDefaultChatProjectProfile(sourceRegistry, chatId);
     const created = normalizeSessionState({
       threadId: null,
-      cwd: defaults.cwd,
+      cwd: defaultProfile?.root || defaults.cwd,
       model: defaults.model,
       effort: defaults.effort,
       summary: defaults.summary,
@@ -5893,10 +6098,16 @@ async function main() {
       sandboxMode: defaults.sandboxMode,
       updatedAt: nowIso(),
     }, defaults);
-    refreshSessionTruthProfile(created, sourceRegistry, {
+    const defaultBinding = applyDefaultChatProjectBinding(created, sourceRegistry, chatId, {
       reason: "new-session",
       bootstrapPending: true,
     });
+    if (!defaultBinding.changed) {
+      refreshSessionTruthProfile(created, sourceRegistry, {
+        reason: "new-session",
+        bootstrapPending: true,
+      });
+    }
     store.data.sessions[key] = created;
     store.markDirty();
     store.saveThrottled();
@@ -6935,8 +7146,8 @@ async function main() {
   async function upsertAgentMessage({ chatId, item, rt }) {
     const existing = item?.id ? rt.items?.[item.id] : null;
     const buffer = typeof item?.text === "string" ? item.text : existing?.buffer || "";
-    const groupChat = isGroupChat(chatId);
-    const renderedBuffer = groupChat ? sanitizeGroupAgentText(buffer) : buffer;
+    const redactTurnOutput = shouldRedactCodexTurnOutput(chatId);
+    const renderedBuffer = redactTurnOutput ? sanitizeGroupAgentText(buffer) : buffer;
     const turnId = resolveAgentMessageTurnId({
       explicitTurnId: item?.turnId,
       existingTurnId: existing?.turnId,
@@ -6971,7 +7182,7 @@ async function main() {
 
     const text = truncateMiddle(renderedBuffer, 3900);
 
-    if (groupChat && turnId) {
+    if (redactTurnOutput && turnId) {
       let entry = existing;
       if (!entry && item?.id) {
         entry = {
@@ -7019,7 +7230,7 @@ async function main() {
     }
 
     if (!existing) {
-      if (groupChat && shouldSuppressDuplicateGroupProgress(rt, text, "agentMessage")) {
+      if (redactTurnOutput && shouldSuppressDuplicateGroupProgress(rt, text, "agentMessage")) {
         if (item?.id) {
           rt.items[item.id] = {
             kind: "agentMessage",
@@ -7031,7 +7242,7 @@ async function main() {
         }
         return;
       }
-      if (groupChat && hasSeenGroupVisibleText(rt, text)) {
+      if (redactTurnOutput && hasSeenGroupVisibleText(rt, text)) {
         if (item?.id) {
           rt.items[item.id] = {
             kind: "agentMessage",
@@ -7044,7 +7255,7 @@ async function main() {
         return;
       }
       const sent = await telegram.sendMessage({ chat_id: chatId, text });
-      if (groupChat) rememberGroupVisibleText(rt, text);
+      if (redactTurnOutput) rememberGroupVisibleText(rt, text);
       if (item?.id) {
         rt.items[item.id] = { kind: "agentMessage", messageId: sent.message_id, buffer, renderedBuffer };
       }
@@ -7054,11 +7265,11 @@ async function main() {
     existing.buffer = buffer;
     existing.renderedBuffer = renderedBuffer;
     if (!existing.messageId) {
-      if (groupChat && shouldSuppressDuplicateGroupProgress(rt, text, "agentMessage")) {
+      if (redactTurnOutput && shouldSuppressDuplicateGroupProgress(rt, text, "agentMessage")) {
         existing.suppressedDuplicate = true;
         return;
       }
-      if (groupChat && hasSeenGroupVisibleText(rt, text)) {
+      if (redactTurnOutput && hasSeenGroupVisibleText(rt, text)) {
         existing.suppressedDuplicate = true;
         return;
       }
@@ -7071,7 +7282,7 @@ async function main() {
       });
       existing.messageId = ensuredMessageId;
       existing.suppressedDuplicate = false;
-      if (groupChat && ensuredMessageId) rememberGroupVisibleText(rt, text);
+      if (redactTurnOutput && ensuredMessageId) rememberGroupVisibleText(rt, text);
       return;
     }
     scheduleEdit({
@@ -7081,8 +7292,8 @@ async function main() {
       itemId: item.id,
       getText: () => truncateMiddle(existing.renderedBuffer || "", 3900),
     });
-    if (groupChat) rememberGroupVisibleText(rt, text);
-    if (groupChat) {
+    if (redactTurnOutput) rememberGroupVisibleText(rt, text);
+    if (redactTurnOutput) {
       rt.lastGroupProgressByBucket.agentMessage = text;
     }
   }
@@ -7171,7 +7382,11 @@ async function main() {
       return;
     }
 
-    if (!shouldHandleTelegramMessage(message, botIdentity)) {
+    const direction = evaluateTelegramMessageDirection(message, botIdentity);
+    if (!direction.shouldHandle) {
+      if (shouldLogIgnoredGroupReplyDiagnostic(message, direction)) {
+        logIgnoredGroupReplyDiagnostic(message, botIdentity, direction.reason);
+      }
       return;
     }
 
@@ -7198,7 +7413,20 @@ async function main() {
 
     if (trimmed.startsWith("/cwd ")) {
       rememberProjectThreadState(session);
-      const resolved = setSessionCwdWithTruth(session, trimmed.slice("/cwd ".length).trim(), {
+      const requestedCwd = normalizeAbsolutePath(trimmed.slice("/cwd ".length).trim());
+      if (!requestedCwd || !fs.existsSync(requestedCwd)) {
+        await telegram.sendMessage({ chat_id: chatId, text: `Project path does not exist: ${requestedCwd || "(empty)"}` });
+        return;
+      }
+      const fixedProfile = resolveDefaultChatProjectProfile(sourceRegistry, chatId);
+      if (fixedProfile && !isPathWithin(fixedProfile.root, requestedCwd)) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `This chat is pinned to project ${fixedProfile.id} (${fixedProfile.root}).`,
+        });
+        return;
+      }
+      const resolved = setSessionCwdWithTruth(session, requestedCwd, {
         reason: "/cwd",
         bootstrapPending: true,
       });
@@ -7234,6 +7462,21 @@ async function main() {
       const selected = resolveProjectSelector(sourceRegistry, trimmed.slice("/project ".length));
       if (selected.type === "error") {
         await telegram.sendMessage({ chat_id: chatId, text: truncateMiddle(selected.error, 3900) });
+        return;
+      }
+      const fixedProfile = resolveDefaultChatProjectProfile(sourceRegistry, chatId);
+      if (fixedProfile && selected.type === "profile" && selected.profile?.id !== fixedProfile.id) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `This chat is pinned to project ${fixedProfile.id} (${fixedProfile.root}).`,
+        });
+        return;
+      }
+      if (fixedProfile && selected.type === "path" && !isPathWithin(fixedProfile.root, selected.path)) {
+        await telegram.sendMessage({
+          chat_id: chatId,
+          text: `This chat is pinned to project ${fixedProfile.id} (${fixedProfile.root}).`,
+        });
         return;
       }
       const nextCwd = selected.type === "profile" ? selected.profile.root : selected.path;
@@ -7955,6 +8198,8 @@ module.exports = {
     isMissingThreadRequestError,
     extractTelemetryThreadId,
     isAccountAuthFailureText,
+    isAccountFailoverText,
+    shouldUseBridgeAccountFailover,
     isAccessExpiryExpired,
     isAccountProfileAccessExpired,
     normalizeAccountSelectorList,
@@ -8003,6 +8248,9 @@ module.exports = {
     formatAutoRouteDecisionText,
     buildSourceRegistry,
     normalizeSourceProfile,
+    findSourceProfileById,
+    resolveDefaultChatProjectProfile,
+    applyDefaultChatProjectBinding,
     findSourceProfileForPath,
     refreshSessionTruthProfile,
     formatTruthProfileText,
@@ -8025,8 +8273,21 @@ module.exports = {
     buildDeribitLiveHotPatchBlockReason,
     filterDesktopCodexConfigToml,
     syncDesktopCodexContext,
+    isReplyToBot,
+    shouldHandleTelegramMessage,
+    evaluateTelegramMessageDirection,
+    shouldLogIgnoredGroupReplyDiagnostic,
+    buildIgnoredGroupReplyDiagnosticMeta,
     resolveAgentMessageTurnId,
+    shouldRedactCodexTurnOutput,
+    summarizeGroupCommand,
+    summarizeGroupFileChange,
+    buildTurnCommandExecutionHeader,
+    buildTurnFileChangeHeader,
+    buildTurnDiffPreviewText,
+    sanitizeGroupAgentText,
     shouldRetryTelegramMethod,
+    resolveCodexBin,
   },
 };
 

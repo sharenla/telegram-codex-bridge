@@ -147,7 +147,7 @@ codex app-server --listen stdio://
 - 普通群消息会被忽略
 - 如果当前 turn 还在运行，新的群聊任务会进入队列，不会直接改写当前任务
 - 如果你想临时调转方向，先发 `/stop`，再发新任务
-- 群里的过程消息默认会脱敏：
+- 群聊和私聊的 Codex turn 过程消息默认会脱敏：
   - 保留文字性的处理进度
   - 隐藏代码、路径、命令输出和 diff
 - 群里的最终结果默认不脱敏
@@ -457,7 +457,7 @@ Explicit engineering commands are additive and do not change the plain natural-l
 - Normal group chatter is ignored
 - If a group turn is already running, new group tasks are queued instead of steering the active turn
 - If you want to change direction immediately, send `/stop` first and then send the new task
-- Group progress messages are redacted by default:
+- Codex turn process messages in both groups and private chats are redacted by default:
   - textual progress is kept
   - code, file paths, command output, and diffs are hidden
 - Final group answers are shown without redaction by default

@@ -83,6 +83,42 @@ test("refreshSessionTruthProfile stores a pending bootstrap binding", () => {
   assert.equal(session.truthProfile.lastRefreshedAt, "2026-04-25T01:00:00.000Z");
 });
 
+test("Deribit Telegram group pins to trading-deribit source profile", () => {
+  const root = path.join(os.tmpdir(), "bridge-deribit-pin");
+  const registry = {
+    registryPath: null,
+    registryError: null,
+    loadedAt: "2026-05-15T00:00:00.000Z",
+    profiles: [
+      _test.normalizeSourceProfile({
+        id: "trading-deribit",
+        name: "Trading Deribit",
+        root: path.join(root, "trading-deribit"),
+        sources: { canonicalRepo: path.join(root, "trading-deribit") },
+      }),
+    ],
+  };
+  const session = {
+    cwd: path.join(root, "trading-deribit", "refresh", "truth"),
+    threadId: "stale-thread",
+    truthProfile: {
+      id: "cwd-only",
+      projectRoot: path.join(root, "trading-deribit", "refresh", "truth"),
+    },
+  };
+
+  const result = _test.applyDefaultChatProjectBinding(session, registry, "-1003791245514", {
+    reason: "test",
+    bootstrapPending: true,
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(session.cwd, path.join(root, "trading-deribit"));
+  assert.equal(session.threadId, null);
+  assert.equal(session.truthProfile.id, "trading-deribit");
+  assert.equal(session.truthProfile.bootstrapPending, true);
+});
+
 test("truth bootstrap includes source rules and user message", () => {
   const root = path.join(os.tmpdir(), "bridge-truth-bootstrap");
   const profile = _test.normalizeSourceProfile({
@@ -121,7 +157,6 @@ test("Deribit source profile requires main write-through deploy discipline", () 
   assert.match(runtime.mustCheckBeforeAnswer.join("\n"), /do not patch this runtime tree/);
   assert.match(runtime.neverAssume.join("\n"), /Do not treat openclaw-deribit-stage6 as the canonical source/);
 });
-
 test("Deribit strategy deploy workflow is injected for live strategy changes", () => {
   const session = {
     truthProfile: { id: "trading-deribit" },
@@ -269,7 +304,6 @@ test("Deribit approval gate output records implementation and receipt gates", ()
   assert.equal(_test.hasFreshDeribitApprovalGate(session, "implementation"), true);
   assert.equal(_test.hasFreshDeribitApprovalGate(session, "receipt"), true);
 });
-
 test("Deribit live hot patch blocker rejects current and shared writes", () => {
   const session = {
     truthProfile: { id: "trading-deribit" },
@@ -367,7 +401,10 @@ test("desktop context sync preserves auth while copying memories and safe config
     "model = \"gpt-5.5\"",
     "approval_policy = \"never\"",
     "sandbox_mode = \"danger-full-access\"",
-    "notify = [\"turn-ended\"]",
+    "notify = [",
+    "  \"/Users/wukong/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient\",",
+    "  \"turn-ended\",",
+    "]",
     "",
     "[features]",
     "memories = true",
@@ -389,4 +426,6 @@ test("desktop context sync preserves auth while copying memories and safe config
   assert.doesNotMatch(syncedConfig, /approval_policy/);
   assert.doesNotMatch(syncedConfig, /sandbox_mode/);
   assert.doesNotMatch(syncedConfig, /notify/);
+  assert.doesNotMatch(syncedConfig, /SkyComputerUseClient/);
+  assert.doesNotMatch(syncedConfig, /turn-ended/);
 });
