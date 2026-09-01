@@ -133,6 +133,10 @@ codex app-server --listen stdio://
 - `/authsync`：从账号池同步最新认证并重启 Codex 后端（常用于 token 失效/断流后自救）
 - `/answer <token> ...`：回答需要输入的问题
 
+### 日志轮转
+
+LaunchAgent supervisor 默认每 60 秒检查一次 bridge 日志：`bridge.stderr.log` 达到 25 MB、`bridge.stdout.log` 达到 10 MB 时，会短暂停止 bridge 写入、脱敏并压缩轮转，然后自动重启 bridge。每类最多保留 7 份、最长 14 天，`data/logs/` 总量上限为 200 MB。可通过 `BRIDGE_STDERR_MAX_BYTES`、`BRIDGE_STDOUT_MAX_BYTES`、`BRIDGE_LOG_RETAIN_FILES`、`BRIDGE_LOG_MAX_AGE_DAYS`、`BRIDGE_LOG_TOTAL_MAX_BYTES` 和 `LOG_ROTATE_CHECK_INTERVAL` 覆盖默认值。
+
 自动路由默认关闭，避免升级后改变现有会话行为。设置 `CODEX_AUTO_ROUTE=auto` 或发送 `/autoroute auto` 后，bridge 会在每个新 turn 前按确定性规则选择 `model / effort`：简单文本走 `gpt-5.2 / low`，普通代码任务走 `gpt-5.4 / high`，命中 live/runtime/auth/deploy/trading/root-cause 等高风险信号时走 `gpt-5.5 / xhigh`。`/autoroute suggest` 只记录和预览，不自动覆盖；`/autoroute lock` 会保留当前手动选择。
 
 扩展命令默认只读，不会安装或启用插件。普通消息里如果写入 `$app`、`$skill` 或 `$plugin` 名称，bridge 会尽量把它转换成 Codex app-server 的精确 `mention` input；如果当前 app-server 不支持对应列表接口，会降级为普通文本。
@@ -186,6 +190,18 @@ TELEGRAM_POLL_TIMEOUT_SECONDS=5
 ```bash
 TELEGRAM_PROXY_URL=direct
 ```
+
+bridge 默认启用事件驱动的 Telegram 线路恢复。它会自动读取本机 Clash Verge / Mihomo 控制面；连续 3 次 `getUpdates` 传输错误后，从 `Telegram` 策略组中选择其他存活的叶子节点，并逐个用一次 `getMe` 验证。验证成功后立即恢复轮询；所有候选失败时才继续沿用原有的 supervisor 重启兜底。
+
+```bash
+TELEGRAM_TRANSPORT_FAILOVER=1
+TELEGRAM_CLASH_PROXY_GROUP=Telegram
+TELEGRAM_TRANSPORT_FAILOVER_ERROR_THRESHOLD=3
+TELEGRAM_TRANSPORT_FAILOVER_MAX_CANDIDATES=4
+TELEGRAM_TRANSPORT_FAILOVER_COOLDOWN_SECONDS=60
+```
+
+如果控制面不在自动发现路径，可通过 `TELEGRAM_CLASH_CONTROLLER_SOCKET` 或 `TELEGRAM_CLASH_CONTROLLER_URL` 覆盖，并用 `TELEGRAM_CLASH_CONTROLLER_SECRET` 提供控制面认证。凭据不会写入 bridge 日志。
 
 ### Codex 网络 / 代理
 
@@ -443,6 +459,10 @@ Plain-language command guide: [docs/COMMANDS.md](docs/COMMANDS.md).
 - `/authsync`: resync latest auth from account pool and restart the Codex backend (useful after token drift/stream disconnect)
 - `/answer <token> ...`: answer an input request
 
+### Log rotation
+
+The LaunchAgent supervisor checks bridge logs every 60 seconds by default. When `bridge.stderr.log` reaches 25 MB or `bridge.stdout.log` reaches 10 MB, it briefly stops bridge writes, redacts and compresses the active log, then restarts the bridge. Each stream keeps at most 7 archives for no longer than 14 days, with a 200 MB cap for `data/logs/`. Override the defaults with `BRIDGE_STDERR_MAX_BYTES`, `BRIDGE_STDOUT_MAX_BYTES`, `BRIDGE_LOG_RETAIN_FILES`, `BRIDGE_LOG_MAX_AGE_DAYS`, `BRIDGE_LOG_TOTAL_MAX_BYTES`, and `LOG_ROTATE_CHECK_INTERVAL`.
+
 Automatic routing is off by default so upgrades do not change existing chat behavior. Set `CODEX_AUTO_ROUTE=auto` or send `/autoroute auto` to classify each new turn before it starts: simple text tasks use `gpt-5.2 / low`, normal coding tasks use `gpt-5.4 / high`, and live/runtime/auth/deploy/trading/root-cause signals use `gpt-5.5 / xhigh`. `/autoroute suggest` records/previews without overriding; `/autoroute lock` keeps the current manual choice.
 
 Extension commands are read-only by default and never install or enable plugins. When a plain message includes `$app`, `$skill`, or `$plugin` names, the bridge best-effort converts them into precise Codex app-server `mention` input; if the active app-server does not support the matching list method, the text is sent unchanged.
@@ -496,6 +516,18 @@ TELEGRAM_POLL_TIMEOUT_SECONDS=5
 ```bash
 TELEGRAM_PROXY_URL=direct
 ```
+
+Event-driven Telegram route recovery is enabled by default. The bridge auto-discovers the local Clash Verge / Mihomo controller. After 3 consecutive `getUpdates` transport failures, it selects other controller-reported live leaf nodes from the `Telegram` group and validates each with a single `getMe` probe. A successful probe resumes polling immediately; exhausting all candidates falls back to the existing supervisor restart path.
+
+```bash
+TELEGRAM_TRANSPORT_FAILOVER=1
+TELEGRAM_CLASH_PROXY_GROUP=Telegram
+TELEGRAM_TRANSPORT_FAILOVER_ERROR_THRESHOLD=3
+TELEGRAM_TRANSPORT_FAILOVER_MAX_CANDIDATES=4
+TELEGRAM_TRANSPORT_FAILOVER_COOLDOWN_SECONDS=60
+```
+
+For a controller outside the auto-discovery paths, set `TELEGRAM_CLASH_CONTROLLER_SOCKET` or `TELEGRAM_CLASH_CONTROLLER_URL`, plus `TELEGRAM_CLASH_CONTROLLER_SECRET` when authentication is required. The credential is never written to bridge logs.
 
 ### Codex upstream proxy
 

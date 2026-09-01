@@ -30,6 +30,30 @@ test("isAccountAuthFailureText matches stderr auth watchdog patterns", () => {
   assert.equal(_test.isAccountAuthFailureText("429 rate limit exceeded"), false);
 });
 
+test("codex-lb ignores local login refresh stderr without hiding real provider auth failures", () => {
+  const localRefreshFailure = [
+    "ERROR codex_login::auth::manager:",
+    "Failed to refresh token: Your refresh token was revoked.",
+  ].join(" ");
+  const providerAuthFailure = [
+    "ERROR codex_api::endpoint::responses_websocket:",
+    "failed to connect: HTTP error: 401 Unauthorized",
+  ].join(" ");
+
+  assert.equal(
+    _test.shouldEmitAuthWatchdogFromStderr(localRefreshFailure, { codexLbEnabled: true }),
+    false,
+  );
+  assert.equal(
+    _test.shouldEmitAuthWatchdogFromStderr(localRefreshFailure, { codexLbEnabled: false }),
+    true,
+  );
+  assert.equal(
+    _test.shouldEmitAuthWatchdogFromStderr(providerAuthFailure, { codexLbEnabled: true }),
+    true,
+  );
+});
+
 test("buildAuthRecoveryReplayTask preserves turn metadata and increments replay count once", () => {
   const task = _test.buildAuthRecoveryReplayTask({
     text: "继续修这个 bug",

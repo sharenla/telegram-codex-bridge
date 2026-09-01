@@ -119,6 +119,42 @@ test("Deribit Telegram group pins to trading-deribit source profile", () => {
   assert.equal(session.truthProfile.bootstrapPending, true);
 });
 
+test("Deribit fund Telegram group pins to trading-deribit source profile", () => {
+  const root = path.join(os.tmpdir(), "bridge-deribit-fund-pin");
+  const registry = {
+    registryPath: null,
+    registryError: null,
+    loadedAt: "2026-08-26T00:00:00.000Z",
+    profiles: [
+      _test.normalizeSourceProfile({
+        id: "trading-deribit",
+        name: "Trading Deribit",
+        root: path.join(root, "trading-deribit"),
+        sources: { canonicalRepo: path.join(root, "trading-deribit") },
+      }),
+    ],
+  };
+  const session = {
+    cwd: path.join(root, "home"),
+    threadId: "home-thread",
+    truthProfile: {
+      id: "home-workspace",
+      projectRoot: path.join(root, "home"),
+    },
+  };
+
+  const result = _test.applyDefaultChatProjectBinding(session, registry, "-5265653509", {
+    reason: "test",
+    bootstrapPending: true,
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(session.cwd, path.join(root, "trading-deribit"));
+  assert.equal(session.threadId, null);
+  assert.equal(session.truthProfile.id, "trading-deribit");
+  assert.equal(session.truthProfile.bootstrapPending, true);
+});
+
 test("truth bootstrap includes source rules and user message", () => {
   const root = path.join(os.tmpdir(), "bridge-truth-bootstrap");
   const profile = _test.normalizeSourceProfile({

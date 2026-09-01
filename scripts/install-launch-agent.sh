@@ -55,6 +55,7 @@ rsync -a --delete \
 
 mkdir -p "${SERVICE_ROOT}/data" "${LAUNCH_LOG_DIR}"
 chmod +x "${SUPERVISOR_PATH}" "${SERVICE_ROOT}/scripts/uninstall-launch-agent.sh" "${SERVICE_ROOT}/scripts/install-launch-agent.sh"
+chmod +x "${SERVICE_ROOT}/scripts/rotate-bridge-logs.sh"
 
 cat > "${PLIST_PATH}" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

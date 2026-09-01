@@ -4,6 +4,8 @@
 const { execFile, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const http = require("node:http");
+const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
@@ -54,6 +56,7 @@ const SOURCE_TRUTH_BOOTSTRAP_VERSION = 1;
 const DEFAULT_BRIDGE_LAUNCH_AGENT = "com.sharenla.telegram-codex-bridge";
 const DEFAULT_CHAT_PROJECT_PROFILE_IDS = new Map([
   ["-1003791245514", "trading-deribit"],
+  ["-5265653509", "trading-deribit"],
 ]);
 const DERIBIT_STRATEGY_PROFILE_IDS = new Set([
   "trading-deribit",
@@ -152,6 +155,9 @@ const ACCOUNT_ACCESS_EXPIRY_SKEW_MS = 5 * 60 * 1000;
 const TELEGRAM_POLLING_STALL_THRESHOLD_MS = 3 * 60 * 1000;
 const TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD = 6;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 5;
+const TELEGRAM_TRANSPORT_FAILOVER_ERROR_THRESHOLD = 3;
+const TELEGRAM_TRANSPORT_FAILOVER_MAX_CANDIDATES = 4;
+const TELEGRAM_TRANSPORT_FAILOVER_COOLDOWN_MS = 60 * 1000;
 const TELEGRAM_RETRYABLE_METHODS = new Set([
   "getUpdates",
   "getMe",
@@ -288,6 +294,322 @@ function resolveTelegramProxyConfig() {
   }
 
   return detectLocalTelegramProxy();
+}
+
+function parseSimpleYamlScalar(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed || trimmed === "''" || trimmed === '""') return "";
+  if (
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    || (trimmed.startsWith('"') && trimmed.endsWith('"'))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed.replace(/\s+#.*$/, "").trim();
+}
+
+function normalizeClashControllerBaseUrl(value) {
+  const normalized = String(value || "").trim().replace(/\/$/, "");
+  if (!normalized) return null;
+  if (/^https?:\/\//i.test(normalized)) return normalized;
+  return `http://${normalized}`;
+}
+
+function resolveClashControllerConfig({
+  env = process.env,
+  configCandidates = CLASH_CONFIG_CANDIDATES,
+} = {}) {
+  const groupName = String(env.TELEGRAM_CLASH_PROXY_GROUP || "Telegram").trim() || "Telegram";
+  const envSocket = resolveUserPath(String(env.TELEGRAM_CLASH_CONTROLLER_SOCKET || "").trim());
+  const envBaseUrl = normalizeClashControllerBaseUrl(env.TELEGRAM_CLASH_CONTROLLER_URL);
+  if (envSocket || envBaseUrl) {
+    return {
+      socketPath: envSocket || null,
+      baseUrl: envBaseUrl,
+      secret: String(env.TELEGRAM_CLASH_CONTROLLER_SECRET || ""),
+      groupName,
+      source: "environment",
+    };
+  }
+
+  for (const candidate of configCandidates) {
+    const text = readTextFile(candidate);
+    if (!text) continue;
+    const socketMatch = text.match(/^external-controller-unix:\s*(.*?)\s*$/m);
+    const controllerMatch = text.match(/^external-controller:\s*(.*?)\s*$/m);
+    const secretMatch = text.match(/^secret:\s*(.*?)\s*$/m);
+    const socketPath = resolveUserPath(parseSimpleYamlScalar(socketMatch?.[1]));
+    const baseUrl = normalizeClashControllerBaseUrl(parseSimpleYamlScalar(controllerMatch?.[1]));
+    if (!socketPath && !baseUrl) continue;
+    return {
+      socketPath: socketPath || null,
+      baseUrl,
+      secret: parseSimpleYamlScalar(secretMatch?.[1]),
+      groupName,
+      source: candidate,
+    };
+  }
+
+  return null;
+}
+
+function requestClashControllerJson({
+  method,
+  path: requestPath,
+  body = null,
+  socketPath = null,
+  baseUrl = null,
+  secret = "",
+  timeoutMs = 5000,
+}) {
+  const payload = body === null ? null : JSON.stringify(body);
+  const headers = { accept: "application/json" };
+  if (secret) headers.authorization = `Bearer ${secret}`;
+  if (payload !== null) {
+    headers["content-type"] = "application/json";
+    headers["content-length"] = Buffer.byteLength(payload);
+  }
+
+  let client = http;
+  let options;
+  if (socketPath) {
+    options = { socketPath, path: requestPath, method, headers };
+  } else {
+    const url = new URL(requestPath, `${baseUrl.replace(/\/$/, "")}/`);
+    client = url.protocol === "https:" ? https : http;
+    options = { protocol: url.protocol, hostname: url.hostname, port: url.port, path: `${url.pathname}${url.search}`, method, headers };
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = client.request(options, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          reject(new Error(`Clash controller ${method} ${requestPath} failed with HTTP ${response.statusCode}`));
+          return;
+        }
+        if (!text.trim()) {
+          resolve(null);
+          return;
+        }
+        const parsed = safeJsonParse(text);
+        if (parsed === null) {
+          reject(new Error(`Clash controller ${method} ${requestPath} returned invalid JSON`));
+          return;
+        }
+        resolve(parsed);
+      });
+    });
+    request.setTimeout(timeoutMs, () => request.destroy(new Error(`Clash controller request timed out after ${timeoutMs}ms`)));
+    request.on("error", reject);
+    if (payload !== null) request.write(payload);
+    request.end();
+  });
+}
+
+function createClashController(config, { requestJson = requestClashControllerJson } = {}) {
+  const connection = {
+    socketPath: config?.socketPath || null,
+    baseUrl: config?.baseUrl || null,
+    secret: config?.secret || "",
+  };
+  if (!connection.socketPath && !connection.baseUrl) {
+    throw new Error("Clash controller socket or URL is required");
+  }
+
+  return {
+    getProxies() {
+      return requestJson({ method: "GET", path: "/proxies", body: null, ...connection });
+    },
+    selectProxy(groupName, proxyName) {
+      return requestJson({
+        method: "PUT",
+        path: `/proxies/${encodeURIComponent(groupName)}`,
+        body: { name: proxyName },
+        ...connection,
+      });
+    },
+  };
+}
+
+function resolveClashSelectedLeaf(proxies, proxyName, seen = new Set()) {
+  if (!proxyName || seen.has(proxyName)) return proxyName || null;
+  seen.add(proxyName);
+  const proxy = proxies?.[proxyName];
+  if (!proxy || proxy.type !== "Selector" || !proxy.now) return proxyName;
+  return resolveClashSelectedLeaf(proxies, proxy.now, seen);
+}
+
+function latestClashProxyDelay(proxy) {
+  const history = Array.isArray(proxy?.history) ? proxy.history : [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const delay = Number(history[index]?.delay);
+    if (Number.isFinite(delay) && delay > 0) return delay;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+function listClashFailoverCandidates(snapshot, groupName, { maxCandidates = 4 } = {}) {
+  const proxies = snapshot?.proxies || {};
+  const group = proxies[groupName];
+  if (!group || !Array.isArray(group.all)) return [];
+  const currentLeaf = resolveClashSelectedLeaf(proxies, group.now);
+  const excludedTypes = new Set(["Selector", "Direct", "Reject", "Pass", "Compatible"]);
+
+  return group.all
+    .map((name, order) => ({ name, order, proxy: proxies[name] }))
+    .filter(({ name, proxy }) => (
+      name
+      && name !== currentLeaf
+      && proxy
+      && proxy.alive !== false
+      && !excludedTypes.has(proxy.type)
+    ))
+    .map(({ name, order, proxy }) => ({ name, order, delay: latestClashProxyDelay(proxy) }))
+    .sort((left, right) => left.delay - right.delay || left.order - right.order)
+    .slice(0, Math.max(1, Number(maxCandidates) || 4));
+}
+
+function isTelegramTransportRecoveryError(error) {
+  const message = error?.message || String(error || "");
+  return /Telegram API\s+(?:getUpdates|getMe)\s+transport failed/i.test(message)
+    && /(SSL_ERROR_SYSCALL|timed out|Connect Timeout|Could not resolve|Failed to connect|Connection reset|Empty reply|curl:\s*\((?:5|6|7|18|28|35|52|55|56)\))/i.test(message);
+}
+
+async function recoverTelegramTransport({
+  controller,
+  verifyTelegram,
+  groupName = "Telegram",
+  maxCandidates = 4,
+} = {}) {
+  const snapshot = await controller.getProxies();
+  const group = snapshot?.proxies?.[groupName];
+  if (!group || group.type !== "Selector") {
+    throw new Error(`Clash proxy group is unavailable or not selectable: ${groupName}`);
+  }
+
+  const previousSelection = group.now || null;
+  const previousLeaf = resolveClashSelectedLeaf(snapshot.proxies, previousSelection);
+  const candidates = listClashFailoverCandidates(snapshot, groupName, { maxCandidates });
+  const attempted = [];
+
+  for (const candidate of candidates) {
+    attempted.push(candidate.name);
+    await controller.selectProxy(groupName, candidate.name);
+    try {
+      await verifyTelegram();
+      return {
+        recovered: true,
+        previousSelection,
+        previousLeaf,
+        selectedProxy: candidate.name,
+        attempted,
+      };
+    } catch {
+      // Try the next controller-reported live leaf.
+    }
+  }
+
+  let restoredSelection = null;
+  let restoreError = null;
+  if (previousSelection) {
+    try {
+      await controller.selectProxy(groupName, previousSelection);
+      restoredSelection = previousSelection;
+    } catch (error) {
+      restoreError = truncateMiddle(
+        redactTelegramBotToken(error?.message || String(error)),
+        220,
+      );
+    }
+  }
+
+  return {
+    recovered: false,
+    previousSelection,
+    previousLeaf,
+    selectedProxy: null,
+    attempted,
+    restoredSelection,
+    restoreError,
+  };
+}
+
+function createTelegramTransportRecoveryManager({
+  controller,
+  telegram,
+  groupName = "Telegram",
+  errorThreshold = 3,
+  maxCandidates = 4,
+  cooldownMs = 60 * 1000,
+  now = () => Date.now(),
+  logger = console,
+} = {}) {
+  let lastAttemptAt = null;
+  let inFlight = null;
+
+  return {
+    async maybeRecover({ error, consecutiveErrors = 0 } = {}) {
+      if (!isTelegramTransportRecoveryError(error)) {
+        return { attempted: false, recovered: false, reason: "not-transport-error" };
+      }
+      if (Number(consecutiveErrors || 0) < Math.max(1, Number(errorThreshold) || 3)) {
+        return { attempted: false, recovered: false, reason: "below-threshold" };
+      }
+      const attemptAt = now();
+      if (lastAttemptAt !== null && attemptAt - lastAttemptAt < Math.max(0, Number(cooldownMs) || 0)) {
+        return { attempted: false, recovered: false, reason: "cooldown" };
+      }
+      if (inFlight) return inFlight;
+
+      lastAttemptAt = attemptAt;
+      inFlight = recoverTelegramTransport({
+        controller,
+        verifyTelegram: () => telegram.probe(),
+        groupName,
+        maxCandidates,
+      })
+        .then((result) => {
+          if (result.recovered) {
+            logger.info?.(
+              `Telegram transport recovered via Clash group ${groupName}: ${result.previousLeaf || result.previousSelection || "unknown"} -> ${result.selectedProxy}`,
+            );
+          } else {
+            logger.warn?.(
+              `Telegram transport failover exhausted ${result.attempted.length} candidate(s) in Clash group ${groupName}`,
+            );
+            if (result.restoreError) {
+              logger.warn?.(
+                `Telegram transport failover could not restore the previous Clash selection: ${result.restoreError}`,
+              );
+            }
+          }
+          const { attempted: attemptedCandidates, ...recoveryResult } = result;
+          return {
+            attempted: true,
+            reason: result.recovered ? "recovered" : "candidates-exhausted",
+            ...recoveryResult,
+            attemptedCandidates,
+          };
+        })
+        .catch((recoveryError) => {
+          const message = truncateMiddle(redactTelegramBotToken(recoveryError?.message || String(recoveryError)), 220);
+          logger.warn?.(`Telegram transport failover failed: ${message}`);
+          return {
+            attempted: true,
+            recovered: false,
+            reason: "recovery-error",
+            error: message,
+          };
+        })
+        .finally(() => {
+          inFlight = null;
+        });
+      return inFlight;
+    },
+  };
 }
 
 function resolveCodexBin({
@@ -1482,6 +1804,10 @@ class TelegramApi {
     return this.call("getMe");
   }
 
+  probe() {
+    return this.callOnce("getMe", {});
+  }
+
   sendChatAction({ chat_id, action }) {
     return this.call("sendChatAction", {
       chat_id,
@@ -1516,9 +1842,10 @@ class TelegramApi {
 }
 
 class CodexAppServer {
-  constructor({ codexBin = "codex", env = process.env } = {}) {
+  constructor({ codexBin = "codex", env = process.env, codexLbEnabled = false } = {}) {
     this.codexBin = codexBin;
     this.env = env;
+    this.codexLbEnabled = Boolean(codexLbEnabled);
     this.proc = null;
     this._stdoutRl = null;
     this._stderrRl = null;
@@ -1654,7 +1981,7 @@ class CodexAppServer {
     const text = String(line || "").trim();
     if (!text) return;
     console.error(`[codex app-server stderr] ${text}`);
-    if (!isAccountAuthFailureText(text)) return;
+    if (!shouldEmitAuthWatchdogFromStderr(text, { codexLbEnabled: this.codexLbEnabled })) return;
     this._latestAuthFailure = {
       reason: text,
       matchedText: text,
@@ -1737,6 +2064,12 @@ function parseRatioEnv(value, fallback) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return fallback;
   return numeric;
+}
+
+function parseBoundedIntegerEnv(value, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric)) return fallback;
+  return Math.max(min, Math.min(max, numeric));
 }
 
 function uniqueStrings(values) {
@@ -2670,6 +3003,20 @@ function isMissingThreadRequestError(err) {
 function isAccountAuthFailureText(text) {
   if (!text) return false;
   return ACCOUNT_AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(String(text)));
+}
+
+function shouldEmitAuthWatchdogFromStderr(text, { codexLbEnabled = false } = {}) {
+  if (!isAccountAuthFailureText(text)) return false;
+  if (!codexLbEnabled) return true;
+
+  // codex-lb owns upstream account selection and authenticates requests with its
+  // own API key. The app-server still runs its local ChatGPT token refresher in
+  // the background, so a stale isolated auth.json can emit a 401 even while the
+  // configured codex-lb route is healthy. Only suppress that local refresher
+  // warning; provider/turn 401s must continue to trigger recovery.
+  return !/codex_login::auth::manager.*(?:failed to refresh token|could not be refreshed)/i.test(
+    String(text),
+  );
 }
 
 function isRemoteCompactTransportFailureText(text) {
@@ -3744,6 +4091,42 @@ async function main() {
     process.env.STORE_PATH || path.join(__dirname, "data", "store.json");
   const store = new Store(storePath);
   store.load();
+
+  let telegramTransportRecovery = null;
+  const telegramTransportFailoverEnabled = parseBooleanEnv(
+    process.env.TELEGRAM_TRANSPORT_FAILOVER,
+    true,
+  );
+  const clashControllerConfig = telegramTransportFailoverEnabled
+    ? resolveClashControllerConfig()
+    : null;
+  if (clashControllerConfig) {
+    telegramTransportRecovery = createTelegramTransportRecoveryManager({
+      controller: createClashController(clashControllerConfig),
+      telegram,
+      groupName: clashControllerConfig.groupName,
+      errorThreshold: parseBoundedIntegerEnv(
+        process.env.TELEGRAM_TRANSPORT_FAILOVER_ERROR_THRESHOLD,
+        TELEGRAM_TRANSPORT_FAILOVER_ERROR_THRESHOLD,
+        { min: 1, max: 20 },
+      ),
+      maxCandidates: parseBoundedIntegerEnv(
+        process.env.TELEGRAM_TRANSPORT_FAILOVER_MAX_CANDIDATES,
+        TELEGRAM_TRANSPORT_FAILOVER_MAX_CANDIDATES,
+        { min: 1, max: 12 },
+      ),
+      cooldownMs: parseBoundedIntegerEnv(
+        process.env.TELEGRAM_TRANSPORT_FAILOVER_COOLDOWN_SECONDS,
+        TELEGRAM_TRANSPORT_FAILOVER_COOLDOWN_MS / 1000,
+        { min: 0, max: 3600 },
+      ) * 1000,
+    });
+    console.log(
+      `Telegram event-driven transport failover enabled; Clash group=${clashControllerConfig.groupName}; controller=${clashControllerConfig.socketPath ? "unix socket" : "local HTTP"}`,
+    );
+  } else if (telegramTransportFailoverEnabled) {
+    console.warn("Telegram event-driven transport failover unavailable: Clash controller was not detected.");
+  }
 
   async function resolveBotIdentity() {
     const cached = store.data.telegram?.botIdentity;
@@ -4996,7 +5379,7 @@ async function main() {
   }
 
   async function startCodexServer() {
-    const server = new CodexAppServer({ codexBin, env: codexEnv });
+    const server = new CodexAppServer({ codexBin, env: codexEnv, codexLbEnabled });
     server.onAuthWatchdog((event) => {
       queueCodexBackendRecovery(event);
     });
@@ -8155,6 +8538,26 @@ async function main() {
       } catch (err) {
         const health = recordTelegramPollError(err);
         console.error("Polling error:", err.message);
+        if (telegramTransportRecovery) {
+          const recovery = await telegramTransportRecovery.maybeRecover({
+            error: err,
+            consecutiveErrors: health.consecutivePollErrors,
+          });
+          if (recovery.attempted) {
+            health.lastTransportRecoveryAttemptAt = Date.now();
+            health.lastTransportRecoveryStatus = recovery.reason;
+            health.lastTransportRecoveryCandidates = recovery.attemptedCandidates || [];
+            if (recovery.recovered) {
+              health.lastTransportRecoverySuccessAt = Date.now();
+              health.lastRecoveredProxy = recovery.selectedProxy;
+            }
+            store.markDirty();
+            store.save({ force: true });
+          }
+          if (recovery.recovered) {
+            continue;
+          }
+        }
         const stallBaselineMs = Math.max(
           Number(health.lastPollSuccessAt || 0),
           processStartedAt,
@@ -8198,6 +8601,7 @@ module.exports = {
     isMissingThreadRequestError,
     extractTelemetryThreadId,
     isAccountAuthFailureText,
+    shouldEmitAuthWatchdogFromStderr,
     isAccountFailoverText,
     shouldUseBridgeAccountFailover,
     isAccessExpiryExpired,
@@ -8287,6 +8691,11 @@ module.exports = {
     buildTurnDiffPreviewText,
     sanitizeGroupAgentText,
     shouldRetryTelegramMethod,
+    resolveClashControllerConfig,
+    createClashController,
+    isTelegramTransportRecoveryError,
+    recoverTelegramTransport,
+    createTelegramTransportRecoveryManager,
     resolveCodexBin,
   },
 };
