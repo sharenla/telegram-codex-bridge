@@ -137,6 +137,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-21 | telegram-codex-bridge-service | main / bca12d3 | `bca12d308d23b6b40eebfd62d32de02231b3a9a8` | `889d4bd36bfc` | T1.4 灰度通过 |
 | 2026-09-21 | rv-prediction | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
 | 2026-09-21 | strategy-observation | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
+| 2026-09-21 | Phase 1 tag | `v0.1.1` | `8c8e8b3` | `889d4bd36bfc` | Phase 1 closeout tag |
 
 灰度顺序不得跳步：**rv-prediction → 默认实例 → strategy-observation**。
 每批之间须确认：进程存活、`bridge.stdout.log` 出现 `Telegram Codex Bridge started.`、该实例能正常应答一次。
@@ -270,4 +271,4 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ### Phase 1 closeout
 
-- T1.1, T1.6, T1.2, T1.3, T1.4, T1.5 complete. No Phase 2 code started.
+- T1.1, T1.6, T1.2, T1.3, T1.4, T1.5 complete. Tag `v0.1.1` points to Phase 1 closeout commit `8c8e8b3`. No Phase 2 code started.
