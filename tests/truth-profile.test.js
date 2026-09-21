@@ -465,3 +465,52 @@ test("desktop context sync preserves auth while copying memories and safe config
   assert.doesNotMatch(syncedConfig, /SkyComputerUseClient/);
   assert.doesNotMatch(syncedConfig, /turn-ended/);
 });
+
+test("desktop context sync can preserve instance-specific role and memories", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-context-profile-"));
+  const desktopHome = path.join(root, "desktop");
+  const codexHome = path.join(root, "specialist");
+  fs.mkdirSync(path.join(desktopHome, "memories"), { recursive: true });
+  fs.mkdirSync(path.join(codexHome, "memories"), { recursive: true });
+  fs.writeFileSync(path.join(desktopHome, "AGENTS.md"), "desktop role\n");
+  fs.writeFileSync(path.join(desktopHome, "memories", "MEMORY.md"), "desktop memory\n");
+  fs.writeFileSync(path.join(desktopHome, "config.toml"), "[features]\nmemories = true\n");
+  fs.writeFileSync(path.join(codexHome, "AGENTS.md"), "specialist role\n");
+  fs.writeFileSync(path.join(codexHome, "memories", "MEMORY.md"), "specialist memory\n");
+
+  const report = _test.syncDesktopCodexContext({
+    codexHome,
+    desktopCodexHome: desktopHome,
+    enabled: true,
+    syncAgents: false,
+    syncMemories: false,
+  });
+
+  assert.deepEqual(report.synced, ["config.toml"]);
+  assert.equal(fs.readFileSync(path.join(codexHome, "AGENTS.md"), "utf8"), "specialist role\n");
+  assert.equal(fs.readFileSync(path.join(codexHome, "memories", "MEMORY.md"), "utf8"), "specialist memory\n");
+  assert.match(fs.readFileSync(path.join(codexHome, "config.toml"), "utf8"), /memories = true/);
+});
+
+test("isolated Codex home can enable memories after shared config sync", () => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-memories-profile-"));
+  const configPath = path.join(codexHome, "config.toml");
+  fs.writeFileSync(configPath, [
+    "[features]",
+    "js_repl = false",
+    "",
+    "[desktop]",
+    'selected-avatar-id = "app-default"',
+    "",
+  ].join("\n"));
+
+  const first = _test.configureCodexMemoriesFeature({ codexHome, enabled: true });
+  const second = _test.configureCodexMemoriesFeature({ codexHome, enabled: true });
+  const config = fs.readFileSync(configPath, "utf8");
+
+  assert.equal(first.configured, true);
+  assert.equal(first.changed, true);
+  assert.equal(second.changed, false);
+  assert.match(config, /\[features]\njs_repl = false\n\nmemories = true\n\[desktop]/);
+  assert.equal((config.match(/^memories\s*=/gm) || []).length, 1);
+});

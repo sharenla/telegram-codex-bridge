@@ -174,6 +174,8 @@ npm run install:launch-agent
 npm run uninstall:launch-agent
 ```
 
+同一台 Mac 运行多个 Telegram Bot 时，使用命名实例，为每个 Bot 隔离 LaunchAgent、store、Codex home、memory 和日志，同时继续共享项目真相源与基础能力。完整配置见：[多实例与研究 Bot](docs/MULTI-INSTANCE.md)。
+
 ### Telegram 网络 / 代理
 
 如果 Telegram 在你当前网络环境里不稳定，可以让 bridge 的 Telegram 请求显式走本机代理：
@@ -499,6 +501,8 @@ To uninstall:
 ```bash
 npm run uninstall:launch-agent
 ```
+
+For multiple Telegram bots on the same Mac, use named instances. Each bot gets an isolated LaunchAgent, store, Codex home, memories, and logs while retaining the shared project truth sources and capabilities. See [Multi-instance research bots](docs/MULTI-INSTANCE.md).
 
 ### Telegram transport / proxy
 

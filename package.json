@@ -6,9 +6,13 @@
   "scripts": {
     "discover-chat": "node index.js --discover-chat-id",
     "install:launch-agent": "zsh ./scripts/install-launch-agent.sh",
+    "install:strategy-observation": "BRIDGE_ENV_FILE=./config/instances/strategy-observation.env BRIDGE_ROLE_FILE=./config/instances/strategy-observation.AGENTS.md zsh ./scripts/install-launch-agent.sh strategy-observation",
+    "install:rv-prediction": "BRIDGE_ENV_FILE=./config/instances/rv-prediction.env BRIDGE_ROLE_FILE=./config/instances/rv-prediction.AGENTS.md zsh ./scripts/install-launch-agent.sh rv-prediction",
     "start": "node index.js",
     "test": "node -c index.js && node --test ./tests/*.test.js && zsh -n ./scripts/codex-launch-supervisor.sh && zsh -n ./scripts/rotate-bridge-logs.sh && zsh -n ./scripts/install-launch-agent.sh && zsh -n ./scripts/uninstall-launch-agent.sh",
-    "uninstall:launch-agent": "zsh ./scripts/uninstall-launch-agent.sh"
+    "uninstall:launch-agent": "zsh ./scripts/uninstall-launch-agent.sh",
+    "uninstall:strategy-observation": "zsh ./scripts/uninstall-launch-agent.sh strategy-observation",
+    "uninstall:rv-prediction": "zsh ./scripts/uninstall-launch-agent.sh rv-prediction"
   },
   "keywords": [
     "codex",

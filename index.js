@@ -415,6 +415,9 @@ function createClashController(config, { requestJson = requestClashControllerJso
     baseUrl: config?.baseUrl || null,
     secret: config?.secret || "",
   };
+  const configSource = config?.source && config.source !== "environment"
+    ? config.source
+    : null;
   if (!connection.socketPath && !connection.baseUrl) {
     throw new Error("Clash controller socket or URL is required");
   }
@@ -430,6 +433,15 @@ function createClashController(config, { requestJson = requestClashControllerJso
         body: { name: proxyName },
         ...connection,
       });
+    },
+    getConfigVersion() {
+      if (!configSource) return null;
+      try {
+        const stat = fs.statSync(configSource);
+        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+      } catch {
+        return null;
+      }
     },
   };
 }
@@ -451,18 +463,23 @@ function latestClashProxyDelay(proxy) {
   return Number.POSITIVE_INFINITY;
 }
 
-function listClashFailoverCandidates(snapshot, groupName, { maxCandidates = 4 } = {}) {
+function listClashFailoverCandidates(snapshot, groupName, {
+  maxCandidates = 4,
+  excludedCandidates = [],
+} = {}) {
   const proxies = snapshot?.proxies || {};
   const group = proxies[groupName];
   if (!group || !Array.isArray(group.all)) return [];
   const currentLeaf = resolveClashSelectedLeaf(proxies, group.now);
   const excludedTypes = new Set(["Selector", "Direct", "Reject", "Pass", "Compatible"]);
+  const excludedNames = new Set(excludedCandidates || []);
 
   return group.all
     .map((name, order) => ({ name, order, proxy: proxies[name] }))
     .filter(({ name, proxy }) => (
       name
       && name !== currentLeaf
+      && !excludedNames.has(name)
       && proxy
       && proxy.alive !== false
       && !excludedTypes.has(proxy.type)
@@ -470,6 +487,20 @@ function listClashFailoverCandidates(snapshot, groupName, { maxCandidates = 4 } 
     .map(({ name, order, proxy }) => ({ name, order, delay: latestClashProxyDelay(proxy) }))
     .sort((left, right) => left.delay - right.delay || left.order - right.order)
     .slice(0, Math.max(1, Number(maxCandidates) || 4));
+}
+
+function buildClashProxyGroupSnapshotId(snapshot, groupName, configVersion = "") {
+  const proxies = snapshot?.proxies || {};
+  const group = proxies[groupName];
+  const members = Array.isArray(group?.all)
+    ? group.all.map((name) => [name, proxies[name]?.type || null])
+    : [];
+  return crypto.createHash("sha256").update(JSON.stringify({
+    configVersion: String(configVersion || ""),
+    groupName,
+    groupType: group?.type || null,
+    members,
+  })).digest("hex").slice(0, 16);
 }
 
 function isTelegramTransportRecoveryError(error) {
@@ -483,16 +514,21 @@ async function recoverTelegramTransport({
   verifyTelegram,
   groupName = "Telegram",
   maxCandidates = 4,
+  snapshot = null,
+  excludedCandidates = [],
 } = {}) {
-  const snapshot = await controller.getProxies();
-  const group = snapshot?.proxies?.[groupName];
+  const currentSnapshot = snapshot || await controller.getProxies();
+  const group = currentSnapshot?.proxies?.[groupName];
   if (!group || group.type !== "Selector") {
     throw new Error(`Clash proxy group is unavailable or not selectable: ${groupName}`);
   }
 
   const previousSelection = group.now || null;
-  const previousLeaf = resolveClashSelectedLeaf(snapshot.proxies, previousSelection);
-  const candidates = listClashFailoverCandidates(snapshot, groupName, { maxCandidates });
+  const previousLeaf = resolveClashSelectedLeaf(currentSnapshot.proxies, previousSelection);
+  const candidates = listClashFailoverCandidates(currentSnapshot, groupName, {
+    maxCandidates,
+    excludedCandidates,
+  });
   const attempted = [];
 
   for (const candidate of candidates) {
@@ -549,8 +585,15 @@ function createTelegramTransportRecoveryManager({
 } = {}) {
   let lastAttemptAt = null;
   let inFlight = null;
+  let activeSnapshotId = null;
+  const failedCandidates = new Set();
 
-  return {
+  const manager = {
+    markHealthy() {
+      lastAttemptAt = null;
+      activeSnapshotId = null;
+      failedCandidates.clear();
+    },
     async maybeRecover({ error, consecutiveErrors = 0 } = {}) {
       if (!isTelegramTransportRecoveryError(error)) {
         return { attempted: false, recovered: false, reason: "not-transport-error" };
@@ -565,12 +608,42 @@ function createTelegramTransportRecoveryManager({
       if (inFlight) return inFlight;
 
       lastAttemptAt = attemptAt;
-      inFlight = recoverTelegramTransport({
-        controller,
-        verifyTelegram: () => telegram.probe(),
-        groupName,
-        maxCandidates,
-      })
+      inFlight = (async () => {
+        const snapshot = await controller.getProxies();
+        const configVersion = typeof controller.getConfigVersion === "function"
+          ? await controller.getConfigVersion()
+          : null;
+        const snapshotId = buildClashProxyGroupSnapshotId(snapshot, groupName, configVersion);
+        if (snapshotId !== activeSnapshotId) {
+          activeSnapshotId = snapshotId;
+          failedCandidates.clear();
+        }
+
+        let result = await recoverTelegramTransport({
+          controller,
+          verifyTelegram: () => telegram.probe(),
+          groupName,
+          maxCandidates,
+          snapshot,
+          excludedCandidates: failedCandidates,
+        });
+        if (!result.recovered && result.attempted.length === 0 && failedCandidates.size > 0) {
+          failedCandidates.clear();
+          result = await recoverTelegramTransport({
+            controller,
+            verifyTelegram: () => telegram.probe(),
+            groupName,
+            maxCandidates,
+            snapshot,
+          });
+        }
+        if (result.recovered) {
+          manager.markHealthy();
+        } else {
+          for (const candidate of result.attempted) failedCandidates.add(candidate);
+        }
+        return result;
+      })()
         .then((result) => {
           if (result.recovered) {
             logger.info?.(
@@ -610,6 +683,20 @@ function createTelegramTransportRecoveryManager({
       return inFlight;
     },
   };
+  return manager;
+}
+
+function reconcileTelegramTransportRecoveryHealth(health) {
+  if (!health || typeof health !== "object") return false;
+  const failedStatuses = new Set(["candidates-exhausted", "recovery-error"]);
+  if (!failedStatuses.has(health.lastTransportRecoveryStatus)) return false;
+  const pollSuccessAt = Number(health.lastPollSuccessAt || 0);
+  const recoveryAttemptAt = Number(health.lastTransportRecoveryAttemptAt || 0);
+  if (!pollSuccessAt || pollSuccessAt <= recoveryAttemptAt) return false;
+  health.lastTransportRecoveryStatus = "polling-recovered-after-external-change";
+  health.lastTransportRecoveryCandidates = [];
+  health.lastTransportRecoveryObservedRecoveryAt = pollSuccessAt;
+  return true;
 }
 
 function resolveCodexBin({
@@ -947,6 +1034,50 @@ function atomicWriteText(filePath, text) {
   const tmpPath = `${filePath}.tmp.${process.pid}`;
   fs.writeFileSync(tmpPath, text);
   fs.renameSync(tmpPath, filePath);
+}
+
+function configureCodexMemoriesFeature({
+  codexHome,
+  enabled = null,
+  logger = () => {},
+} = {}) {
+  if (typeof enabled !== "boolean") {
+    return { configured: false, reason: "not-set" };
+  }
+
+  const configPath = path.join(codexHome, "config.toml");
+  const existing = readTextFile(configPath) || "";
+  const lines = existing ? existing.replace(/\n*$/, "").split(/\r?\n/) : [];
+  const featuresIndex = lines.findIndex((line) => /^\s*\[features]\s*$/.test(line));
+  const valueLine = `memories = ${enabled ? "true" : "false"}`;
+
+  if (featuresIndex === -1) {
+    if (lines.length && lines[lines.length - 1].trim()) lines.push("");
+    lines.push("[features]", valueLine);
+  } else {
+    let tableEnd = lines.length;
+    for (let index = featuresIndex + 1; index < lines.length; index += 1) {
+      if (/^\s*\[[^\]]+]\s*$/.test(lines[index])) {
+        tableEnd = index;
+        break;
+      }
+    }
+    const memoriesIndex = lines.findIndex((line, index) => (
+      index > featuresIndex
+      && index < tableEnd
+      && /^\s*memories\s*=/.test(line)
+    ));
+    if (memoriesIndex === -1) {
+      lines.splice(tableEnd, 0, valueLine);
+    } else {
+      lines[memoriesIndex] = valueLine;
+    }
+  }
+
+  const next = `${lines.join("\n")}\n`;
+  if (next !== existing) atomicWriteText(configPath, next);
+  logger(`Codex memories feature ${enabled ? "enabled" : "disabled"} for isolated runtime home`);
+  return { configured: true, configPath, enabled, changed: next !== existing };
 }
 
 function configureCodexLbProvider({
@@ -3534,6 +3665,8 @@ function syncDesktopCodexContext({
   codexHome,
   desktopCodexHome = path.join(os.homedir(), ".codex"),
   enabled = true,
+  syncMemories = true,
+  syncAgents = true,
   logger = null,
 } = {}) {
   const runtimeHome = normalizeAbsolutePath(codexHome);
@@ -3563,7 +3696,13 @@ function syncDesktopCodexContext({
   }
   ensureDir(runtimeHome);
 
-  const syncDirs = ["memories", "skills", "plugins", "rules", "vendor_imports"];
+  const syncDirs = [
+    ...(syncMemories ? ["memories"] : []),
+    "skills",
+    "plugins",
+    "rules",
+    "vendor_imports",
+  ];
   for (const dirName of syncDirs) {
     const copied = copyDirectoryReplacingDestination(
       path.join(desktopHome, dirName),
@@ -3572,7 +3711,7 @@ function syncDesktopCodexContext({
     if (copied) report.synced.push(dirName);
   }
 
-  if (copyFileIfPresent(path.join(desktopHome, "AGENTS.md"), path.join(runtimeHome, "AGENTS.md"))) {
+  if (syncAgents && copyFileIfPresent(path.join(desktopHome, "AGENTS.md"), path.join(runtimeHome, "AGENTS.md"))) {
     report.synced.push("AGENTS.md");
   }
   if (copyFileIfPresent(
@@ -4185,6 +4324,8 @@ async function main() {
     health.lastPollError = null;
     health.restartRequestedAt = 0;
     health.restartReason = null;
+    reconcileTelegramTransportRecoveryHealth(health);
+    telegramTransportRecovery?.markHealthy();
     store.markDirty();
     store.saveThrottled();
   }
@@ -4326,11 +4467,21 @@ async function main() {
     codexHome,
     desktopCodexHome,
     enabled: parseBooleanEnv(process.env.CODEX_CONTEXT_SYNC, true),
+    syncMemories: parseBooleanEnv(process.env.CODEX_CONTEXT_SYNC_MEMORIES, true),
+    syncAgents: parseBooleanEnv(process.env.CODEX_CONTEXT_SYNC_AGENTS, true),
     logger: (line) => console.log(line),
   });
   if (contextSyncReport.skippedReason) {
     console.log(`Desktop Codex context sync skipped: ${contextSyncReport.skippedReason}`);
   }
+  const memoriesFeatureSetting = String(process.env.CODEX_MEMORIES_ENABLED || "").trim();
+  const memoriesFeatureReport = configureCodexMemoriesFeature({
+    codexHome,
+    enabled: memoriesFeatureSetting
+      ? parseBooleanEnv(memoriesFeatureSetting, false)
+      : null,
+    logger: (line) => console.log(line),
+  });
   const codexBackendMode = String(process.env.CODEX_BACKEND || process.env.CODEX_PROVIDER || "").trim().toLowerCase();
   const codexLbEnabled = codexBackendMode === "codex-lb" || parseBooleanEnv(process.env.CODEX_LB_ENABLED, false);
   const codexLbBaseUrl = process.env.CODEX_LB_CODEX_BASE_URL
@@ -8613,6 +8764,7 @@ module.exports = {
     orderAccountProfilesForFailover,
     normalizeAccountSourcePaths,
     loadCodexAccountProfiles,
+    configureCodexMemoriesFeature,
     configureCodexLbProvider,
     applyCodexBackendSessionBoundary,
     buildAuthRecoveryReplayTask,
@@ -8696,6 +8848,7 @@ module.exports = {
     isTelegramTransportRecoveryError,
     recoverTelegramTransport,
     createTelegramTransportRecoveryManager,
+    reconcileTelegramTransportRecoveryHealth,
     resolveCodexBin,
   },
 };

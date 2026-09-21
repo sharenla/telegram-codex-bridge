@@ -256,3 +256,157 @@ test("event-driven recovery waits for its error threshold and then verifies a sw
   assert.deepEqual(selected, [["Telegram", "Hong Kong 01"]]);
   assert.equal(probeCount, 1);
 });
+
+test("event-driven recovery advances past candidates that already failed in the same outage", async () => {
+  const selected = [];
+  const controller = {
+    async getProxies() {
+      return {
+        proxies: {
+          Telegram: { type: "Selector", now: "Current", all: ["Current", "Node 1", "Node 2", "Node 3", "Node 4"] },
+          Current: { type: "AnyTLS", alive: true, history: [{ delay: 10 }] },
+          "Node 1": { type: "AnyTLS", alive: true, history: [{ delay: 20 }] },
+          "Node 2": { type: "AnyTLS", alive: true, history: [{ delay: 30 }] },
+          "Node 3": { type: "AnyTLS", alive: true, history: [{ delay: 40 }] },
+          "Node 4": { type: "AnyTLS", alive: true, history: [{ delay: 50 }] },
+        },
+      };
+    },
+    async getConfigVersion() {
+      return "profile-v1";
+    },
+    async selectProxy(groupName, proxyName) {
+      selected.push([groupName, proxyName]);
+    },
+  };
+  const manager = _test.createTelegramTransportRecoveryManager({
+    controller,
+    telegram: {
+      async probe() {
+        throw new Error("Telegram TLS probe failed");
+      },
+    },
+    groupName: "Telegram",
+    errorThreshold: 1,
+    maxCandidates: 2,
+    cooldownMs: 0,
+    logger: { info() {}, warn() {} },
+  });
+  const error = new Error("Telegram API getUpdates transport failed: curl: (35) SSL_ERROR_SYSCALL");
+
+  const first = await manager.maybeRecover({ error, consecutiveErrors: 1 });
+  const second = await manager.maybeRecover({ error, consecutiveErrors: 2 });
+
+  assert.deepEqual(first.attemptedCandidates, ["Node 1", "Node 2"]);
+  assert.deepEqual(second.attemptedCandidates, ["Node 3", "Node 4"]);
+  assert.deepEqual(selected, [
+    ["Telegram", "Node 1"],
+    ["Telegram", "Node 2"],
+    ["Telegram", "Current"],
+    ["Telegram", "Node 3"],
+    ["Telegram", "Node 4"],
+    ["Telegram", "Current"],
+  ]);
+});
+
+test("event-driven recovery realigns when the active Clash profile changes", async () => {
+  const selected = [];
+  let profileVersion = "profile-v1";
+  const controller = {
+    async getProxies() {
+      return {
+        proxies: {
+          Telegram: { type: "Selector", now: "Current", all: ["Current", "Node 1", "Node 2"] },
+          Current: { type: "AnyTLS", alive: true, history: [{ delay: 10 }] },
+          "Node 1": { type: "AnyTLS", alive: true, history: [{ delay: 20 }] },
+          "Node 2": { type: "AnyTLS", alive: true, history: [{ delay: 30 }] },
+        },
+      };
+    },
+    async getConfigVersion() {
+      return profileVersion;
+    },
+    async selectProxy(groupName, proxyName) {
+      selected.push([groupName, proxyName]);
+    },
+  };
+  const manager = _test.createTelegramTransportRecoveryManager({
+    controller,
+    telegram: { async probe() { throw new Error("Telegram TLS probe failed"); } },
+    groupName: "Telegram",
+    errorThreshold: 1,
+    maxCandidates: 1,
+    cooldownMs: 0,
+    logger: { info() {}, warn() {} },
+  });
+  const error = new Error("Telegram API getUpdates transport failed: curl: (35) SSL_ERROR_SYSCALL");
+
+  await manager.maybeRecover({ error, consecutiveErrors: 1 });
+  profileVersion = "profile-v2";
+  const afterProfileChange = await manager.maybeRecover({ error, consecutiveErrors: 2 });
+
+  assert.deepEqual(afterProfileChange.attemptedCandidates, ["Node 1"]);
+  assert.deepEqual(selected, [
+    ["Telegram", "Node 1"],
+    ["Telegram", "Current"],
+    ["Telegram", "Node 1"],
+    ["Telegram", "Current"],
+  ]);
+});
+
+test("event-driven recovery forgets the failed range after polling becomes healthy", async () => {
+  const selected = [];
+  const controller = {
+    async getProxies() {
+      return {
+        proxies: {
+          Telegram: { type: "Selector", now: "Current", all: ["Current", "Node 1", "Node 2"] },
+          Current: { type: "AnyTLS", alive: true, history: [{ delay: 10 }] },
+          "Node 1": { type: "AnyTLS", alive: true, history: [{ delay: 20 }] },
+          "Node 2": { type: "AnyTLS", alive: true, history: [{ delay: 30 }] },
+        },
+      };
+    },
+    async selectProxy(groupName, proxyName) {
+      selected.push([groupName, proxyName]);
+    },
+  };
+  const manager = _test.createTelegramTransportRecoveryManager({
+    controller,
+    telegram: { async probe() { throw new Error("Telegram TLS probe failed"); } },
+    groupName: "Telegram",
+    errorThreshold: 1,
+    maxCandidates: 1,
+    cooldownMs: 0,
+    logger: { info() {}, warn() {} },
+  });
+  const error = new Error("Telegram API getUpdates transport failed: curl: (35) SSL_ERROR_SYSCALL");
+
+  await manager.maybeRecover({ error, consecutiveErrors: 1 });
+  manager.markHealthy();
+  const nextOutage = await manager.maybeRecover({ error, consecutiveErrors: 1 });
+
+  assert.deepEqual(nextOutage.attemptedCandidates, ["Node 1"]);
+  assert.deepEqual(selected, [
+    ["Telegram", "Node 1"],
+    ["Telegram", "Current"],
+    ["Telegram", "Node 1"],
+    ["Telegram", "Current"],
+  ]);
+});
+
+test("polling recovery clears stale failed candidates after an external Clash change", () => {
+  const health = {
+    lastPollSuccessAt: 200,
+    lastTransportRecoveryAttemptAt: 100,
+    lastTransportRecoveryStatus: "candidates-exhausted",
+    lastTransportRecoveryCandidates: ["Old Node 1", "Old Node 2"],
+  };
+
+  const changed = _test.reconcileTelegramTransportRecoveryHealth(health);
+
+  assert.equal(changed, true);
+  assert.equal(health.lastTransportRecoveryStatus, "polling-recovered-after-external-change");
+  assert.deepEqual(health.lastTransportRecoveryCandidates, []);
+  assert.equal(health.lastTransportRecoveryObservedRecoveryAt, 200);
+});
