@@ -9,7 +9,7 @@
 
 ## Next Step
 
-执行 **T1.4**：灰度升级默认实例并复验安装哈希、服务存活、启动日志及 DEPLOYED_REF。T1.1–T1.3 已完成。后续顺序 T1.5。
+执行 **T1.5**：按 rv-prediction → strategy-observation 灰度同步两个命名实例，复验四份哈希、角色文件和进程。T1.1–T1.4 已完成。
 
 ## Current Phase
 
