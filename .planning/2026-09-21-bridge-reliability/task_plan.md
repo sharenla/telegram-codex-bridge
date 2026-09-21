@@ -9,11 +9,11 @@
 
 ## Next Step
 
-执行 **T1.5**：按 rv-prediction → strategy-observation 灰度同步两个命名实例，复验四份哈希、角色文件和进程。T1.1–T1.4 已完成。
+Phase 1 已完成；下一步是按计划开启 Phase 2 分支并执行 T2.1。当前尚未开始 Phase 2。
 
 ## Current Phase
 
-Phase 1
+Phase 2
 
 ## Phases
 
@@ -23,7 +23,7 @@ Phase 1
 - [x] T1.2 启动时打印 `index.js` sha256 前 8 位到日志与 `/status`
 - [x] T1.3 让部署认 git ref：脏工作树拒绝安装 + 写 `DEPLOYED_REF`
 - [ ] T1.4 默认实例 W-SVC 升级到工作区版本（行为中性），装完哈希复验
-- [ ] T1.5 两个命名实例同步到同一版本，确认各自 AGENTS.md 未被覆盖
+- [x] T1.5 两个命名实例同步到同一版本，确认各自 AGENTS.md 未被覆盖
 - [x] T1.6 把 `index.js:58-59` 硬编码的真实群 ID 挪出产品代码（不重写历史）
 - **Status:** in_progress
 
@@ -40,7 +40,7 @@ Phase 1
 - [ ] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [ ] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
 - [ ] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 3: 修重启死循环与失联可见
 

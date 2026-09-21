@@ -114,7 +114,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T1.1 提交完整性 | git status / show / stash | 干净、所需文件入库、stash 空 | be579fd，全部满足；脱敏已完成 | complete |
 | T1.3 脏工作树守卫 | isolated installer tests | 被拒绝；允许绕过时写 ref | 104/104 pass，guard/ref tests complete | complete |
 | T1.4 默认实例哈希一致 | shasum / DEPLOYED_REF / launchctl / pgrep / startup log | 相同且启动成功 | 相同；ref 记录 bca12d3；进程与日志正常 | complete |
-| T1.5 三实例哈希一致 | `shasum -a256` 三个 service | 三者相同且等于工作区 | — | pending |
+| T1.5 三实例哈希一致 | shasum 四份 index.js / launchctl / pgrep / role heads / startup logs | 四份相同、进程在跑、角色保留 | 全部满足；sha256 前 12 = 889d4bd36bfc | complete |
 | T1.5 角色文件未被覆盖 | `head -5 <svc>/data/codex-home/AGENTS.md` | 仍为各自专属角色 | — | pending |
 | T2.2 无 curl 孤儿 | 强杀后 `pgrep -fl curl` | 无残留 | — | pending |
 
@@ -134,6 +134,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 |---|---|---|---|---|---|
 | 09-02 15:30 | telegram-codex-bridge-service | 无（从工作树 rsync） | **无对应 commit** | `13fa361a50d0` | 现状基线，待 T1.4 覆盖 |
 | 09-01 13:08 | strategy-observation / rv-prediction | 无（从工作树 rsync） | **无对应 commit** | `52188e37d0ea` | 现状基线，待 T1.5 覆盖 |
+| 2026-09-21 | telegram-codex-bridge-service | main / bca12d3 | `bca12d308d23b6b40eebfd62d32de02231b3a9a8` | `889d4bd36bfc` | T1.4 灰度通过 |
+| 2026-09-21 | rv-prediction | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
+| 2026-09-21 | strategy-observation | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
 
 灰度顺序不得跳步：**rv-prediction → 默认实例 → strategy-observation**。
 每批之间须确认：进程存活、`bridge.stdout.log` 出现 `Telegram Codex Bridge started.`、该实例能正常应答一次。
@@ -159,7 +162,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 1 in_progress；T1.1–T1.4 complete，下一步 T1.5 |
+| Where am I? | Phase 1 complete；T1.1–T1.5 complete，Phase 2 尚未开始 |
 | Where am I going? | Phase 1 → 2 → 3 → 4；Phase 1 在 main 上做，Phase 2–4 各走一个分支 |
 | What's the goal? | 让任何一条被受理的消息在任何故障下都至少收到一条中文状态说明，不再出现零输出 |
 | What have I learned? | 见 `findings.md`：9 条根因 R1–R9；头号问题是重启死循环（08-30 失联 13h44m）与上游 5xx 零重试，**不是**模型满载；工作区是三份代码的严格超集；最高风险是 510 行未提交且无 stash |
@@ -256,3 +259,15 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 - Installed default W-SVC via `npm run install:launch-agent`.
 - Workspace and installed `index.js` SHA-256 match (`889d4bd36bfc...`); `DEPLOYED_REF` records commit `bca12d3...` and ref `v0.1.0-22-gbca12d3`.
 - LaunchAgent, all three bridge processes, startup log, version line, and private migrated bindings verified. No manual service-directory edits.
+
+### T1.5 complete
+
+- Gray deployed rv-prediction first, then strategy-observation through their install scripts.
+- All four `index.js` copies match SHA-256 `889d4bd36bfc743eb2c0d8f28364de84667221764514678809d748378e897cb3`.
+- Both named LaunchAgents are running; startup logs show `codeVersion=889d4bd3`; role files retain their instance-specific first five lines; each private bindings file is mode 600.
+- Deployment refs: default `bca12d3` (installed T1.4), named instances `65a6f34` (installed T1.5). The source hash is identical; the later named ref includes planning-only commits after the default install.
+- No real user message was sent; live response confirmation remains the manual smoke limitation.
+
+### Phase 1 closeout
+
+- T1.1, T1.6, T1.2, T1.3, T1.4, T1.5 complete. No Phase 2 code started.
