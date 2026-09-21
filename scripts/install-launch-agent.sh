@@ -3,6 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${0}")" && pwd)"
 BRIDGE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+if [[ "${BRIDGE_ALLOW_DIRTY:-0}" != "1" ]]; then
+  if [[ -n "$(git -C "${BRIDGE_ROOT}" status --porcelain 2>/dev/null)" ]]; then
+    echo "refusing install: working tree is dirty; commit changes first (or set BRIDGE_ALLOW_DIRTY=1 explicitly)" >&2
+    exit 1
+  fi
+else
+  echo "warning: BRIDGE_ALLOW_DIRTY=1; installing from a dirty working tree" >&2
+fi
+GIT_COMMIT="$(git -C "${BRIDGE_ROOT}" rev-parse HEAD)"
+GIT_REF="$(git -C "${BRIDGE_ROOT}" describe --tags --always 2>/dev/null || printf '%s' "${GIT_COMMIT}")"
 INSTANCE_ID="${1:-${BRIDGE_INSTANCE_ID:-default}}"
 if (( $# > 1 )); then
   echo "usage: ${0:t} [instance-id]" >&2
@@ -145,6 +155,7 @@ NODE
 
 rsync -a --delete \
   --exclude '.git/' \
+  --exclude '.planning/' \
   --exclude 'data/' \
   --exclude '.env' \
   --exclude '.env.*' \
@@ -152,6 +163,7 @@ rsync -a --delete \
   "${BRIDGE_ROOT}/" "${SERVICE_ROOT}/"
 
 mkdir -p "${SERVICE_ROOT}/data/codex-home" "${LAUNCH_LOG_DIR}"
+printf 'commit=%s\nref=%s\n' "${GIT_COMMIT}" "${GIT_REF}" > "${SERVICE_ROOT}/DEPLOYED_REF"
 if [[ -n "${ENV_SOURCE}" ]]; then
   cp "${ENV_SOURCE}" "${SERVICE_ROOT}/.env"
   chmod 600 "${SERVICE_ROOT}/.env"

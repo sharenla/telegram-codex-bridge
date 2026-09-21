@@ -30,6 +30,7 @@ function specialistEnv(homeDir, envFile, roleFile) {
     BRIDGE_ENV_FILE: envFile,
     BRIDGE_ROLE_FILE: roleFile,
     BRIDGE_LAUNCH_AGENT_DRY_RUN: "1",
+    BRIDGE_ALLOW_DIRTY: "1",
   };
 }
 
@@ -84,6 +85,7 @@ test("default LaunchAgent keeps its legacy label and service root", (t) => {
       CODEX_BIN: process.execPath,
       BRIDGE_ENV_FILE: envFile,
       BRIDGE_LAUNCH_AGENT_DRY_RUN: "1",
+      BRIDGE_ALLOW_DIRTY: "1",
     },
     encoding: "utf8",
   });
@@ -93,6 +95,30 @@ test("default LaunchAgent keeps its legacy label and service root", (t) => {
   const plist = fs.readFileSync(plistPath, "utf8");
   assert.match(plist, /Application Support\/telegram-codex-bridge-service\/data\/store\.json/);
   assert.doesNotMatch(plist, /telegram-codex-bridge-default-service/);
+});
+
+test("installer refuses dirty working trees unless explicitly allowed", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "telegram-bridge-dirty-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const envFile = path.join(root, "test.env");
+  fs.writeFileSync(envFile, "TELEGRAM_BOT_TOKEN=123456789:test-token\nTELEGRAM_ALLOWLIST=123\n");
+  const result = spawnSync("/bin/zsh", [installScript, "default"], { env: { ...specialistEnv(root, envFile, ""), BRIDGE_ALLOW_DIRTY: "0" }, encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /working tree is dirty/);
+});
+
+test("installer writes the git ref and excludes planning files", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "telegram-bridge-ref-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const envFile = path.join(root, "test.env");
+  fs.writeFileSync(envFile, "TELEGRAM_BOT_TOKEN=123456789:test-token\nTELEGRAM_ALLOWLIST=123\n");
+  const result = spawnSync("/bin/zsh", [installScript, "default"], { env: { ...specialistEnv(root, envFile, ""), BRIDGE_ALLOW_DIRTY: "1" }, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  const serviceRoot = path.join(root, "Library", "Application Support", "telegram-codex-bridge-service");
+  const deployed = fs.readFileSync(path.join(serviceRoot, "DEPLOYED_REF"), "utf8");
+  assert.match(deployed, /commit=[0-9a-f]{40}/);
+  assert.match(deployed, /ref=/);
+  assert.equal(fs.existsSync(path.join(serviceRoot, ".planning")), false);
 });
 
 test("named LaunchAgent install rejects incomplete credentials and invalid ids", (t) => {
