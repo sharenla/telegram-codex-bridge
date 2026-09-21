@@ -112,7 +112,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 业务代码未被污染 | `git diff --shortstat` | `9 files changed, 510 insertions(+), 27 deletions(-)` | 完全一致 | complete |
 | 供应脚本语法 | `zsh -n scripts/*.sh`（4 个） | 无输出 | 2026-09-21 分别复跑指定四个脚本，均退出 0 | complete |
 | T1.1 提交完整性 | git status / show / stash | 干净、所需文件入库、stash 空 | be579fd，全部满足；脱敏已完成 | complete |
-| T1.3 脏工作树守卫 | 构造临时改动后执行安装 | 被拒绝并提示先提交 | — | pending |
+| T1.3 脏工作树守卫 | isolated installer tests | 被拒绝；允许绕过时写 ref | 104/104 pass，guard/ref tests complete | complete |
 | T1.4 默认实例哈希一致 | `shasum -a256` 工作区 vs W-SVC | 两者相同 | — | pending |
 | T1.5 三实例哈希一致 | `shasum -a256` 三个 service | 三者相同且等于工作区 | — | pending |
 | T1.5 角色文件未被覆盖 | `head -5 <svc>/data/codex-home/AGENTS.md` | 仍为各自专属角色 | — | pending |
@@ -159,7 +159,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 1 in_progress；T1.1、T1.6 complete，下一步 T1.2 |
+| Where am I? | Phase 1 in_progress；T1.1–T1.3 complete，下一步 T1.4 |
 | Where am I going? | Phase 1 → 2 → 3 → 4；Phase 1 在 main 上做，Phase 2–4 各走一个分支 |
 | What's the goal? | 让任何一条被受理的消息在任何故障下都至少收到一条中文状态说明，不再出现零输出 |
 | What have I learned? | 见 `findings.md`：9 条根因 R1–R9；头号问题是重启死循环（08-30 失联 13h44m）与上游 5xx 零重试，**不是**模型满载；工作区是三份代码的严格超集；最高风险是 510 行未提交且无 stash |
@@ -239,3 +239,14 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 - Added startup loading of private `data/chat-project-bindings.json`; installer migrates legacy bindings before rsync and preserves an existing file. External `SOURCE_REGISTRY_PATH` bindings override local values.
 - Added malformed-binding validation, migration tests, and documentation. Tests: 101/101 pass; node and all four zsh syntax checks pass.
 - Real runtime env files were not modified. No real chat IDs remain in product code or tracked test/config/docs content; legacy IDs remain only in ignored `config/instances/*.env` runtime files.
+
+### T1.2 complete
+
+- Commit `1fff4df`: startup and `/status` expose full `index.js` SHA-256 plus 8-character version.
+- Validation: 102/102 tests pass; node and four zsh syntax checks pass.
+
+### T1.3 complete
+
+- Commit `d61cd51`: installer rejects dirty worktrees unless `BRIDGE_ALLOW_DIRTY=1`, writes `DEPLOYED_REF` with commit/ref, and excludes `.planning/` from rsync.
+- Added tests for refusal, ref file, and planning exclusion. Validation: 104/104 tests pass; syntax checks pass.
+- `BRIDGE_ALLOW_DIRTY=1` is used only by isolated dry-run tests; production install will require a clean tree.

@@ -9,7 +9,7 @@
 
 ## Next Step
 
-执行 **T1.2**：启动时输出 index.js sha256 短哈希并加入 /status。T1.1 已完成（be579fd），T1.6 已完成（工作区待提交）。后续顺序 T1.3 → T1.4 → T1.5。
+执行 **T1.4**：灰度升级默认实例并复验安装哈希、服务存活、启动日志及 DEPLOYED_REF。T1.1–T1.3 已完成。后续顺序 T1.5。
 
 ## Current Phase
 
@@ -20,8 +20,8 @@ Phase 1
 ### Phase 1: 基线与版本对齐
 
 - [x] T1.1 提交工作区未提交改动到 main（510 行 / 9 文件 / 3 个未跟踪路径，无 stash）
-- [ ] T1.2 启动时打印 `index.js` sha256 前 8 位到日志与 `/status`
-- [ ] T1.3 让部署认 git ref：脏工作树拒绝安装 + 写 `DEPLOYED_REF`
+- [x] T1.2 启动时打印 `index.js` sha256 前 8 位到日志与 `/status`
+- [x] T1.3 让部署认 git ref：脏工作树拒绝安装 + 写 `DEPLOYED_REF`
 - [ ] T1.4 默认实例 W-SVC 升级到工作区版本（行为中性），装完哈希复验
 - [ ] T1.5 两个命名实例同步到同一版本，确认各自 AGENTS.md 未被覆盖
 - [x] T1.6 把 `index.js:58-59` 硬编码的真实群 ID 挪出产品代码（不重写历史）
