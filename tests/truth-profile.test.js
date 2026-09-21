@@ -531,3 +531,9 @@ test("source registry loads local chat bindings with explicit registry overrides
   fs.writeFileSync(localFile, "[]");
   assert.throws(() => _test.buildSourceRegistry({ bridgeRoot: root }), /Invalid chat project bindings/);
 });
+
+test("index code version is derived from the running source", () => {
+  assert.match(_test.INDEX_CODE_SHA256, /^[0-9a-f]{64}$/);
+  assert.equal(_test.INDEX_CODE_VERSION, _test.INDEX_CODE_SHA256.slice(0, 8));
+  assert.equal(_test.getIndexCodeSha256(), _test.INDEX_CODE_SHA256);
+});

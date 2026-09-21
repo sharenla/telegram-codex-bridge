@@ -11,6 +11,13 @@ const path = require("node:path");
 const readline = require("node:readline");
 const { setTimeout: sleep } = require("node:timers/promises");
 
+function getIndexCodeSha256() {
+  return crypto.createHash("sha256").update(fs.readFileSync(__filename)).digest("hex");
+}
+
+const INDEX_CODE_SHA256 = getIndexCodeSha256();
+const INDEX_CODE_VERSION = INDEX_CODE_SHA256.slice(0, 8);
+
 require("dotenv").config();
 
 const argv = new Set(process.argv.slice(2));
@@ -8445,6 +8452,8 @@ async function main() {
           `autoCompact: ${autoCompact ? "on" : "off"} (soft ${formatPercent(contextThresholds.soft)}, hard ${formatPercent(contextThresholds.hard)}, emergency ${formatPercent(contextThresholds.emergency)})`,
           `telegramPolling: ${buildPollingStatusLine()}`,
           `codexBackend: ${buildCodexBackendStatusLine()}`,
+          `codeVersion: ${INDEX_CODE_VERSION}`,
+          `codeSha256: ${INDEX_CODE_SHA256}`,
           `telegramTransport: ${telegram.transportLabel}`,
           `accountSource: ${meta.accountSourcePath || "(none)"}`,
           `sandbox: ${session.sandboxMode}`,
@@ -8735,7 +8744,7 @@ async function main() {
     }
   }
 
-  console.log("Telegram Codex Bridge started.");
+  console.log(`Telegram Codex Bridge started. codeSha256=${INDEX_CODE_SHA256} codeVersion=${INDEX_CODE_VERSION}`);
   if (allowlist) console.log(`Allowlist enabled (${allowlist.size} chat ids).`);
   console.log(`Store: ${storePath}`);
   console.log(`Source registry: ${sourceRegistry.registryPath || "(builtin)"}`);
@@ -8746,6 +8755,9 @@ async function main() {
 
 module.exports = {
   _test: {
+    INDEX_CODE_SHA256,
+    INDEX_CODE_VERSION,
+    getIndexCodeSha256,
     DEFAULT_CONTEXT_SOFT_RATIO,
     DEFAULT_CONTEXT_HARD_RATIO,
     DEFAULT_CONTEXT_EMERGENCY_RATIO,
