@@ -324,3 +324,13 @@ zsh -n ./scripts/codex-launch-supervisor.sh
 
 **不重写历史**：force push 已被契约禁止；对公开仓库而言也删不掉已被 fork 或 GitHub 缓存的 dangling commit；
 而 chat ID 非凭据，收益远小于风险。是否更换群属运营决定，不在计划范围内。
+
+
+## Phase 1 执行结果（2026-09-21）
+
+- T1.1：脱敏两份实例模板 allowlist 后提交多实例/记忆隔离基线，commit `be579fd`。
+- T1.6：默认 chat→project 绑定从源码移入服务本地 `data/chat-project-bindings.json`；安装脚本先迁移旧绑定再 rsync，既有本地文件不覆盖。源码、跟踪测试和配置不再包含调查中的真实群 ID；不重写公开历史。
+- T1.2：运行时从 `index.js` 自身计算 SHA-256，启动日志与 `/status` 暴露完整哈希及前 8 位。
+- T1.3：安装脚本拒绝脏工作树（显式 `BRIDGE_ALLOW_DIRTY=1` 才绕过），写 `DEPLOYED_REF`，并排除 `.planning/`。
+- T1.4/T1.5：三实例均经安装脚本部署，四份 index.js 哈希一致为 `889d4bd36bfc...`，LaunchAgent 进程存活，命名实例角色文件保留。默认实例在 `bca12d3` 部署，命名实例在 `65a6f34` 部署；两者业务文件哈希相同，差异为后续规划文档提交。
+- Phase 1 tag 为 `v0.1.1`（`8c8e8b3`）；全套最终检查 104/104 通过，四个 zsh 语法检查通过。未进行真实群消息冒烟，因此用户侧实际回复仍是剩余人工验证项。
