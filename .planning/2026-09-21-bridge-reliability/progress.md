@@ -29,7 +29,7 @@
 
 ### Phase 1: 基线与版本对齐
 
-- **Status:** in_progress
+- **Status:** complete
 - **Started:** 2026-09-21
 - Actions taken:
   - T1.1：已完成四份计划阅读；当前分支 main，原业务改动仍为 9 files / +510 / -27；未修改业务代码。
@@ -115,7 +115,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T1.3 脏工作树守卫 | isolated installer tests | 被拒绝；允许绕过时写 ref | 104/104 pass，guard/ref tests complete | complete |
 | T1.4 默认实例哈希一致 | shasum / DEPLOYED_REF / launchctl / pgrep / startup log | 相同且启动成功 | 相同；ref 记录 bca12d3；进程与日志正常 | complete |
 | T1.5 三实例哈希一致 | shasum 四份 index.js / launchctl / pgrep / role heads / startup logs | 四份相同、进程在跑、角色保留 | 全部满足；sha256 前 12 = 889d4bd36bfc | complete |
-| T1.5 角色文件未被覆盖 | `head -5 <svc>/data/codex-home/AGENTS.md` | 仍为各自专属角色 | — | pending |
+| T1.5 角色文件未被覆盖 | head -5 named service AGENTS.md | 仍为各自专属角色 | 两个角色头部保持实例专属内容 | complete |
 | T2.2 无 curl 孤儿 | 强杀后 `pgrep -fl curl` | 无残留 | — | pending |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |

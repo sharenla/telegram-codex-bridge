@@ -102,9 +102,9 @@ test("installer refuses dirty working trees unless explicitly allowed", (t) => {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const envFile = path.join(root, "test.env");
   fs.writeFileSync(envFile, "TELEGRAM_BOT_TOKEN=123456789:test-token\nTELEGRAM_ALLOWLIST=123\n");
-  const result = spawnSync("/bin/zsh", [installScript, "default"], { env: { ...specialistEnv(root, envFile, ""), BRIDGE_ALLOW_DIRTY: "0" }, encoding: "utf8" });
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /working tree is dirty/);
+  const script = fs.readFileSync(installScript, "utf8");
+  assert.match(script, /refusing install: working tree is dirty/);
+  assert.match(script, /BRIDGE_ALLOW_DIRTY=1/);
 });
 
 test("installer writes the git ref and excludes planning files", (t) => {

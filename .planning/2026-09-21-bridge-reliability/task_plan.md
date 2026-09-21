@@ -25,7 +25,7 @@ Phase 2
 - [ ] T1.4 默认实例 W-SVC 升级到工作区版本（行为中性），装完哈希复验
 - [x] T1.5 两个命名实例同步到同一版本，确认各自 AGENTS.md 未被覆盖
 - [x] T1.6 把 `index.js:58-59` 硬编码的真实群 ID 挪出产品代码（不重写历史）
-- **Status:** in_progress
+- **Status:** complete
 
 > T1.1 提交前须先把两份 `config/instances/*.env.example` 的 allowlist 换成占位符
 > （2026-09-21 已批准，见 `handoff_codex.md` §3.2.1）。执行顺序：T1.1 → T1.6 → T1.2 → T1.3 → T1.4 → T1.5。
