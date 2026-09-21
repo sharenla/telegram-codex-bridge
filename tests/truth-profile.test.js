@@ -86,6 +86,7 @@ test("refreshSessionTruthProfile stores a pending bootstrap binding", () => {
 test("Deribit Telegram group pins to trading-deribit source profile", () => {
   const root = path.join(os.tmpdir(), "bridge-deribit-pin");
   const registry = {
+    chatProjectBindings: { "-1001234567890": "trading-deribit" },
     registryPath: null,
     registryError: null,
     loadedAt: "2026-05-15T00:00:00.000Z",
@@ -107,7 +108,7 @@ test("Deribit Telegram group pins to trading-deribit source profile", () => {
     },
   };
 
-  const result = _test.applyDefaultChatProjectBinding(session, registry, "-1003791245514", {
+  const result = _test.applyDefaultChatProjectBinding(session, registry, "-1001234567890", {
     reason: "test",
     bootstrapPending: true,
   });
@@ -122,6 +123,7 @@ test("Deribit Telegram group pins to trading-deribit source profile", () => {
 test("Deribit fund Telegram group pins to trading-deribit source profile", () => {
   const root = path.join(os.tmpdir(), "bridge-deribit-fund-pin");
   const registry = {
+    chatProjectBindings: { "-1001234567891": "trading-deribit" },
     registryPath: null,
     registryError: null,
     loadedAt: "2026-08-26T00:00:00.000Z",
@@ -143,7 +145,7 @@ test("Deribit fund Telegram group pins to trading-deribit source profile", () =>
     },
   };
 
-  const result = _test.applyDefaultChatProjectBinding(session, registry, "-5265653509", {
+  const result = _test.applyDefaultChatProjectBinding(session, registry, "-1001234567891", {
     reason: "test",
     bootstrapPending: true,
   });
@@ -513,4 +515,19 @@ test("isolated Codex home can enable memories after shared config sync", () => {
   assert.equal(second.changed, false);
   assert.match(config, /\[features]\njs_repl = false\n\nmemories = true\n\[desktop]/);
   assert.equal((config.match(/^memories\s*=/gm) || []).length, 1);
+});
+
+test("source registry loads local chat bindings with explicit registry overrides", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-bindings-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "data"));
+  const localFile = path.join(root, "data", "chat-project-bindings.json");
+  fs.writeFileSync(localFile, JSON.stringify({ "-1001234567890": "local", "-1001234567891": "kept" }));
+  const registryPath = path.join(root, "registry.json");
+  fs.writeFileSync(registryPath, JSON.stringify({ chatProjectBindings: { "-1001234567890": "override" } }));
+  const registry = _test.buildSourceRegistry({ bridgeRoot: root, registryPath });
+  assert.deepEqual(registry.chatProjectBindings, { "-1001234567890": "override", "-1001234567891": "kept" });
+  assert.equal(_test.applyDefaultChatProjectBinding({ cwd: root }, registry, "999").changed, false);
+  fs.writeFileSync(localFile, "[]");
+  assert.throws(() => _test.buildSourceRegistry({ bridgeRoot: root }), /Invalid chat project bindings/);
 });

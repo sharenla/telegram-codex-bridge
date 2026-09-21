@@ -84,3 +84,14 @@ zsh scripts/install-launch-agent.sh my-instance
 ```
 
 The id must match `^[a-z0-9][a-z0-9-]*$`. Re-running the command updates only that instance. If an already-installed named instance has a saved `.env` and role file, the installer can update its runtime copy without replacing those private files.
+
+### Per-chat project bindings
+
+Chat identifiers belong in private runtime configuration, not product source. The
+installer preserves old hardcoded pins in each service's
+`data/chat-project-bindings.json` before replacing its code. This file is excluded
+from deployment sync and retains mode 0600 on creation. Existing files are preserved.
+For new bindings, a private registry selected through `SOURCE_REGISTRY_PATH` may
+supply a `chatProjectBindings` object mapping chat IDs to project profile IDs; it
+overrides the local migration file. The bundled registry has no real chat IDs.
+Malformed local bindings fail startup instead of silently dropping the pins.

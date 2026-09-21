@@ -133,3 +133,24 @@ test("named LaunchAgent uninstall resolves the matching label without deleting s
   assert.match(result.stdout, /com\.sharenla\.telegram-codex-bridge\.rv-prediction/);
   assert.match(result.stdout, /telegram-codex-bridge-rv-prediction-service\/data/);
 });
+
+test("installer migrates legacy chat pins without overwriting local configuration", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-pin-migration-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const serviceRoot = path.join(root, "service");
+  fs.mkdirSync(serviceRoot);
+  fs.writeFileSync(path.join(serviceRoot, "index.js"), 'const DEFAULT_CHAT_PROJECT_PROFILE_IDS = new Map([\n ["-1001234567890", "trading-deribit"],\n]);\n');
+  const envFile = path.join(root, "test.env");
+  fs.writeFileSync(envFile, "TELEGRAM_BOT_TOKEN=123456789:test-token\nTELEGRAM_ALLOWLIST=123456789\n");
+  const env = { ...specialistEnv(root, envFile, ""), BRIDGE_SERVICE_ROOT: serviceRoot };
+  const first = spawnSync("/bin/zsh", [installScript, "default"], { env, encoding: "utf8" });
+  assert.equal(first.status, 0, first.stderr);
+  const file = path.join(serviceRoot, "data", "chat-project-bindings.json");
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)), { "-1001234567890": "trading-deribit" });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.doesNotMatch(first.stdout + first.stderr, /-1001234567890/);
+  fs.writeFileSync(file, '{"-1001234567890":"custom"}');
+  const second = spawnSync("/bin/zsh", [installScript, "default"], { env, encoding: "utf8" });
+  assert.equal(second.status, 0, second.stderr);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)), { "-1001234567890": "custom" });
+});

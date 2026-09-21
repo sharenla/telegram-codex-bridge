@@ -54,10 +54,6 @@ const COMPACTION_SUMMARY_FORMAT = "five-section-markdown";
 const COMPACTION_SUMMARY_VERSION = 1;
 const SOURCE_TRUTH_BOOTSTRAP_VERSION = 1;
 const DEFAULT_BRIDGE_LAUNCH_AGENT = "com.sharenla.telegram-codex-bridge";
-const DEFAULT_CHAT_PROJECT_PROFILE_IDS = new Map([
-  ["-1003791245514", "trading-deribit"],
-  ["-5265653509", "trading-deribit"],
-]);
 const DERIBIT_STRATEGY_PROFILE_IDS = new Set([
   "trading-deribit",
   "openclaw-deribit-stage6",
@@ -2536,7 +2532,8 @@ function findSourceProfileById(registry, profileId) {
 }
 
 function resolveDefaultChatProjectProfile(registry, chatId) {
-  const profileId = DEFAULT_CHAT_PROJECT_PROFILE_IDS.get(String(chatId));
+  const profileId = Object.hasOwn(registry?.chatProjectBindings || {}, String(chatId))
+    ? registry.chatProjectBindings[String(chatId)] : null;
   return profileId ? findSourceProfileById(registry, profileId) : null;
 }
 
@@ -3359,7 +3356,7 @@ function loadSourceRegistryFromPath(registryPath) {
   const profiles = rawProfiles
     .map((profile, index) => normalizeSourceProfile(profile, `external-${index + 1}`))
     .filter(Boolean);
-  return { registryPath: resolvedPath, profiles, error: null };
+  return { registryPath: resolvedPath, profiles, chatProjectBindings: parsed.chatProjectBindings || {}, error: null };
 }
 
 function buildSourceRegistry({
@@ -3372,6 +3369,15 @@ function buildSourceRegistry({
   loadedAt = nowIso(),
 } = {}) {
   const external = loadSourceRegistryFromPath(registryPath);
+  const bindingsPath = path.join(serviceRoot || bridgeRoot, "data", "chat-project-bindings.json");
+  const localBindings = fs.existsSync(bindingsPath)
+    ? JSON.parse(fs.readFileSync(bindingsPath, "utf8")) : {};
+  for (const bindings of [localBindings, external.chatProjectBindings || {}]) {
+    if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)
+      || Object.entries(bindings).some(([id, profile]) => !/^-?\d+$/.test(id) || typeof profile !== "string" || !profile.trim())) {
+      throw new Error("Invalid chat project bindings configuration (values withheld)");
+    }
+  }
   const builtins = buildBuiltinSourceProfiles({
     codexHome,
     desktopCodexHome,
@@ -3387,6 +3393,7 @@ function buildSourceRegistry({
     version: 1,
     registryPath: external.registryPath,
     registryError: external.error,
+    chatProjectBindings: { ...localBindings, ...external.chatProjectBindings },
     loadedAt,
     bridgeRoot: normalizeAbsolutePath(bridgeRoot),
     codexHome: normalizeAbsolutePath(codexHome || ""),

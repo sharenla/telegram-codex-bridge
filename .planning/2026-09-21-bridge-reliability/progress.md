@@ -111,7 +111,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 单测（基线） | `node --test ./tests/*.test.js` | 全通过 | **tests 99 / pass 99 / fail 0**（362ms） | complete |
 | 业务代码未被污染 | `git diff --shortstat` | `9 files changed, 510 insertions(+), 27 deletions(-)` | 完全一致 | complete |
 | 供应脚本语法 | `zsh -n scripts/*.sh`（4 个） | 无输出 | 2026-09-21 分别复跑指定四个脚本，均退出 0 | complete |
-| T1.1 提交完整性 | `git status --porcelain` | 为空 | 已暂存但未提交；提交前聊天 ID 扫描阻塞，HEAD 仍 884811e | pending |
+| T1.1 提交完整性 | git status / show / stash | 干净、所需文件入库、stash 空 | be579fd，全部满足；脱敏已完成 | complete |
 | T1.3 脏工作树守卫 | 构造临时改动后执行安装 | 被拒绝并提示先提交 | — | pending |
 | T1.4 默认实例哈希一致 | `shasum -a256` 工作区 vs W-SVC | 两者相同 | — | pending |
 | T1.5 三实例哈希一致 | `shasum -a256` 三个 service | 三者相同且等于工作区 | — | pending |
@@ -119,6 +119,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.2 无 curl 孤儿 | 强杀后 `pgrep -fl curl` | 无残留 | — | pending |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
+| T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
 
 > 基线规则：改动后测试**总数只应增加**，`pass` 必须等于 `tests`，`fail` 必须为 0。
 
@@ -158,11 +159,11 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 1 in_progress；T1.1 提交前脱敏阻塞 |
+| Where am I? | Phase 1 in_progress；T1.1、T1.6 complete，下一步 T1.2 |
 | Where am I going? | Phase 1 → 2 → 3 → 4；Phase 1 在 main 上做，Phase 2–4 各走一个分支 |
 | What's the goal? | 让任何一条被受理的消息在任何故障下都至少收到一条中文状态说明，不再出现零输出 |
 | What have I learned? | 见 `findings.md`：9 条根因 R1–R9；头号问题是重启死循环（08-30 失联 13h44m）与上游 5xx 零重试，**不是**模型满载；工作区是三份代码的严格超集；最高风险是 510 行未提交且无 stash |
-| What have I done? | 完成调查与规划及 T1.1 提交前检查；99/99 与指定语法检查通过，已暂存但未提交。**未改动任何业务代码，未部署** |
+| What have I done? | 完成调查与规划、T1.1 提交、T1.6 绑定迁移；101/101 与指定语法检查通过。T1.2–T1.5 未开始，未部署 |
 
 ---
 
@@ -224,3 +225,17 @@ M  tests/truth-profile.test.js
 9bb7564 Harden bridge routing and turn privacy
 cb6c0b2 Auto-run Deribit strategy approval gates
 ```
+
+### T1.1 complete
+
+- 完成提交 `be579fd662d65359f0cd3813726a2b9839fe0d69`（main）。提交后 `git status --porcelain` 为空，`git stash list` 仍为空；git show --stat 含两个角色文件、MULTI-INSTANCE 文档与多实例测试。
+- 指定检查再次全部通过：99/99，fail 0；node 语法与四个 zsh 脚本语法通过。
+- 修改：两份实例 env.example（allowlist 占位符）、planning 三文件（记录与新添记录的标识脱敏）；未修改测试夹具或业务代码。
+- 原始 index.js 中已公开的默认绑定按契约留到下一任务 T1.6 处理。
+
+### T1.6 complete
+
+- Removed hardcoded default chat bindings from `index.js`.
+- Added startup loading of private `data/chat-project-bindings.json`; installer migrates legacy bindings before rsync and preserves an existing file. External `SOURCE_REGISTRY_PATH` bindings override local values.
+- Added malformed-binding validation, migration tests, and documentation. Tests: 101/101 pass; node and all four zsh syntax checks pass.
+- Real runtime env files were not modified. No real chat IDs remain in product code or tracked test/config/docs content; legacy IDs remain only in ignored `config/instances/*.env` runtime files.

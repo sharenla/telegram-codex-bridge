@@ -119,6 +119,30 @@ if [[ -z "${CODEX_BIN}" || ! -x "${CODEX_BIN}" ]]; then
   exit 1
 fi
 
+# Preserve legacy per-chat project pins before replacing installed code.
+# Parse data only; never execute the old service or print chat identifiers.
+"${NODE_BIN}" - "${SERVICE_ROOT}" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.argv[2];
+const target = path.join(root, "data", "chat-project-bindings.json");
+const oldCode = path.join(root, "index.js");
+if (!fs.existsSync(target) && fs.existsSync(oldCode)) {
+  const text = fs.readFileSync(oldCode, "utf8");
+  const block = text.match(/const DEFAULT_CHAT_PROJECT_PROFILE_IDS = new Map\(\[([\s\S]*?)\]\);/);
+  if (block) {
+    const entries = JSON.parse(`[${block[1].replace(/,\s*$/, "")}]`);
+    if (!entries.every(row => Array.isArray(row) && row.length === 2
+      && /^-?\d+$/.test(row[0]) && typeof row[1] === "string" && row[1].trim())) {
+      throw new Error("Cannot migrate legacy chat project bindings (values withheld)");
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, JSON.stringify(Object.fromEntries(entries), null, 2) + "\n", { mode: 0o600, flag: "wx" });
+    console.log("Preserved legacy chat project bindings in local service data.");
+  }
+}
+NODE
+
 rsync -a --delete \
   --exclude '.git/' \
   --exclude 'data/' \
