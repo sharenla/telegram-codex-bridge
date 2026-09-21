@@ -4214,6 +4214,10 @@ async function discoverChatIds(telegram) {
 
 async function main() {
   const processStartedAt = Date.now();
+  const deployedRefPath = path.join(__dirname, "DEPLOYED_REF");
+  if (fs.existsSync(deployedRefPath)) {
+    console.log(`Deployed ref: ${fs.readFileSync(deployedRefPath, "utf8").trim().replace(/\n/g, " ")}`);
+  }
   const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   if (!BOT_TOKEN) {
     console.error("Missing TELEGRAM_BOT_TOKEN");

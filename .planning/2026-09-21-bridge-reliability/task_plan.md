@@ -9,11 +9,11 @@
 
 ## Next Step
 
-Phase 1 已完成；下一步是按计划开启 Phase 2 分支并执行 T2.1。当前尚未开始 Phase 2。
+补齐 Phase 1 线上验收：三个实例各正常应答一次，并核对 /status 的 codeVersion、truthProfile。T1.4/T1.5 已部署，但真实应答验证尚缺；不得开始 Phase 2。T1.3 启动日志打印 DEPLOYED_REF 已补实现，尚待部署验证。
 
 ## Current Phase
 
-Phase 2
+Phase 1
 
 ## Phases
 
@@ -21,11 +21,11 @@ Phase 2
 
 - [x] T1.1 提交工作区未提交改动到 main（510 行 / 9 文件 / 3 个未跟踪路径，无 stash）
 - [x] T1.2 启动时打印 `index.js` sha256 前 8 位到日志与 `/status`
-- [x] T1.3 让部署认 git ref：脏工作树拒绝安装 + 写 `DEPLOYED_REF`
+- [ ] T1.3 让部署认 git ref：脏工作树拒绝安装 + 写 `DEPLOYED_REF`
 - [ ] T1.4 默认实例 W-SVC 升级到工作区版本（行为中性），装完哈希复验
-- [x] T1.5 两个命名实例同步到同一版本，确认各自 AGENTS.md 未被覆盖
-- [x] T1.6 把 `index.js:58-59` 硬编码的真实群 ID 挪出产品代码（不重写历史）
-- **Status:** complete
+- [ ] T1.5 两个命名实例同步到同一版本，确认各自 AGENTS.md 未被覆盖
+- [ ] T1.6 把 `index.js:58-59` 硬编码的真实群 ID 挪出产品代码（不重写历史）
+- **Status:** in_progress
 
 > T1.1 提交前须先把两份 `config/instances/*.env.example` 的 allowlist 换成占位符
 > （2026-09-21 已批准，见 `handoff_codex.md` §3.2.1）。执行顺序：T1.1 → T1.6 → T1.2 → T1.3 → T1.4 → T1.5。
@@ -40,7 +40,7 @@ Phase 2
 - [ ] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [ ] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
 - [ ] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动
-- **Status:** complete
+- **Status:** pending
 
 ### Phase 3: 修重启死循环与失联可见
 

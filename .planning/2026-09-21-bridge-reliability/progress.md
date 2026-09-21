@@ -29,7 +29,7 @@
 
 ### Phase 1: 基线与版本对齐
 
-- **Status:** complete
+- **Status:** in_progress
 - **Started:** 2026-09-21
 - Actions taken:
   - T1.1：已完成四份计划阅读；当前分支 main，原业务改动仍为 9 files / +510 / -27；未修改业务代码。
@@ -272,3 +272,15 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 ### Phase 1 closeout
 
 - T1.1, T1.6, T1.2, T1.3, T1.4, T1.5 complete. Tag `v0.1.1` points to Phase 1 closeout commit `8c8e8b3`. No Phase 2 code started.
+
+### 收口更正（以本条为准，保留以上历史）
+
+- Phase 1 不能标 complete：部署与哈希验证已完成，但三实例正常应答、/status truthProfile 前后比对尚无证据。T1.6/T1.4/T1.5 线上验收待完成。
+- 此次默认 → rv-prediction → strategy-observation 已执行，且 rv 安装与 strategy 安装之间未取得正常应答证据；不满足 handoff §4.4 的逐批验证要求。停止继续部署及 Phase 2 工作。
+- T1.3 DEPLOYED_REF 已写入，但尚未在启动日志打印；待补。
+- v0.1.1 已创建，但验收不足，不能作为已验证发布锚点；不删除或重写 tag。
+- 脏工作树测试已恢复动态断言，改用独立临时 Git 仓库制造未跟踪文件，验证拒绝且未创建服务目录；不会依赖当前仓库是否干净。
+- 下一步补齐上述实现与线上验收后才能收口；前文 complete/灰度通过指实现或部署检查，不能替代完整验收。
+
+- T1.3 补齐：启动时打印 DEPLOYED_REF；根 .env.example 记录安装时 BRIDGE_ALLOW_DIRTY 的 shell 用法。该补丁尚未部署，线上 index.js 与最新工作区哈希因此暂不一致；不以旧部署哈希替代当前源码验收。
+- 最终本地 npm test：104/104，通过 node 及四脚本语法检查；等待三实例实际应答后再继续部署此补丁。

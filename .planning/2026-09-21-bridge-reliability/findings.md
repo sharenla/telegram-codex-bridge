@@ -334,3 +334,7 @@ zsh -n ./scripts/codex-launch-supervisor.sh
 - T1.3：安装脚本拒绝脏工作树（显式 `BRIDGE_ALLOW_DIRTY=1` 才绕过），写 `DEPLOYED_REF`，并排除 `.planning/`。
 - T1.4/T1.5：三实例均经安装脚本部署，四份 index.js 哈希一致为 `889d4bd36bfc...`，LaunchAgent 进程存活，命名实例角色文件保留。默认实例在 `bca12d3` 部署，命名实例在 `65a6f34` 部署；两者业务文件哈希相同，差异为后续规划文档提交。
 - Phase 1 tag 为 `v0.1.1`（`8c8e8b3`）；全套最终检查 104/104 通过，四个 zsh 语法检查通过。未进行真实群消息冒烟，因此用户侧实际回复仍是剩余人工验证项。
+
+### 收口更正
+
+Phase 1 仍 in_progress，Phase 2 pending。已部署三实例且哈希一致，但未取得逐实例实际应答及 /status 绑定比对证据，前述 complete/灰度通过表述过早；v0.1.1 不能视为完整验收发布。详见 progress.md 收口更正。
