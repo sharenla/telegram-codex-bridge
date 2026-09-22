@@ -312,3 +312,33 @@ test("truncateMiddle keeps UTF-8 byte length below Telegram-safe limit", () => {
 test("shouldRetryTelegramMethod still retries getUpdates", () => {
   assert.equal(_test.shouldRetryTelegramMethod("getUpdates"), true);
 });
+
+test("Telegram retries structured 429 without shortening retry_after", async () => {
+  const delays = [];
+  const telegram = new _test.TelegramApi("fake", { sleepFn: async (ms) => delays.push(ms) });
+  let attempts = 0;
+  telegram.callOnce = async () => {
+    if (++attempts === 1) {
+      const error = new Error("rate limited");
+      error.body = { error_code: 429, parameters: { retry_after: 180 } };
+      throw error;
+    }
+    return { message_id: 1 };
+  };
+  assert.deepEqual(await telegram.sendMessage({ chat_id: 1, text: "test" }), { message_id: 1 });
+  assert.deepEqual(delays, [180000]);
+  assert.equal(attempts, 2);
+  assert.equal(_test.getTelegramRetryDelayMs({ body: { parameters: { retry_after: null } } }, 2), 1000);
+});
+
+test("Telegram permanent failures do not retry and transient retries are bounded", async () => {
+  const telegram = new _test.TelegramApi("fake", { sleepFn: async () => {} });
+  let attempts = 0;
+  telegram.callOnce = async () => { attempts++; throw new Error("Bad Request"); };
+  await assert.rejects(telegram.sendMessage({ chat_id: 1, text: "test" }), /Bad Request/);
+  assert.equal(attempts, 1);
+  attempts = 0;
+  telegram.callOnce = async () => { attempts++; throw new Error("transport failed"); };
+  await assert.rejects(telegram.sendMessage({ chat_id: 1, text: "test" }), /transport failed/);
+  assert.equal(attempts, 4);
+});

@@ -338,3 +338,9 @@ zsh -n ./scripts/codex-launch-supervisor.sh
 ### 收口更正
 
 Phase 1 仍 in_progress，Phase 2 pending。已部署三实例且哈希一致，但未取得逐实例实际应答及 /status 绑定比对证据，前述 complete/灰度通过表述过早；v0.1.1 不能视为完整验收发布。详见 progress.md 收口更正。
+
+
+### Phase 2 执行追加发现（2026-09-22）
+
+- T2.1 已实现 sendMessage transient/429 重试；108/108 测试通过，尚未部署。
+- T2.3 原规格存在恢复语义矛盾：仅先写递增 offset 不保存 update 内容，崩溃后从新 offset 继续会跳过未完成项，不能推出“最多重复一次”。当前 handler 为异步 fire-and-forget，单纯 SIGTERM flush 也不足以解决。建议先明确持久化入站 inbox 及重放/完成边界，再联动执行 T2.2/T2.3；已按契约停止扩大实现范围。

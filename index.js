@@ -221,13 +221,15 @@ function isTelegramTransientError(error) {
     || message.includes("timed out")
     || message.includes("Connect Timeout")
     || /(?:^|\D)429(?:\D|$)/.test(message)
-    || /Too Many Requests/i.test(message);
+    || /Too Many Requests/i.test(message)
+    || Number(error?.body?.error_code) === 429;
 }
 
 function getTelegramRetryDelayMs(error, attempt) {
-  const retryAfter = Number(error?.body?.parameters?.retry_after);
+  const raw = error?.body?.parameters?.retry_after;
+  const retryAfter = typeof raw === "number" ? raw : NaN;
   if (Number.isFinite(retryAfter) && retryAfter >= 0) {
-    return Math.min(Math.max(retryAfter * 1000, 0), 120000);
+    return retryAfter * 1000;
   }
   return 500 * attempt;
 }
@@ -1848,7 +1850,7 @@ class Store {
 }
 
 class TelegramApi {
-  constructor(token, { proxyUrl = null, proxySource = null } = {}) {
+  constructor(token, { proxyUrl = null, proxySource = null, sleepFn = sleep } = {}) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
     this.proxyUrl = proxyUrl || null;
     this.proxySource = proxySource || null;
@@ -1856,6 +1858,7 @@ class TelegramApi {
       ? `proxy ${maskProxyUrl(this.proxyUrl)}`
       : "direct";
     this.writeQueue = Promise.resolve();
+    this.sleep = sleepFn;
   }
 
   async call(method, params, { serialize = false } = {}) {
@@ -1881,7 +1884,9 @@ class TelegramApi {
         if (!isTransient || !retryableMethod || attempt === 4) throw error;
         const delayMs = getTelegramRetryDelayMs(error, attempt);
         console.warn(`Telegram API ${method} retry ${attempt}/4 after transient error: ${message}`);
-        await sleep(delayMs);
+        for (let remaining = delayMs; remaining > 0; remaining -= 2147483647) {
+          await this.sleep(Math.min(remaining, 2147483647));
+        }
       }
     }
     throw lastError || new Error(`Telegram API ${method} failed`);

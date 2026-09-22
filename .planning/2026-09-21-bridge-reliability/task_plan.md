@@ -9,7 +9,7 @@
 
 ## Next Step
 
-继续 Phase 2 分支 `feat/phase-2-no-silent-failure`，执行 T2.2（SIGTERM 优雅关闭：强制落盘、终止在飞 curl、停止 app-server）。T2.1 已完成。
+T2.1 已完成；Phase 2 分支 `feat/phase-2-no-silent-failure` 停在 T2.2/T2.3 联动修改前。T2.3 仅提前持久化递增 offset 无法恢复未处理消息，待确认加入持久化入站 inbox 的最小规格修正；见 progress.md Error Log。
 
 ## Current Phase
 

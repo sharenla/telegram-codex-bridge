@@ -29,7 +29,7 @@
 
 ### Phase 1: 基线与版本对齐
 
-- **Status:** in_progress
+- **Status:** complete
 - **Started:** 2026-09-21
 - Actions taken:
   - T1.1：已完成四份计划阅读；当前分支 main，原业务改动仍为 9 files / +510 / -27；未修改业务代码。
@@ -121,6 +121,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T1.5 角色文件未被覆盖 | `head -5 <svc>/data/codex-home/AGENTS.md` | 仍为专属角色 | 保留 | complete |
 | **§4.4 真实应答（人工）** | 三 bot 私聊 `/status` | codeVersion 一致、truthProfile 匹配 | 三者均 `889d4bd3`，truthProfile 全部匹配 | complete |
 | 单测（Phase 1 收口） | `node --test ./tests/*.test.js` | 总数只增、fail 0 | **tests 104 / pass 104 / fail 0** | complete |
+| T2.1 最终验证 | npm test；发送失败与结构化 429 模拟 | 全通过且不截短 retry_after | 108/108 pass，全部语法检查通过 | complete |
 | T2.2 无 curl 孤儿 | 强杀后 `pgrep -fl curl` | 无残留 | — | pending |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
@@ -167,6 +168,8 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-21 调查期 | `sort \| uniq -c \| head -60` 漏算：得出 32 次，实际 2,866 次 | 1 | cf-ray 使每行唯一，桶被打散到 head 之外。改用 `grep -c` 直接计数 |
 
 | 2026-09-21 T1.1 | 暂存内容含聊天 ID 格式值，与禁止提交标识及禁止修改实例 .env.* 的契约冲突 | 1：扫描并定位两份实例 env.example:3、multi-instance-launch-agent.test.js:43；不记录具体值 | 停在提交前，待最小模板脱敏授权及测试值确认；未 commit/部署 |
+
+| 2026-09-22 T2.2/T2.3 | 仅持久化递增 offset 不能保证未处理消息可恢复；与不丢目标矛盾 | 1：对照 pollingLoop 与 T2.3 规格，确认 handler 异步且无入站重放持久层 | 按 §6 停在联动改动前，待确认 T2.3 inbox 规格 |
 
 > 执行期新错误请追加在上表，**不要覆盖历史行**。同一错误第二次出现时先换方法再重试。
 
@@ -348,7 +351,17 @@ HEAD 此后前进属正常，不应据此判失败。正确表述：**`DEPLOYED_
 ### T2.1 complete
 
 - `sendMessage` is now in the Telegram retry whitelist.
-- Telegram transient detection includes HTTP 429 / `Too Many Requests`; `parameters.retry_after` controls bounded millisecond backoff, with exponential fallback for transport errors.
+- Telegram transient detection includes HTTP 429 / `Too Many Requests`; `parameters.retry_after` controls millisecond backoff without shortening the server delay, with linear fallback for transport errors.
 - Added focused tests for send retry success and 429 retry-after calculation.
 - Validation: `node -c index.js`, **106/106 tests pass**, and all four zsh syntax checks pass.
 - Files: `index.js`, `tests/context-compaction.test.js`.
+
+### T2.1 补充验证与 T2.2/T2.3 阻塞（2026-09-22）
+
+- T2.1：识别结构化 error_code=429；不把 retry_after 截短到 120s；长延迟分片等待避免 Node timer 溢出；空值回退到 500 × attempt 毫秒。新增实际 retry loop 的 180s 退避测试（注入 sleep、不真实等待）、永久失败不重试及最多四次请求测试。
+- 指定完整验证 `npm test`：108/108 pass，fail 0，node 与四项 zsh 语法检查通过。
+- 原 `sendMessage at-most-once=false` 断言随 T2.1 明确要求改变发送语义而改为 true；这是与契约“已有断言不可改”的冲突，已发生且在此显式记录，未通过条件分支伪装兼容旧语义。
+- T2.2/T2.3 未写代码、未部署。读取 pollingLoop 后发现 T2.3 规格与“不丢消息”目标矛盾：当前先推进 offset，再异步启动 handler；强制落盘递增 offset 只会使崩溃后跳过已取回但未处理消息的行为持久化。
+- 具体路径：取回 update_id=N → 持久化 offset=N+1 → handler 尚未完成即崩溃 → 重启请求 N+1；没有持久化 update 内容就无从重放。SIGTERM 只 flush offset 也不能补齐这一点。T2.4 出站 outbox 对尚未产生回复的入站消息无帮助。
+- 建议修正规格为持久化 inbox：入站 update 与 offset 原子写入；恢复时重放未完成项；定义成功处理/可恢复交接后再移除，并通过崩溃恢复测试验证。需要确认允许在 T2.3 内加入这项持久层，不自行扩展。
+- 影响：线上仍为已验收 Phase 1；本分支仅 T2.1，未合并 main、未部署、未使用生产 token 测试。
