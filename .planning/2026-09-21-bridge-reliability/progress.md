@@ -124,6 +124,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 单测（Phase 1 收口） | `node --test ./tests/*.test.js` | 总数只增、fail 0 | **tests 104 / pass 104 / fail 0** | complete |
 | T2.1 最终验证 | npm test；发送失败与结构化 429 模拟 | 全通过且不截短 retry_after | 108/108 pass，全部语法检查通过 | complete |
 | T2.2 SIGTERM + T2.3 inbox | isolated child/process tests + rv-prediction smoke | store flush、子进程终止、重放护栏 | 116/116 pass；rv 首批 kill/restart 通过 | complete |
+| T2.3a deployment | rv → default → strategy install; hash/log/process checks | no replay startup blockage | all 3 running, hash f3226f55, startup logs present | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -146,6 +147,8 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-21 | strategy-observation | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
 | 2026-09-21 | Phase 1 tag | `v0.1.1` | `8c8e8b3` | `889d4bd36bfc` | Phase 1 closeout tag |
 | — | （尚未部署） | HEAD `952675e` | `952675e` | `fff69755` | 含 T1.3 日志增补，随 Phase 2 首次部署上线 |
+
+| 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -450,3 +453,11 @@ T2.2 与 T2.3 须在同一个 commit 落地，分开会留下比现状更糟的�
 - 对旧 bridge PID 发送 SIGTERM；supervisor 记录 stop/start 并拉起新 PID，新的启动日志完整出现。旧 rv bridge 的 curl 未残留；观测到的 curl 为三个当前实例各自新的长轮询子进程。
 - 这批 smoke 通过。日志同时有既存 Codex 上游 401 refresh/auth 错误和 Telegram proxy SSL 重试，属于上游/环境现象，不归因 T2.3a，未改范围。
 - T2.3a 已可标记 complete；其他实例尚未部署本分支。
+
+
+### T2.3a Phase 2 first deployment closeout
+
+- Default and strategy-observation deployed after rv smoke; all three installed copies match workspace SHA-256 `f3226f5555d4...`.
+- All three LaunchAgents are running; logs show `Telegram Codex Bridge started`, `codeVersion=f3226f55`, and deployed refs. Named role files remain instance-specific.
+- Current runtime curl list contains one active long-poll child per bot; no stale duplicate from the rv restart was observed.
+- Phase 2 first deployment is complete for T2.2/T2.3/T2.3a. Next task is T2.4 outbox; no T2.4 code has started.

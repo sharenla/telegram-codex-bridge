@@ -9,7 +9,7 @@
 
 ## Next Step
 
-T2.3a 本地修复与回归验证及 rv-prediction 首批 kill/restart smoke 已通过（117/117）。继续默认实例 → strategy-observation 灰度；每批确认启动日志、进程与真实应答后，Phase 2 首次部署收口，再执行 T2.4。
+执行 **T2.4**：持久化出站 outbox，重启后补发失败回复；T2.2/T2.3/T2.3a 已完成并完成首批部署 smoke。
 
 ## Current Phase
 

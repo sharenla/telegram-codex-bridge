@@ -357,3 +357,7 @@ The corrected inbox contract is implemented in the same change as graceful shutd
 ### T2.3a 部署 smoke 追加
 
 rv-prediction 首批部署与 SIGTERM/restart smoke 通过；新 PID 启动日志含 Deployed ref/codeVersion/started，inbox 为空。现有 Codex auth 401 与 Telegram proxy SSL 重试仅作残留风险记录，不属于本任务修复。
+
+### Phase 2 first deployment finding
+
+T2.3a 首批灰度按 rv-prediction → default → strategy-observation 完成，四份 index.js 哈希一致为 f3226f55 前缀；rv 经过 SIGTERM/restart smoke，三实例启动日志与进程正常。现有上游 401/代理 SSL 现象保持为残留风险。
