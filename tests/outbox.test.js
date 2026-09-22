@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { _test: { Store, TelegramInbox, TelegramOutbox, TelegramApi } } = require('../index');
+const { _test: { Store, TelegramInbox, TelegramOutbox, TelegramApi, getOutboxStatus } } = require('../index');
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-outbox-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -87,4 +87,54 @@ test('killed process pending outbox automatically replays on a fresh process sta
   `], { stdio: 'ignore' });
   assert.equal((await once(recovery, 'exit'))[0], 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(store.storePath)).telegram.outbox, []);
+});
+
+test('outbox overflow keeps notices and drops oldest normal entries', t => {
+  const store = fixture(t); const logs = [];
+  const outbox = new TelegramOutbox(store, { logger: event => logs.push(event) });
+  for (let i = 0; i < 500; i++) outbox.enqueue({ chat_id: 1, text: `normal-${i}` });
+  outbox.enqueue({ chat_id: 1, text: 'notice' }, { priority: 'notice' });
+  outbox.enqueue({ chat_id: 1, text: 'new-normal' });
+  assert.equal(store.data.telegram.outbox.length, 500);
+  assert.equal(store.data.telegram.outbox.some(item => item.params.text === 'notice'), true);
+  assert.equal(store.data.telegram.outbox.some(item => item.params.text === 'normal-0'), false);
+  assert.equal(store.data.telegram.outboxStats.discardedTotal, 2);
+  assert.equal(logs.filter(event => event.errorClass === 'bridge_outbox_overflow').length, 2);
+});
+test('outbox expires old entries without sending and records discard', async t => {
+  const store = fixture(t); let sends = 0; const logs = [];
+  const outbox = new TelegramOutbox(store, { now: () => 86400001, logger: event => logs.push(event), send: async () => { sends++; } });
+  outbox.enqueue({ chat_id: 1, text: 'old' });
+  store.data.telegram.outbox[0].receivedAt = 0;
+  await outbox.flush();
+  assert.equal(sends, 0); assert.equal(store.data.telegram.outbox.length, 0);
+  assert.equal(logs[0].errorClass, 'bridge_outbox_expired');
+});
+test('permanent Telegram rejects leave outbox immediately without retry', async t => {
+  const store = fixture(t); let sends = 0; const logs = [];
+  const outbox = new TelegramOutbox(store, { logger: event => logs.push(event), send: async () => { sends++; const e = Error('Telegram API sendMessage failed: Bad Request: chat not found'); e.body = { error_code: 400 }; throw e; } });
+  await assert.rejects(outbox.sendMessage(params), /chat not found/);
+  assert.equal(sends, 1); assert.equal(store.data.telegram.outbox.length, 0);
+  assert.equal(logs[0].errorClass, 'telegram_permanent_reject');
+});
+test('retryable outbox errors give up on the tenth failure', async t => {
+  const store = fixture(t); let sends = 0; const logs = [];
+  const outbox = new TelegramOutbox(store, { logger: event => logs.push(event), send: async () => { sends++; throw Error('transport failed'); } });
+  for (let i = 0; i < 10; i++) {
+    const item = i === 0 ? outbox.enqueue(params) : store.data.telegram.outbox[0];
+    await assert.rejects(outbox.deliver(item));
+    item.nextAttemptAt = 0;
+  }
+  assert.equal(sends, 10); assert.equal(store.data.telegram.outbox.length, 0);
+  assert.equal(logs.at(-1).errorClass, 'bridge_outbox_giveup');
+});
+test('outbox status exposes queued and cumulative discarded counts', t => {
+  const store = fixture(t); const outbox = new TelegramOutbox(store, { send: async () => ({}) });
+  outbox.enqueue(params); store.data.telegram.outboxStats.discardedTotal = 7;
+  assert.deepEqual(getOutboxStatus(store), { queued: 1, discarded: 7 });
+});
+test('send failure state-save error does not replace original send error', async t => {
+  const store = fixture(t); const outbox = new TelegramOutbox(store, { send: async () => { throw Error('original-send-error'); }, logger: () => {} });
+  const save = store.save.bind(store); let calls = 0; store.save = (...args) => { if (++calls > 1) throw Error('disk-full'); return save(...args); };
+  await assert.rejects(outbox.sendMessage(params), /original-send-error/);
 });

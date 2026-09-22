@@ -1788,7 +1788,18 @@ async function terminateChild(child) {
   });
 }
 
+function getOutboxStatus(store) {
+  return {
+    queued: store?.data?.telegram?.outbox?.length || 0,
+    discarded: store?.data?.telegram?.outboxStats?.discardedTotal || 0,
+  };
+}
+
 class TelegramOutbox {
+  static MAX_ITEMS = 500;
+  static MAX_AGE_MS = 24 * 60 * 60 * 1000;
+  static MAX_RETRIES = 10;
+
   constructor(store, { send, now = Date.now, logger = (event) => console.warn(JSON.stringify(event)) }) {
     this.store = store;
     this.send = send;
@@ -1797,32 +1808,100 @@ class TelegramOutbox {
     this.active = new Map();
     this.flushing = null;
     store.data.telegram.outbox ||= [];
+    store.data.telegram.outboxStats ||= { discardedTotal: 0 };
   }
 
-  enqueue(params) {
-    const item = { id: crypto.randomUUID(), kind: "sendMessage", chatId: params.chat_id,
-      params: { ...params }, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
+  _stats() {
+    const stats = this.store.data.telegram.outboxStats;
+    if (!stats || typeof stats !== "object") this.store.data.telegram.outboxStats = { discardedTotal: 0 };
+    return this.store.data.telegram.outboxStats;
+  }
+
+  _record(errorClass, extra = {}) {
+    const stats = this._stats();
+    stats.discardedTotal = Number(stats.discardedTotal || 0) + 1;
+    stats[errorClass] = Number(stats[errorClass] || 0) + 1;
+    this.logger({ errorClass, ...extra });
+  }
+
+  _remove(item, errorClass = null) {
     const queue = this.store.data.telegram.outbox;
-    queue.push(item);
+    const index = queue.findIndex(entry => entry.id === item.id);
+    if (index < 0) return;
+    queue.splice(index, 1);
+    if (errorClass) this._record(errorClass, { outboxId: item.id });
     try { this.store.save({ force: true }); }
-    catch (error) { queue.pop(); throw error; }
+    catch (error) {
+      queue.splice(index, 0, item);
+      if (errorClass) {
+        const stats = this._stats();
+        stats.discardedTotal = Math.max(0, Number(stats.discardedTotal || 0) - 1);
+        stats[errorClass] = Math.max(0, Number(stats[errorClass] || 0) - 1);
+      }
+      throw error;
+    }
+  }
+
+  _trimOverflow() {
+    const queue = this.store.data.telegram.outbox;
+    while (queue.length > TelegramOutbox.MAX_ITEMS) {
+      const index = queue.findIndex(entry => entry.priority !== "notice");
+      const item = queue[index >= 0 ? index : 0];
+      this._remove(item, "bridge_outbox_overflow");
+    }
+  }
+
+  enqueue(params, { priority = "normal" } = {}) {
+    const queue = this.store.data.telegram.outbox;
+    const item = { id: crypto.randomUUID(), kind: "sendMessage", chatId: params.chat_id,
+      params: { ...params }, priority, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
+    queue.push(item);
+    try {
+      this._trimOverflow();
+      this.store.save({ force: true });
+    } catch (error) {
+      const index = queue.findIndex(entry => entry.id === item.id);
+      if (index >= 0) queue.splice(index, 1);
+      throw error;
+    }
     return item;
+  }
+
+  _isExpired(item) { return this.now() - Number(item.receivedAt || 0) > TelegramOutbox.MAX_AGE_MS; }
+
+  _isPermanentReject(error) {
+    const message = error?.message ? String(error.message) : String(error);
+    const code = Number(error?.body?.error_code);
+    return code === 403 || /(?:^|\D)403(?:\D|$)/.test(message)
+      || /chat not found|bot (?:was )?blocked|bot (?:was )?kicked|not a member/i.test(message);
   }
 
   deliver(item) {
     if (this.active.has(item.id)) return this.active.get(item.id);
     const task = Promise.resolve().then(async () => {
+      if (this._isExpired(item)) {
+        this._remove(item, "bridge_outbox_expired");
+        return null;
+      }
       try {
         const result = await this.send(item.params);
-        const queue = this.store.data.telegram.outbox;
-        this.store.data.telegram.outbox = queue.filter(entry => entry.id !== item.id);
-        try { this.store.save({ force: true }); }
-        catch (error) { this.store.data.telegram.outbox = queue; throw error; }
+        this._remove(item);
         return result;
       } catch (error) {
-        item.replayCount++;
-        item.nextAttemptAt = this.now() + Math.max(30000, getTelegramRetryDelayMs(error, 1));
-        this.store.save({ force: true });
+        if (this._isPermanentReject(error)) {
+          this._remove(item, "telegram_permanent_reject");
+          throw error;
+        }
+        item.replayCount = Number(item.replayCount || 0) + 1;
+        if (item.replayCount >= TelegramOutbox.MAX_RETRIES) {
+          this._remove(item, "bridge_outbox_giveup");
+          throw error;
+        }
+        item.nextAttemptAt = this.now() + Math.max(30000, getTelegramRetryDelayMs(error, item.replayCount));
+        try { this.store.save({ force: true }); }
+        catch (saveError) {
+          this.logger({ errorClass: "bridge_outbox_state_save_failed", detail: saveError.message });
+        }
         throw error;
       }
     }).finally(() => this.active.delete(item.id));
@@ -1830,15 +1909,19 @@ class TelegramOutbox {
     return task;
   }
 
-  sendMessage(params) { return this.deliver(this.enqueue(params)); }
+  sendMessage(params, options = {}) { return this.deliver(this.enqueue(params, options)); }
 
   flush() {
     if (this.flushing) return this.flushing;
     this.flushing = (async () => {
       for (const item of [...this.store.data.telegram.outbox]) {
+        if (this._isExpired(item)) {
+          try { this._remove(item, "bridge_outbox_expired"); } catch (error) { this.logger({ errorClass: "bridge_outbox_state_save_failed", detail: error.message }); }
+          continue;
+        }
         if (item.nextAttemptAt > this.now()) continue;
         try { await this.deliver(item); }
-        catch { this.logger({ errorClass: "bridge_outbox_send_failed" }); }
+        catch { /* deliver records the durable retry/drop state */ }
       }
     })().finally(() => { this.flushing = null; });
     return this.flushing;
@@ -1876,7 +1959,7 @@ class TelegramInbox {
             const chatId = message.chat.id;
             const last = this.capacityNotices.get(chatId) ?? -Infinity;
             if (this.now() - last >= 60000) {
-              const notice = this.outbox.enqueue({ chat_id: chatId, text: "当前积压已满，暂时无法接收新消息，正在处理中。" });
+              const notice = this.outbox.enqueue({ chat_id: chatId, text: "当前积压已满，暂时无法接收新消息，正在处理中。" }, { priority: "notice" });
               this.capacityNotices.set(chatId, this.now());
               void this.outbox.deliver(notice).catch(() => this.logger({ errorClass: "bridge_outbox_send_failed" }));
             }
@@ -1920,7 +2003,7 @@ class TelegramInbox {
         // Remove first so a failed notification cannot cause an endless replay loop.
         const text = `这条消息在处理时服务重启了 ${item.replayCount} 次，已放弃，请重发。`;
         if (this.outbox) {
-          const notice = this.outbox.enqueue({ chat_id: item.chatId, text });
+          const notice = this.outbox.enqueue({ chat_id: item.chatId, text }, { priority: "notice" });
           this.remove(item);
           await this.outbox.deliver(notice);
         } else {
@@ -8677,6 +8760,8 @@ async function main() {
           `lastRecoveryAttemptAt: ${formatTimestamp(backendHealth.lastRecoveryStartedAt)}`,
           `lastRecoveryResult: ${backendHealth.lastRecoveryResult || "(none)"}`,
           `replayQueued: ${rt.authRecoveryReplayTask?.text ? "yes" : "no"}`,
+          `outboxQueued: ${getOutboxStatus(store).queued}`,
+          `outboxDiscarded: ${getOutboxStatus(store).discarded}`,
           `autoCompact: ${autoCompact ? "on" : "off"} (soft ${formatPercent(contextThresholds.soft)}, hard ${formatPercent(contextThresholds.hard)}, emergency ${formatPercent(contextThresholds.emergency)})`,
           `telegramPolling: ${buildPollingStatusLine()}`,
           `codexBackend: ${buildCodexBackendStatusLine()}`,
@@ -8988,6 +9073,7 @@ module.exports = {
     Store,
     TelegramInbox,
     TelegramOutbox,
+    getOutboxStatus,
     installGracefulShutdown,
     terminateChild,
     INDEX_CODE_SHA256,

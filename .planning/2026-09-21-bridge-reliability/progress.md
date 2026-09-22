@@ -126,6 +126,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.2 SIGTERM + T2.3 inbox | isolated child/process tests + rv-prediction smoke | store flush、子进程终止、重放护栏 | 116/116 pass；rv 首批 kill/restart 通过 | complete |
 | T2.3a deployment | rv → default → strategy install; hash/log/process checks | no replay startup blockage | all 3 running, hash f3226f55, startup logs present | complete |
 | T2.4 outbox | isolated store/process tests | failed sends survive restart and notices are durable | 123/123 pass; deployment pending | complete |
+| T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployment pending | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -148,6 +149,8 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-21 | strategy-observation | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
 | 2026-09-21 | Phase 1 tag | `v0.1.1` | `8c8e8b3` | `889d4bd36bfc` | Phase 1 closeout tag |
 | — | （尚未部署） | HEAD `952675e` | `952675e` | `fff69755` | 含 T1.3 日志增补，随 Phase 2 首次部署上线 |
+| 09-22 21:56 | rv-prediction | `feat/phase-2-no-silent-failure` | `746aab7` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
+| 09-22 21:56 | default / strategy-observation | `feat/phase-2-no-silent-failure` | `d265888` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
 
 | 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
 
@@ -515,3 +518,58 @@ macOS 通常不允许非 root 的其它用户读取他人进程 argv，故**机�
 - Validation: **123/123 tests pass**, `node -c index.js`, all four zsh syntax checks, and `git diff --check` pass.
 - Files: `index.js`, `tests/outbox.test.js`.
 - Deployment of T2.4 is pending; current installed services remain the T2.3a build until this task is reviewed for deployment.
+
+### T2.4 验收（2026-09-22）—— 通过，但部署前需补两个缺口
+
+**核实通过**（读代码，非依据总结）：
+
+| 检查项 | 结果 |
+|---|---|
+| outbox 与 inbox 共用 store 原子保存 | ✅ 同在 `store.data.telegram`，`enqueue` / 成功出队 / 失败退避均 `save({force:true})` 且带回滚 |
+| 失败保留 + 启动与轮询补发 | ✅ `deliver()` 失败时持久化 `replayCount` 与 `nextAttemptAt`；`flush()` 在启动（`:4473`）与轮询（`:8927`）各调一次 |
+| **flush 不阻塞轮询** | ✅ 两处均为 `void outbox.flush().catch(...)`，并注明 `without allowing a stalled send to block polling` —— **T2.3a 的教训已被主动应用** |
+| 放弃通知与 inbox 满提示经 outbox | ✅ 两者都走 `outbox.enqueue` + `void deliver`，不再直发 |
+| inbox 满提示 60 秒/chat 间隔 | ✅ `capacityNotices` Map，`now - last >= 60000`；且仍 `break`，不确认存不下的 update |
+| 并发去重 | ✅ `active` Map 按 id 去重；`flushing` 保证同时只有一次 flush |
+| 底层串行未被破坏 | ✅ `send` 仍走 `telegram.call("sendMessage", …, { serialize: true })` |
+| 测试 | ✅ 新增 6 组，选题到位（并发 flush 不重复发、入队磁盘失败绝不发送、被杀进程重启自动补发）。**123 / 123 / fail 0** |
+
+**发现两个缺口 → 立 T2.4a，部署前必修**：
+
+1. **outbox 无任何容量与年龄上限。** inbox 有 200 条 / 16384 字符 / 24 小时三道闸，outbox 一道都没有。
+   Telegram 长时间不可用时（08-30 那种 13h44m）队列无界增长，而 `save({force:true})` 是全量重写
+   `store.json`，越长越慢，最终拖垮 bridge。**inbox 有闸、outbox 没有，这个不对称本身就是信号。**
+2. **永久错误无限重试。** `deliver()` 的 catch 不区分错误类型：403 `bot was blocked by the user`、
+   400 `chat not found` 这类永久拒绝会每 30 秒重试一次、永远留在队列里，与第 1 点叠加后队列永不排空。
+   inbox 有 `replayCount >= 2` 放弃机制，outbox 没有任何放弃条件。
+
+**一处已知取舍，记录备查（不修）**：失败重试会造成 per-chat 乱序 —— 第 1 条失败排到 30 秒后、
+第 2 条立即成功，用户先看到第 2 条。**不做** head-of-line blocking：若为保序而阻塞该 chat 后续回复，
+一条卡住的消息会让整个会话静默，那比乱序更糟且正是本计划要消灭的症状。
+改为靠 T2.4a 的放弃条件把「一条能卡多久」限定在有界范围内。
+
+**一处次要问题（可并入 T2.4a）**：`deliver()` 失败分支里的 `this.store.save({ force: true })` 无 try/catch。
+磁盘满时（findings F3 记录过 157 次 `no space left`）该异常会覆盖原始发送错误，导致错误归因错乱。
+
+### `f3226f55` 的 §4.4 真实应答验收（2026-09-22，账已清）
+
+人工在三个 bot 各发一次 `/status`，三者均返回 `codeVersion=f3226f55`。
+T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）＋ 启动标记（日志）＋ **真实应答（人工）** 三项齐备。
+
+意义不只是走完流程：T2.3a 修的正是「日志一切正常但 bot 是聋的」，
+这类故障只有真实应答能证伪，哈希与启动日志都证明不了。
+
+**下一次部署（outbox）必须重复同样三项**，且不要与本次叠在一起 —— 否则出问题无法定位到具体哪一批。
+
+
+### T2.4a complete
+
+- Added outbox capacity 500 with `priority`; overflow removes oldest non-notice first, preserves notice items, increments `bridge_outbox_overflow` and cumulative discard count.
+- Added 24-hour expiry with `bridge_outbox_expired`.
+- Added permanent Telegram rejection classification for 400/403 chat/member/block/kick forms; removes immediately with `telegram_permanent_reject`.
+- Added retryable failure ceiling of 10 attempts; exhausted items are removed with `bridge_outbox_giveup`.
+- Added `/status` fields `outboxQueued` and `outboxDiscarded`.
+- Guarded failure-state persistence so a disk-save error is logged separately and cannot replace the original send error.
+- Added six T2.4a tests. Validation: `node -c index.js`, **129/129 tests pass**, all four zsh syntax checks, and diff check pass.
+- Files: `index.js`, `tests/outbox.test.js`.
+- T2.4a is complete; deployment can proceed in the mandated order. No `findings.md` changes made.
