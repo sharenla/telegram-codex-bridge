@@ -125,6 +125,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.1 最终验证 | npm test；发送失败与结构化 429 模拟 | 全通过且不截短 retry_after | 108/108 pass，全部语法检查通过 | complete |
 | T2.2 SIGTERM + T2.3 inbox | isolated child/process tests + rv-prediction smoke | store flush、子进程终止、重放护栏 | 116/116 pass；rv 首批 kill/restart 通过 | complete |
 | T2.3a deployment | rv → default → strategy install; hash/log/process checks | no replay startup blockage | all 3 running, hash f3226f55, startup logs present | complete |
+| T2.4 outbox | isolated store/process tests | failed sends survive restart and notices are durable | 123/123 pass; deployment pending | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -461,3 +462,56 @@ T2.2 与 T2.3 须在同一个 commit 落地，分开会留下比现状更糟的�
 - All three LaunchAgents are running; logs show `Telegram Codex Bridge started`, `codeVersion=f3226f55`, and deployed refs. Named role files remain instance-specific.
 - Current runtime curl list contains one active long-poll child per bot; no stale duplicate from the rv restart was observed.
 - Phase 2 first deployment is complete for T2.2/T2.3/T2.3a. Next task is T2.4 outbox; no T2.4 code has started.
+
+### T2.3a + Phase 2 首批部署验收（2026-09-22 22:08）
+
+**逐项核实通过**（读代码与线上状态，非依据总结）：
+
+| 检查项 | 结果 |
+|---|---|
+| T2.3a 改动在代码里 | ✅ `void inbox.replay().catch(...)` + 立即 `await pollingLoop()` |
+| 回归测试存在 | ✅ `tests/inbox-shutdown.test.js:129` —— `a pending replay must not block polling startup` |
+| 测试 | ✅ **117 / 117 / fail 0** |
+| 分支与工作树 | ✅ `feat/phase-2-no-silent-failure`，工作树干净 |
+| 四份 index.js 哈希一致 | ✅ workspace 与三实例均 `f3226f55` |
+| `DEPLOYED_REF` | ✅ rv-prediction `746aab77`（T2.3a commit）；default / strategy-observation `d2658888`（两者 index.js 同为 f3226f55） |
+| 启动日志三标记 | ✅ `Deployed ref: commit=… ref=v0.1.1-N-g…` / `Telegram Codex Bridge started.` / `codeVersion=f3226f55` |
+| inbox 状态 | ✅ 三实例均 `inbox=0`（无积压残留） |
+| 灰度顺序 | ✅ rv-prediction → default → strategy-observation |
+| curl 孤儿 | ✅ 仅 3 个正在进行的 getUpdates 长轮询，每实例 1 个，无残留 |
+
+**尚缺：§4.4 真实应答证据。** 部署于 21:56，至今（22:08）三实例**均无任何 rollout 活动**，
+说明没有任何真实对话发生过。Codex 报告的「重启后正常恢复」来自日志与轮询恢复，不等于真实应答。
+T2.3a 修复的恰是「日志正常但 bot 是聋的」这一类故障，因此本次真实应答验证比平时更关键。
+→ 需人工在三个 bot 各发一次 `/status`，确认 `codeVersion=f3226f55`。
+
+### ⚠️ 事故记录：验收过程中 bot token 被带入会话记录（2026-09-22）
+
+**经过**：核对 curl 孤儿进程时执行了未脱敏的 `pgrep -fl curl`，输出包含三个实例完整的
+`https://api.telegram.org/bot<id>:<token>/getUpdates` 命令行，三个 bot token 因此进入本次会话记录。
+
+**责任在规划方（Claude），不在 Codex。** `handoff_codex.md` §3.3 明确禁止把 token 写进日志/文档/提交，
+但该约束未覆盖「诊断命令的输出」，且执行时未先脱敏。
+
+**根因（既有设计，非本次改动引入）**：Telegram Bot API 把 token 放在 URL 路径里，
+`TelegramApi.callOnce()` 用 `execFile("curl", [... url ...])`，于是完整 token 出现在进程 argv 中。
+经 `ps -Ao args` 核实：本机有 3 个进程含完整 token，均以 `wukong` 身份运行。
+macOS 通常不允许非 root 的其它用户读取他人进程 argv，故**机器层面的暴露面有限**；
+真正的暴露是**任何以 `wukong` 身份运行的进程（含各类 agent）都能直接读到**，本次即属此类。
+
+**处置**：
+1. → 新增 **T4.8**：改用 `curl --config -` 从 stdin 传含 token 的 URL，使 argv 不再出现 token
+2. 仓库内所有诊断类命令一律先脱敏再输出（例：`sed -E 's|bot[0-9]+:[A-Za-z0-9_-]+|bot<REDACTED>|g'`）
+3. **是否轮换这三个 token 由维护者决定** —— 凭据已进入一份会话记录，按惯例建议轮换；
+   轮换需同步更新三份 service `.env` 并重启。不轮换亦可，但应知悉该记录含凭据
+
+
+### T2.4 complete
+
+- Added persistent Telegram outbox inside `store.data.telegram.outbox`, using the same atomic store boundary as inbox.
+- Failed sends remain queued with replay count and next-attempt time; startup and successful polls trigger non-blocking flush. Successful sends are removed only after the API result is received.
+- Replay-abandon notices now enqueue before removing the inbox item, so failed notification delivery remains durable. Full inbox emits a Chinese notice through outbox with a 60-second per-chat minimum interval.
+- Added six isolated outbox tests: failure persistence/reload, result preservation and de-duplication, durable abandon notice, capacity notice throttling, disk failure/retry deadline, and fresh-process replay.
+- Validation: **123/123 tests pass**, `node -c index.js`, all four zsh syntax checks, and `git diff --check` pass.
+- Files: `index.js`, `tests/outbox.test.js`.
+- Deployment of T2.4 is pending; current installed services remain the T2.3a build until this task is reviewed for deployment.

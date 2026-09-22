@@ -1788,11 +1788,70 @@ async function terminateChild(child) {
   });
 }
 
+class TelegramOutbox {
+  constructor(store, { send, now = Date.now, logger = (event) => console.warn(JSON.stringify(event)) }) {
+    this.store = store;
+    this.send = send;
+    this.now = now;
+    this.logger = logger;
+    this.active = new Map();
+    this.flushing = null;
+    store.data.telegram.outbox ||= [];
+  }
+
+  enqueue(params) {
+    const item = { id: crypto.randomUUID(), kind: "sendMessage", chatId: params.chat_id,
+      params: { ...params }, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
+    const queue = this.store.data.telegram.outbox;
+    queue.push(item);
+    try { this.store.save({ force: true }); }
+    catch (error) { queue.pop(); throw error; }
+    return item;
+  }
+
+  deliver(item) {
+    if (this.active.has(item.id)) return this.active.get(item.id);
+    const task = Promise.resolve().then(async () => {
+      try {
+        const result = await this.send(item.params);
+        const queue = this.store.data.telegram.outbox;
+        this.store.data.telegram.outbox = queue.filter(entry => entry.id !== item.id);
+        try { this.store.save({ force: true }); }
+        catch (error) { this.store.data.telegram.outbox = queue; throw error; }
+        return result;
+      } catch (error) {
+        item.replayCount++;
+        item.nextAttemptAt = this.now() + Math.max(30000, getTelegramRetryDelayMs(error, 1));
+        this.store.save({ force: true });
+        throw error;
+      }
+    }).finally(() => this.active.delete(item.id));
+    this.active.set(item.id, task);
+    return task;
+  }
+
+  sendMessage(params) { return this.deliver(this.enqueue(params)); }
+
+  flush() {
+    if (this.flushing) return this.flushing;
+    this.flushing = (async () => {
+      for (const item of [...this.store.data.telegram.outbox]) {
+        if (item.nextAttemptAt > this.now()) continue;
+        try { await this.deliver(item); }
+        catch { this.logger({ errorClass: "bridge_outbox_send_failed" }); }
+      }
+    })().finally(() => { this.flushing = null; });
+    return this.flushing;
+  }
+}
+
 class TelegramInbox {
-  constructor(store, { dispatch, notify, logger = (event) => console.warn(JSON.stringify(event)), now = Date.now } = {}) {
+  constructor(store, { dispatch, notify, outbox = null, logger = (event) => console.warn(JSON.stringify(event)), now = Date.now } = {}) {
     this.store = store;
     this.dispatch = dispatch;
     this.notify = notify;
+    this.outbox = outbox;
+    this.capacityNotices = new Map();
     this.logger = logger;
     this.now = now;
     this.active = new Set();
@@ -1813,6 +1872,15 @@ class TelegramInbox {
       if (typeof text === "string" && message?.chat?.id != null) {
         if (state.inbox.length >= 200 || text.length > 16384) {
           this.logger({ errorClass: state.inbox.length >= 200 ? "bridge_inbox_full" : "bridge_inbox_text_limit" });
+          if (state.inbox.length >= 200 && this.outbox) {
+            const chatId = message.chat.id;
+            const last = this.capacityNotices.get(chatId) ?? -Infinity;
+            if (this.now() - last >= 60000) {
+              const notice = this.outbox.enqueue({ chat_id: chatId, text: "当前积压已满，暂时无法接收新消息，正在处理中。" });
+              this.capacityNotices.set(chatId, this.now());
+              void this.outbox.deliver(notice).catch(() => this.logger({ errorClass: "bridge_outbox_send_failed" }));
+            }
+          }
           break; // Do not acknowledge an update we cannot retain.
         }
         const item = { update_id: update.update_id, kind: cb ? "callback_query" : "message",
@@ -1850,8 +1918,15 @@ class TelegramInbox {
       }
       if (isReplay && item.replayCount >= 2) {
         // Remove first so a failed notification cannot cause an endless replay loop.
-        this.remove(item);
-        await this.notify(item.chatId, `这条消息在处理时服务重启了 ${item.replayCount} 次，已放弃，请重发。`);
+        const text = `这条消息在处理时服务重启了 ${item.replayCount} 次，已放弃，请重发。`;
+        if (this.outbox) {
+          const notice = this.outbox.enqueue({ chat_id: item.chatId, text });
+          this.remove(item);
+          await this.outbox.deliver(notice);
+        } else {
+          this.remove(item);
+          await this.notify(item.chatId, text);
+        }
         return;
       }
       if (isReplay) {
@@ -2084,6 +2159,7 @@ class TelegramApi {
   }
 
   sendMessage({ chat_id, text, reply_markup, parse_mode, disable_web_page_preview }) {
+    if (this.outbox) return this.outbox.sendMessage({ chat_id, text, reply_markup, parse_mode, disable_web_page_preview });
     return this.call("sendMessage", {
       chat_id,
       text,
@@ -4389,6 +4465,12 @@ async function main() {
   const store = new Store(storePath);
   store.load();
   const shutdown = installGracefulShutdown({ store, telegram, getServer: () => codex });
+  const outbox = new TelegramOutbox(store, {
+    send: params => telegram.call("sendMessage", params, { serialize: true }),
+  });
+  telegram.outbox = outbox;
+  // Start recovery before intake, without allowing a stalled send to block polling.
+  void outbox.flush().catch(() => console.error("Outbox recovery failed"));
 
   let telegramTransportRecovery = null;
   const telegramTransportFailoverEnabled = parseBooleanEnv(
@@ -8821,6 +8903,7 @@ async function main() {
   }
 
   const inbox = new TelegramInbox(store, {
+    outbox,
     notify: (chatId, text) => telegram.sendMessage({ chat_id: chatId, text }),
     dispatch: (item) => {
       if (shutdown.closing) throw new Error("Bridge shutting down");
@@ -8841,6 +8924,7 @@ async function main() {
       try {
         const updates = await telegram.getUpdates({ offset, timeout: pollTimeoutSeconds, allowed_updates });
         recordTelegramPollSuccess();
+        void outbox.flush().catch(() => console.error("Outbox recovery failed"));
         const items = inbox.accept(updates);
         offset = Number(store.data.telegram.offset);
         for (const item of items) {
@@ -8903,6 +8987,7 @@ module.exports = {
   _test: {
     Store,
     TelegramInbox,
+    TelegramOutbox,
     installGracefulShutdown,
     terminateChild,
     INDEX_CODE_SHA256,

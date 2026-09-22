@@ -361,3 +361,7 @@ rv-prediction 首批部署与 SIGTERM/restart smoke 通过；新 PID 启动日�
 ### Phase 2 first deployment finding
 
 T2.3a 首批灰度按 rv-prediction → default → strategy-observation 完成，四份 index.js 哈希一致为 f3226f55 前缀；rv 经过 SIGTERM/restart smoke，三实例启动日志与进程正常。现有上游 401/代理 SSL 现象保持为残留风险。
+
+### T2.4 implementation finding（2026-09-22）
+
+Outbox 与 inbox 共用 store.json 原子边界，避免额外文件被部署 rsync 覆盖。失败发送和放弃/积压提示均保留可补发记录；123/123 测试通过，尚未部署 T2.4。

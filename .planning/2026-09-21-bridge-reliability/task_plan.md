@@ -9,7 +9,12 @@
 
 ## Next Step
 
-执行 **T2.4**：持久化出站 outbox，重启后补发失败回复；T2.2/T2.3/T2.3a 已完成并完成首批部署 smoke。
+继续 Phase 2，执行 **T2.5**：收到即确认并编辑同一条消息；T2.4 已完成，部署仍需按 Phase 2 灰度流程推进。
+
+**并行待办（不阻塞 T2.4）**：本次部署（`f3226f55`，21:56）尚缺 §4.4 真实应答证据 ——
+部署后至今无任何 rollout 活动，说明三个 bot 还没被真正对话过。
+T2.3a 修的恰是「日志正常但 bot 是聋的」，因此这次的真实应答验证比平时更重要。
+需人工在三个 bot 各发一次 `/status`，确认 `codeVersion=f3226f55`。
 
 ## Current Phase
 
@@ -40,7 +45,7 @@ Phase 2
 - [x] T2.2 SIGTERM 优雅关闭：强制落盘 + kill 在飞 curl + 停 app-server
 - [x] T2.3 持久化入站 inbox + 重启重放（offset 与消息内容原子同写；含重放上限护栏）
 - [x] T2.3a 部署前必修：replay 不得阻塞 pollingLoop（本次修复引入的回归）
-- [ ] T2.4 持久化 outbox，进程重启后补发（含放弃通知走 outbox、inbox 满时用户提示）
+- [x] T2.4 持久化 outbox，进程重启后补发（含放弃通知走 outbox、inbox 满时用户提示）
 - [ ] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
 - [ ] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [ ] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
@@ -66,6 +71,7 @@ Phase 2
 - [ ] T4.5 指标计数器 12 项 + 日报口径
 - [ ] T4.6 日志保留策略：errorClass 汇总长期留，`launchd.stderr.log` 纳入轮转
 - [ ] T4.7 收口沉淀：把 `findings.md` 的根因结论提炼成 `docs/reliability-postmortem.md`
+- [ ] T4.8 bot token 不再出现在 curl 的 argv 里（改走 `--config -` 从 stdin 传参）
 - **Status:** pending
 
 ## Key Questions
