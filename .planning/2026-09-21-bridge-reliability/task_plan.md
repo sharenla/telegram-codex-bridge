@@ -9,7 +9,7 @@
 
 ## Next Step
 
-T2.3a 本地修复与回归验证已完成（117/117）。执行首次部署 + kill/restart smoke，灰度顺序 rv-prediction → 默认 → strategy-observation，每批真实应答通过后继续。之后执行 T2.4。
+T2.3a 本地修复与回归验证及 rv-prediction 首批 kill/restart smoke 已通过（117/117）。继续默认实例 → strategy-observation 灰度；每批确认启动日志、进程与真实应答后，Phase 2 首次部署收口，再执行 T2.4。
 
 ## Current Phase
 

@@ -123,7 +123,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | **§4.4 真实应答（人工）** | 三 bot 私聊 `/status` | codeVersion 一致、truthProfile 匹配 | 三者均 `889d4bd3`，truthProfile 全部匹配 | complete |
 | 单测（Phase 1 收口） | `node --test ./tests/*.test.js` | 总数只增、fail 0 | **tests 104 / pass 104 / fail 0** | complete |
 | T2.1 最终验证 | npm test；发送失败与结构化 429 模拟 | 全通过且不截短 retry_after | 108/108 pass，全部语法检查通过 | complete |
-| T2.2 SIGTERM + T2.3 inbox | isolated child/process tests | store flush、子进程终止、重放护栏 | 116/116 pass；线上 kill smoke pending | complete |
+| T2.2 SIGTERM + T2.3 inbox | isolated child/process tests + rv-prediction smoke | store flush、子进程终止、重放护栏 | 116/116 pass；rv 首批 kill/restart 通过 | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -441,3 +441,12 @@ T2.2 与 T2.3 须在同一个 commit 落地，分开会留下比现状更糟的�
 - 修复后：同测试验证新 update 被处理、旧 pending update 仍持久化；npm test 117/117 pass，node 与四项 zsh 语法全部通过。
 - 文件：index.js、tests/inbox-shutdown.test.js；本轮维护者更新的 handoff/task_plan/progress 一起入库，避免部署脏树。
 - T2.3a 本地 complete，首次灰度与 kill/restart smoke 接下来执行。只从 rv-prediction 开始，未通过真实应答不推第二批。
+
+
+### T2.3a 首次部署 + rv-prediction kill/restart smoke（2026-09-22）
+
+- 部署目标：仅 `rv-prediction`，通过 `npm run install:rv-prediction`；工作区与服务 index.js SHA-256 均为 `f3226f5555d4...`，DEPLOYED_REF commit `746aab7`。
+- 启动日志确认 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=f3226f55`；启动后 store inbox 为空，随后轮询状态持续更新。
+- 对旧 bridge PID 发送 SIGTERM；supervisor 记录 stop/start 并拉起新 PID，新的启动日志完整出现。旧 rv bridge 的 curl 未残留；观测到的 curl 为三个当前实例各自新的长轮询子进程。
+- 这批 smoke 通过。日志同时有既存 Codex 上游 401 refresh/auth 错误和 Telegram proxy SSL 重试，属于上游/环境现象，不归因 T2.3a，未改范围。
+- T2.3a 已可标记 complete；其他实例尚未部署本分支。

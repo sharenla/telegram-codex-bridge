@@ -353,3 +353,7 @@ The corrected inbox contract is implemented in the same change as graceful shutd
 ### T2.3a 回归验证（2026-09-22）
 
 串行等待启动重放导致 pollingLoop 不启动已通过真实启动尾部的隔离测试复现。仅将启动重放改为后台 Promise 后，新消息在旧 dispatch 永不完成时仍能处理，未完成项保留在 inbox；117/117 与完整语法检查通过，尚待灰度运行验证。
+
+### T2.3a 部署 smoke 追加
+
+rv-prediction 首批部署与 SIGTERM/restart smoke 通过；新 PID 启动日志含 Deployed ref/codeVersion/started，inbox 为空。现有 Codex auth 401 与 Telegram proxy SSL 重试仅作残留风险记录，不属于本任务修复。
