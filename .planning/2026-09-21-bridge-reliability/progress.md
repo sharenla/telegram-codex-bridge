@@ -126,7 +126,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.2 SIGTERM + T2.3 inbox | isolated child/process tests + rv-prediction smoke | store flush、子进程终止、重放护栏 | 116/116 pass；rv 首批 kill/restart 通过 | complete |
 | T2.3a deployment | rv → default → strategy install; hash/log/process checks | no replay startup blockage | all 3 running, hash f3226f55, startup logs present | complete |
 | T2.4 outbox | isolated store/process tests | failed sends survive restart and notices are durable | 123/123 pass; deployment pending | complete |
-| T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployment pending | complete |
+| T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployed and smoke-checked | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -153,6 +153,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 09-22 21:56 | default / strategy-observation | `feat/phase-2-no-silent-failure` | `d265888` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
 
 | 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
+| 2026-09-22 | T2.4a rv-prediction | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy + SIGTERM/restart smoke passed |
+| 2026-09-22 | T2.4a default | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
+| 2026-09-22 | T2.4a strategy-observation | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -573,3 +576,13 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 - Added six T2.4a tests. Validation: `node -c index.js`, **129/129 tests pass**, all four zsh syntax checks, and diff check pass.
 - Files: `index.js`, `tests/outbox.test.js`.
 - T2.4a is complete; deployment can proceed in the mandated order. No `findings.md` changes made.
+
+
+### T2.4a deployment closeout (2026-09-22)
+
+- Gray order completed: rv-prediction → default → strategy-observation.
+- All four `index.js` copies match SHA-256 `ec5dd00482c0...`; all three LaunchAgents and bridge processes are running.
+- Each startup log contains `Deployed ref`, `Telegram Codex Bridge started`, and `codeVersion=ec5dd004`; both named AGENTS.md role headers remain intact.
+- rv-prediction SIGTERM/restart smoke passed before the other two deployments. After restart, store showed inbox 0, outbox 0, discarded 0. No stale curl was observed; final process inspection shows exactly one redacted getUpdates curl per bot.
+- T2.4a deployed. No source or runtime directories were manually edited.
+- Manual `/status` evidence is still required for this outbox build. Expected values for each bot: `codeVersion: ec5dd004`, `outboxQueued: 0`, `outboxDiscarded: 0`; verify `truthProfile` remains the instance baseline. Do not use Bot API/getUpdates for this check.
