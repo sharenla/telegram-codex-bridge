@@ -116,6 +116,11 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T1.4 默认实例哈希一致 | shasum / DEPLOYED_REF / launchctl / pgrep / startup log | 相同且启动成功 | 相同；ref 记录 bca12d3；进程与日志正常 | complete |
 | T1.5 三实例哈希一致 | shasum 四份 index.js / launchctl / pgrep / role heads / startup logs | 四份相同、进程在跑、角色保留 | 全部满足；sha256 前 12 = 889d4bd36bfc | complete |
 | T1.5 角色文件未被覆盖 | head -5 named service AGENTS.md | 仍为各自专属角色 | 两个角色头部保持实例专属内容 | complete |
+| T1.3 脏工作树守卫 | `BRIDGE_ALLOW_DIRTY=0` + 脏树执行安装 | 被拒绝 | 测试通过，断言 `/working tree is dirty/` | complete |
+| T1.4/T1.5 三实例哈希一致 | `shasum -a256` ×3 | 三者相同且等于部署源 | 全部 `889d4bd3` | complete |
+| T1.5 角色文件未被覆盖 | `head -5 <svc>/data/codex-home/AGENTS.md` | 仍为专属角色 | 保留 | complete |
+| **§4.4 真实应答（人工）** | 三 bot 私聊 `/status` | codeVersion 一致、truthProfile 匹配 | 三者均 `889d4bd3`，truthProfile 全部匹配 | complete |
+| 单测（Phase 1 收口） | `node --test ./tests/*.test.js` | 总数只增、fail 0 | **tests 104 / pass 104 / fail 0** | complete |
 | T2.2 无 curl 孤儿 | 强杀后 `pgrep -fl curl` | 无残留 | — | pending |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
@@ -138,6 +143,14 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-21 | rv-prediction | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
 | 2026-09-21 | strategy-observation | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
 | 2026-09-21 | Phase 1 tag | `v0.1.1` | `8c8e8b3` | `889d4bd36bfc` | Phase 1 closeout tag |
+| — | （尚未部署） | HEAD `952675e` | `952675e` | `fff69755` | 含 T1.3 日志增补，随 Phase 2 首次部署上线 |
+
+**回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
+
+> ⚠️ tag 核对方法：注解 tag 必须用 `git rev-list -n1 <tag>` 取所指 commit。
+> `git tag -l --format='%(objectname:short)'` 给的是 **tag 对象自身**的 sha（v0.1.1 = `72571de`），不是 commit。
+> 2026-09-22 曾因此误判 v0.1.1 为无效锚点并多打了一个 `v0.1.2`（指向 `65a6f34`，代码与 `8c8e8b3` 零差异），
+> 该冗余 tag 已删除（本地创建、从未 push）。`v0.1.0` → `3f27ff2` 为早期发布，index.js `b8d50a50`。
 
 灰度顺序不得跳步：**rv-prediction → 默认实例 → strategy-observation**。
 每批之间须确认：进程存活、`bridge.stdout.log` 出现 `Telegram Codex Bridge started.`、该实例能正常应答一次。
@@ -284,3 +297,47 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - T1.3 补齐：启动时打印 DEPLOYED_REF；根 .env.example 记录安装时 BRIDGE_ALLOW_DIRTY 的 shell 用法。该补丁尚未部署，线上 index.js 与最新工作区哈希因此暂不一致；不以旧部署哈希替代当前源码验收。
 - 最终本地 npm test：104/104，通过 node 及四脚本语法检查；等待三实例实际应答后再继续部署此补丁。
+
+---
+
+## Session: 2026-09-22 — Phase 1 线上验收通过
+
+### Phase 1 验收证据（§4.4 真实应答）
+
+人工在三个 bot 私聊各发一次 `/status`，回复核对结果：
+
+| bot | codeVersion | truthProfile | 结论 |
+|---|---|---|---|
+| `@Codex_Bz01_bot`（default） | `889d4bd3` | 与基线一致 | ✅ |
+| `@Codex_OBS_bot` | `889d4bd3` | 与基线一致 | ✅ |
+| `@Codex_RV_bot` | `889d4bd3` | 与基线一致 | ✅ |
+
+> 说明：`/status` **无法由 Claude 或 Codex 代发** —— Telegram Bot API 没有「以用户身份给 bot 发消息」的接口；
+> 而用生产 token 调 `getUpdates` 会抢走运行中 bridge 的更新，正是 R6/R7 的丢消息路径，故禁止。
+> 此项验收只能人工执行，已于 2026-09-22 由维护者完成。**后续每个 Phase 收口同样适用。**
+
+### 两个部署源的等价性核验
+
+三实例部署自不同 commit，但代码层面等价，因此可用单一 tag 作锚点：
+
+| commit | 用于 | index.js sha256 前 8 |
+|---|---|---|
+| `bca12d3`（`v0.1.0-22`） | default 实例 | `889d4bd3` |
+| `65a6f34`（`v0.1.0-23`） | strategy-observation / rv-prediction | `889d4bd3` |
+
+`git diff bca12d3 65a6f34` 排除 `.planning` 与 `docs` 后 → **零差异**（差异只在规划文件）。
+
+### T1.3 守卫落地核验
+
+- `scripts/install-launch-agent.sh:6-12` —— `BRIDGE_ALLOW_DIRTY != 1` 且工作树脏时拒绝安装，显式绕过时打警告
+- `tests/multi-instance-launch-agent.test.js:100` —— `installer refuses dirty working trees unless explicitly allowed`，断言 `/working tree is dirty/`
+- 三实例 `DEPLOYED_REF` 均已写入，内容为 `commit=<sha>` + `ref=<describe>`
+
+**残留**：HEAD `952675e` 含「启动日志打印 DEPLOYED_REF」增补，尚未部署（线上启动日志已有 `codeVersion=`，无 `DEPLOYED_REF=`）。
+判定为**不阻塞收口** —— T1.3 的两个核心交付（守卫 + `DEPLOYED_REF` 文件）均已部署且有测试覆盖；
+该增补随 Phase 2 首次部署一并上线，避免为一行日志再占用一轮人工 `/status` 验收。
+
+### 验收标准的一处措辞修正
+
+原 T1.3 验收写「`DEPLOYED_REF` 等于 `git rev-parse HEAD`」—— 该等式只在**部署当刻**成立。
+HEAD 此后前进属正常，不应据此判失败。正确表述：**`DEPLOYED_REF` 等于部署当刻的 HEAD，并在台账留痕**。
