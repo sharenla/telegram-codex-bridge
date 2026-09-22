@@ -164,6 +164,7 @@ const TELEGRAM_TRANSPORT_FAILOVER_COOLDOWN_MS = 60 * 1000;
 const TELEGRAM_RETRYABLE_METHODS = new Set([
   "getUpdates",
   "getMe",
+  "sendMessage",
   "sendChatAction",
   "editMessageText",
   "answerCallbackQuery",
@@ -211,6 +212,24 @@ function redactTelegramBotToken(text) {
 
 function shouldRetryTelegramMethod(method) {
   return TELEGRAM_RETRYABLE_METHODS.has(String(method || ""));
+}
+
+function isTelegramTransientError(error) {
+  const message = error && error.message ? error.message : String(error);
+  return message.includes("transport failed")
+    || message.includes("SSL_ERROR_SYSCALL")
+    || message.includes("timed out")
+    || message.includes("Connect Timeout")
+    || /(?:^|\D)429(?:\D|$)/.test(message)
+    || /Too Many Requests/i.test(message);
+}
+
+function getTelegramRetryDelayMs(error, attempt) {
+  const retryAfter = Number(error?.body?.parameters?.retry_after);
+  if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+    return Math.min(Math.max(retryAfter * 1000, 0), 120000);
+  }
+  return 500 * attempt;
 }
 
 function formatCurlTransportError(error, stderr, { timeoutMs = 0 } = {}) {
@@ -1857,15 +1876,12 @@ class TelegramApi {
       } catch (error) {
         lastError = error;
         const message = error && error.message ? error.message : String(error);
-        const isTransient =
-          message.includes("transport failed") ||
-          message.includes("SSL_ERROR_SYSCALL") ||
-          message.includes("timed out") ||
-          message.includes("Connect Timeout");
+        const isTransient = isTelegramTransientError(error);
         const retryableMethod = shouldRetryTelegramMethod(method);
         if (!isTransient || !retryableMethod || attempt === 4) throw error;
+        const delayMs = getTelegramRetryDelayMs(error, attempt);
         console.warn(`Telegram API ${method} retry ${attempt}/4 after transient error: ${message}`);
-        await sleep(500 * attempt);
+        await sleep(delayMs);
       }
     }
     throw lastError || new Error(`Telegram API ${method} failed`);
@@ -8866,6 +8882,9 @@ module.exports = {
     buildTurnDiffPreviewText,
     sanitizeGroupAgentText,
     shouldRetryTelegramMethod,
+    isTelegramTransientError,
+    getTelegramRetryDelayMs,
+    TelegramApi,
     resolveClashControllerConfig,
     createClashController,
     isTelegramTransportRecoveryError,

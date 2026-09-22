@@ -279,8 +279,27 @@ test("resolveAgentMessageTurnId keeps existing turn binding over active turn", (
   );
 });
 
-test("shouldRetryTelegramMethod keeps sendMessage at-most-once", () => {
-  assert.equal(_test.shouldRetryTelegramMethod("sendMessage"), false);
+test("shouldRetryTelegramMethod includes sendMessage", () => {
+  assert.equal(_test.shouldRetryTelegramMethod("sendMessage"), true);
+});
+
+test("Telegram transport retries a transient sendMessage and succeeds", async () => {
+  const telegram = new _test.TelegramApi("test-token");
+  let attempts = 0;
+  telegram.callOnce = async () => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("Telegram API sendMessage transport failed");
+    return { message_id: 42 };
+  };
+  assert.deepEqual(await telegram.callWithRetry("sendMessage", { chat_id: 1, text: "ok" }), { message_id: 42 });
+  assert.equal(attempts, 2);
+});
+
+test("Telegram 429 retry uses retry_after seconds", () => {
+  const error = new Error("Telegram API sendMessage failed: Too Many Requests");
+  error.body = { parameters: { retry_after: 7 } };
+  assert.equal(_test.isTelegramTransientError(error), true);
+  assert.equal(_test.getTelegramRetryDelayMs(error, 1), 7000);
 });
 
 test("truncateMiddle keeps UTF-8 byte length below Telegram-safe limit", () => {

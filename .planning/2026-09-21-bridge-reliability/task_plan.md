@@ -9,7 +9,7 @@
 
 ## Next Step
 
-开始 **Phase 2**，分支 `feat/phase-2-no-silent-failure`，第一个任务 T2.1（`sendMessage` 纳入重试白名单 + 429 按 `retry_after` 退避）。Phase 1 已于 2026-09-22 线上验收通过，锚点 tag `v0.1.1`（commit `8c8e8b3`）。
+继续 Phase 2 分支 `feat/phase-2-no-silent-failure`，执行 T2.2（SIGTERM 优雅关闭：强制落盘、终止在飞 curl、停止 app-server）。T2.1 已完成。
 
 ## Current Phase
 
@@ -36,7 +36,7 @@ Phase 2
 
 ### Phase 2: 消除「完全无反馈」
 
-- [ ] T2.1 `sendMessage` 纳入重试白名单 + 429 按 `retry_after` 退避
+- [x] T2.1 `sendMessage` 纳入重试白名单 + 429 按 `retry_after` 退避
 - [ ] T2.2 SIGTERM 优雅关闭：强制落盘 + kill 在飞 curl + 停 app-server
 - [ ] T2.3 offset write-ahead：先落盘再处理（宁可重复，不要丢）
 - [ ] T2.4 持久化 outbox，进程重启后补发

@@ -79,7 +79,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ### Phase 2: 消除「完全无反馈」
 
-- **Status:** pending
+- **Status:** in_progress
 - Actions taken:
   -
 - Files created/modified:
@@ -341,3 +341,14 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 原 T1.3 验收写「`DEPLOYED_REF` 等于 `git rev-parse HEAD`」—— 该等式只在**部署当刻**成立。
 HEAD 此后前进属正常，不应据此判失败。正确表述：**`DEPLOYED_REF` 等于部署当刻的 HEAD，并在台账留痕**。
+
+
+## Session: 2026-09-22 — Phase 2
+
+### T2.1 complete
+
+- `sendMessage` is now in the Telegram retry whitelist.
+- Telegram transient detection includes HTTP 429 / `Too Many Requests`; `parameters.retry_after` controls bounded millisecond backoff, with exponential fallback for transport errors.
+- Added focused tests for send retry success and 429 retry-after calculation.
+- Validation: `node -c index.js`, **106/106 tests pass**, and all four zsh syntax checks pass.
+- Files: `index.js`, `tests/context-compaction.test.js`.
