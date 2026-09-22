@@ -1034,14 +1034,6 @@ function acquireInstanceLock(lockPath, { label = "instance" } = {}) {
   };
 
   process.once("exit", cleanup);
-  process.once("SIGINT", () => {
-    cleanup();
-    process.exit(130);
-  });
-  process.once("SIGTERM", () => {
-    cleanup();
-    process.exit(143);
-  });
 
   return { lockPath, cleanup };
 }
@@ -1768,6 +1760,117 @@ function rememberGroupVisibleText(rt, text) {
   rt.sentGroupVisibleTexts.add(normalized);
 }
 
+function installGracefulShutdown({ store, telegram, getServer = () => null, processRef = process }) {
+  let closing = false;
+  const close = async (code) => {
+    if (closing) return;
+    closing = true;
+    try {
+      telegram.closing = true;
+      store.save({ force: true });
+    } catch (error) {
+      console.error("Shutdown persistence failed:", error.message);
+    }
+    await Promise.allSettled([telegram.close(), getServer()?.stopAndWait()]);
+    processRef.exit(code);
+  };
+  processRef.on("SIGTERM", () => { void close(143); });
+  processRef.on("SIGINT", () => { void close(130); });
+  return { get closing() { return closing; } };
+}
+
+async function terminateChild(child) {
+  if (!child || child.exitCode != null || child.signalCode != null) return;
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => child.kill("SIGKILL"), 1000);
+    child.once("close", () => { clearTimeout(timer); resolve(); });
+    child.kill("SIGTERM");
+  });
+}
+
+class TelegramInbox {
+  constructor(store, { dispatch, notify, logger = (event) => console.warn(JSON.stringify(event)), now = Date.now } = {}) {
+    this.store = store;
+    this.dispatch = dispatch;
+    this.notify = notify;
+    this.logger = logger;
+    this.now = now;
+    this.active = new Set();
+    store.data.telegram.inbox ||= [];
+  }
+
+  accept(updates) {
+    const state = this.store.data.telegram;
+    const oldOffset = state.offset;
+    const oldInbox = state.inbox;
+    state.inbox = [...oldInbox];
+    const accepted = [];
+    for (const update of updates) {
+      if (update.update_id < state.offset) continue;
+      const cb = update.callback_query;
+      const message = update.message || cb?.message;
+      const text = cb ? cb.data : message?.text;
+      if (typeof text === "string" && message?.chat?.id != null) {
+        if (state.inbox.length >= 200 || text.length > 16384) {
+          this.logger({ errorClass: state.inbox.length >= 200 ? "bridge_inbox_full" : "bridge_inbox_text_limit" });
+          break; // Do not acknowledge an update we cannot retain.
+        }
+        const item = { update_id: update.update_id, kind: cb ? "callback_query" : "message",
+          chatId: message.chat.id, chatType: message.chat.type, message_id: message.message_id,
+          text, from: { id: (cb?.from || message.from)?.id },
+          reply_to_message: message.reply_to_message ? { message_id: message.reply_to_message.message_id,
+            from: { id: message.reply_to_message.from?.id } } : undefined,
+          callbackId: cb?.id, receivedAt: this.now(), replayCount: 0 };
+        state.inbox.push(item);
+        accepted.push(item);
+      }
+      state.offset = update.update_id + 1;
+    }
+    try { this.store.save({ force: true }); }
+    catch (error) { state.offset = oldOffset; state.inbox = oldInbox; throw error; }
+    return accepted;
+  }
+
+  remove(item) {
+    const state = this.store.data.telegram;
+    const previous = state.inbox;
+    state.inbox = previous.filter(entry => entry.update_id !== item.update_id);
+    try { this.store.save({ force: true }); }
+    catch (error) { state.inbox = previous; throw error; }
+  }
+
+  async run(item, isReplay = false) {
+    if (this.active.has(item.update_id)) return;
+    this.active.add(item.update_id);
+    try {
+      if (this.now() - item.receivedAt > 24 * 60 * 60 * 1000) {
+        this.logger({ errorClass: "bridge_inbox_expired" });
+        this.remove(item);
+        return;
+      }
+      if (isReplay && item.replayCount >= 2) {
+        // Remove first so a failed notification cannot cause an endless replay loop.
+        this.remove(item);
+        await this.notify(item.chatId, `这条消息在处理时服务重启了 ${item.replayCount} 次，已放弃，请重发。`);
+        return;
+      }
+      if (isReplay) {
+        item.replayCount++;
+        this.store.save({ force: true });
+      }
+      await this.dispatch({ ...item, isReplay });
+      this.remove(item);
+    } finally { this.active.delete(item.update_id); }
+  }
+
+  async replay() {
+    for (const item of [...this.store.data.telegram.inbox].sort((a, b) => a.update_id - b.update_id)) {
+      try { await this.run(item, true); }
+      catch { this.logger({ errorClass: "bridge_inbox_replay_failed" }); }
+    }
+  }
+}
+
 class Store {
   constructor(storePath) {
     this.storePath = storePath;
@@ -1859,6 +1962,8 @@ class TelegramApi {
       : "direct";
     this.writeQueue = Promise.resolve();
     this.sleep = sleepFn;
+    this.children = new Set();
+    this.closing = false;
   }
 
   async call(method, params, { serialize = false } = {}) {
@@ -1892,7 +1997,13 @@ class TelegramApi {
     throw lastError || new Error(`Telegram API ${method} failed`);
   }
 
+  async close() {
+    this.closing = true;
+    await Promise.allSettled([...this.children].map(terminateChild));
+  }
+
   async callOnce(method, params) {
+    if (this.closing) throw new Error("Telegram transport shutting down");
     const body = JSON.stringify(params ?? {});
     const longPollSeconds =
       method === "getUpdates"
@@ -1924,7 +2035,7 @@ class TelegramApi {
       body,
     );
     const stdout = await new Promise((resolve, reject) => {
-      execFile("curl", curlArgs, {
+      const child = execFile("curl", curlArgs, {
         timeout: childTimeoutMs,
         maxBuffer: 1024 * 1024,
       }, (error, out, stderr) => {
@@ -1935,6 +2046,8 @@ class TelegramApi {
         }
         resolve(out);
       });
+      this.children.add(child);
+      child.once("close", () => this.children.delete(child));
     });
 
     const parsed = safeJsonParse(stdout);
@@ -2084,6 +2197,11 @@ class CodexAppServer {
     if (!this.proc) return;
     this._expectedStop = expected;
     this.proc.kill("SIGTERM");
+  }
+
+  async stopAndWait() {
+    this._expectedStop = true;
+    await terminateChild(this.proc);
   }
 
   _send(msg) {
@@ -4235,6 +4353,7 @@ async function discoverChatIds(telegram) {
 
 async function main() {
   const processStartedAt = Date.now();
+  let codex = null;
   const deployedRefPath = path.join(__dirname, "DEPLOYED_REF");
   if (fs.existsSync(deployedRefPath)) {
     console.log(`Deployed ref: ${fs.readFileSync(deployedRefPath, "utf8").trim().replace(/\n/g, " ")}`);
@@ -4269,6 +4388,7 @@ async function main() {
     process.env.STORE_PATH || path.join(__dirname, "data", "store.json");
   const store = new Store(storePath);
   store.load();
+  const shutdown = installGracefulShutdown({ store, telegram, getServer: () => codex });
 
   let telegramTransportRecovery = null;
   const telegramTransportFailoverEnabled = parseBooleanEnv(
@@ -5154,7 +5274,7 @@ async function main() {
     }
   }
 
-  let codex = null;
+
   let restartRequested = false;
   let codexBackendRecoveryPromise = null;
   let codexBackendRecoveryBypassDepth = 0;
@@ -5569,6 +5689,7 @@ async function main() {
   }
 
   async function startCodexServer() {
+    if (shutdown.closing) return;
     const server = new CodexAppServer({ codexBin, env: codexEnv, codexLbEnabled });
     server.onAuthWatchdog((event) => {
       queueCodexBackendRecovery(event);
@@ -7949,7 +8070,7 @@ async function main() {
     return { token, promise };
   }
 
-  async function handleMessage({ chatId, text, message }) {
+  async function handleMessage({ chatId, text, message, isReplay = false }) {
     if (allowlist && !allowlist.has(chatId)) {
       await notifyUnauthorizedChat(chatId);
       return;
@@ -8699,35 +8820,34 @@ async function main() {
     }
   }
 
+  const inbox = new TelegramInbox(store, {
+    notify: (chatId, text) => telegram.sendMessage({ chat_id: chatId, text }),
+    dispatch: (item) => {
+      if (shutdown.closing) throw new Error("Bridge shutting down");
+      const message = { message_id: item.message_id, text: item.text,
+        chat: { id: item.chatId, type: item.chatType }, from: item.from,
+        reply_to_message: item.reply_to_message };
+      return item.kind === "message"
+        ? handleMessage({ chatId: item.chatId, text: item.text, message, isReplay: item.isReplay })
+        : handleCallbackQuery({ id: item.callbackId, data: item.text, from: item.from, message, isReplay: item.isReplay });
+    },
+  });
+
   async function pollingLoop() {
     let offset = Number(store.data.telegram?.offset || 0);
     const allowed_updates = ["message", "callback_query"];
 
-    for (;;) {
+    for (; !shutdown.closing;) {
       try {
         const updates = await telegram.getUpdates({ offset, timeout: pollTimeoutSeconds, allowed_updates });
         recordTelegramPollSuccess();
-        for (const u of updates) {
-          offset = u.update_id + 1;
-          store.data.telegram.offset = offset;
-          store.markDirty();
-          store.saveThrottled();
-
-          if (u.message && u.message.text) {
-            Promise.resolve(handleMessage({
-              chatId: u.message.chat.id,
-              text: u.message.text,
-              message: u.message,
-            })).catch((err) => {
-              console.error("handleMessage failed:", err);
-            });
-          } else if (u.callback_query) {
-            Promise.resolve(handleCallbackQuery(u.callback_query)).catch((err) => {
-              console.error("handleCallbackQuery failed:", err);
-            });
-          }
+        const items = inbox.accept(updates);
+        offset = Number(store.data.telegram.offset);
+        for (const item of items) {
+          void inbox.run(item).catch(() => console.error("Inbox dispatch failed; retained for recovery"));
         }
       } catch (err) {
+        if (shutdown.closing) return;
         const health = recordTelegramPollError(err);
         console.error("Polling error:", err.message);
         if (telegramTransportRecovery) {
@@ -8775,11 +8895,16 @@ async function main() {
   console.log(`Source registry: ${sourceRegistry.registryPath || "(builtin)"}`);
   if (sourceRegistry.registryError) console.warn(`Source registry warning: ${sourceRegistry.registryError}`);
 
+  await inbox.replay();
   await pollingLoop();
 }
 
 module.exports = {
   _test: {
+    Store,
+    TelegramInbox,
+    installGracefulShutdown,
+    terminateChild,
     INDEX_CODE_SHA256,
     INDEX_CODE_VERSION,
     getIndexCodeSha256,

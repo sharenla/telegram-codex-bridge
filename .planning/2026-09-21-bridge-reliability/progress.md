@@ -122,7 +122,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | **§4.4 真实应答（人工）** | 三 bot 私聊 `/status` | codeVersion 一致、truthProfile 匹配 | 三者均 `889d4bd3`，truthProfile 全部匹配 | complete |
 | 单测（Phase 1 收口） | `node --test ./tests/*.test.js` | 总数只增、fail 0 | **tests 104 / pass 104 / fail 0** | complete |
 | T2.1 最终验证 | npm test；发送失败与结构化 429 模拟 | 全通过且不截短 retry_after | 108/108 pass，全部语法检查通过 | complete |
-| T2.2 无 curl 孤儿 | 强杀后 `pgrep -fl curl` | 无残留 | — | pending |
+| T2.2 SIGTERM + T2.3 inbox | isolated child/process tests | store flush、子进程终止、重放护栏 | 116/116 pass；线上 kill smoke pending | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -365,3 +365,36 @@ HEAD 此后前进属正常，不应据此判失败。正确表述：**`DEPLOYED_
 - 具体路径：取回 update_id=N → 持久化 offset=N+1 → handler 尚未完成即崩溃 → 重启请求 N+1；没有持久化 update 内容就无从重放。SIGTERM 只 flush offset 也不能补齐这一点。T2.4 出站 outbox 对尚未产生回复的入站消息无帮助。
 - 建议修正规格为持久化 inbox：入站 update 与 offset 原子写入；恢复时重放未完成项；定义成功处理/可恢复交接后再移除，并通过崩溃恢复测试验证。需要确认允许在 T2.3 内加入这项持久层，不自行扩展。
 - 影响：线上仍为已验收 Phase 1；本分支仅 T2.1，未合并 main、未部署、未使用生产 token 测试。
+
+### T2.3 规格矛盾的裁决（2026-09-22）
+
+**Codex 的判断正确，规格是我写错的。** 原 T2.3 写「取得 update → 立即强制写盘 offset → 再处理」，
+忽略了 Telegram 的 `offset` 同时是「这些我收到了，你可以删」的回执语义：
+
+```
+1. 收到 5 条，offset 推到 6，存盘 ✅
+2. 处理第 1 条时进程被杀
+3. 重启读到 offset=6，向 Telegram 要第 6 条以后
+4. Telegram：前 5 条你早确认过了，已删 → 5 条消息永久消失且无记录
+```
+
+与 T2.2 的 `store.save({ force: true })` 叠加后，该损失从偶发变为**每次优雅关闭必然发生** ——
+与「宁可重复，不要丢」的既定取舍完全相反。
+
+**裁决：批准修正为「offset 与消息内容原子同写 + 重启重放未完成消息」**，并强制实现四条护栏：
+重放次数 ≤2（超限发中文放弃通知并出队）、年龄 ≤24h、条数 ≤200 + 单条长度上限、重放条目带 `isReplay`。
+其中**重放上限最关键** —— 本机历史 274 次强杀、一次连续 13h44m 重启风暴，无上限即死循环。
+
+**范围说明**：T2.3 由「调换两行顺序」变成「实现入站日志」，属**规格纠错**而非执行方扩大范围。
+T2.2 与 T2.3 须在同一个 commit 落地，分开会留下比现状更糟的中间态。
+
+
+### T2.2 + T2.3 complete
+
+- Implemented `installGracefulShutdown`: force-saves the store, marks Telegram transport closing, terminates tracked curl children, stops app-server, then exits with the signal code. Lock cleanup remains attached to process exit.
+- Implemented durable in-store Telegram inbox: accepted updates persist minimal message/callback metadata and the advanced offset in one atomic store save before dispatch; successful handlers dequeue and save.
+- Startup replays inbox items in ascending update order with `isReplay`; safeguards enforce max two replays, 24-hour age, 200 entries, and 16,384-character text. Exhausted items are removed and receive a Chinese abandonment notice; expired/overflow items emit error classes.
+- Added isolated tests for atomic persistence, replay ordering/counters, exhaustion, expiry, capacity/text limits, rollback on save failure, callback metadata, SIGTERM flush, curl/app-server child termination, and secret-field omission.
+- Validation: **116/116 tests pass**, `node -c index.js`, and all four zsh syntax checks pass.
+- Files: `index.js`, `tests/inbox-shutdown.test.js`.
+- Deployment remains pending; this branch has not used production tokens or restarted installed services.

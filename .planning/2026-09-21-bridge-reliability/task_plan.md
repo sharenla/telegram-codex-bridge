@@ -9,7 +9,7 @@
 
 ## Next Step
 
-T2.1 已完成；Phase 2 分支 `feat/phase-2-no-silent-failure` 停在 T2.2/T2.3 联动修改前。T2.3 仅提前持久化递增 offset 无法恢复未处理消息，待确认加入持久化入站 inbox 的最小规格修正；见 progress.md Error Log。
+继续 Phase 2，执行 T2.4：持久化出站 outbox，重启后补发失败回复。T2.2/T2.3 已在同一变更中完成；线上 kill smoke 仍需部署阶段执行。
 
 ## Current Phase
 
@@ -37,8 +37,8 @@ Phase 2
 ### Phase 2: 消除「完全无反馈」
 
 - [x] T2.1 `sendMessage` 纳入重试白名单 + 429 按 `retry_after` 退避
-- [ ] T2.2 SIGTERM 优雅关闭：强制落盘 + kill 在飞 curl + 停 app-server
-- [ ] T2.3 offset write-ahead：先落盘再处理（宁可重复，不要丢）
+- [x] T2.2 SIGTERM 优雅关闭：强制落盘 + kill 在飞 curl + 停 app-server
+- [x] T2.3 持久化入站 inbox + 重启重放（offset 与消息内容原子同写；含重放上限护栏）
 - [ ] T2.4 持久化 outbox，进程重启后补发
 - [ ] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
 - [ ] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
@@ -90,6 +90,9 @@ Phase 2
 | T2.5 **不做**定时进度推送，只在状态真实变化时编辑同一条 | 现网已有 5 次 429 + 88 次 editMessageText 失败，定时推送会加剧限流 |
 | T2.6 的上游 5xx 另建分类，**不塞进** `ACCOUNT_FAILOVER_PATTERNS` | 塞进去会误触发切号，重演 T2.7 要修的那个问题 |
 | T2.3 选择「宁可重复，不要丢」 | 重复回复用户能理解；消息凭空消失用户完全无从判断 |
+| T2.3 改为「offset 与消息内容原子同写 + 重启重放」，而非单纯提前写 offset | 原规格把 offset 当书签，但它同时是给 Telegram 的删除回执。先存回执后干活 = 崩溃即永久丢失；与 T2.2 强制落盘叠加后从偶发变必然。Codex 于 2026-09-22 照 §6 指出该矛盾，判断正确 |
+| 重放必须设次数上限（≤2 次） | 本机历史 274 次强杀、一次连续 13h44m 重启风暴。无上限的重放会形成「重启→重放→又被杀」死循环，比原问题更糟 |
+| inbox 直接挂在 store 内，不另开文件 | 实测三实例 store.json 仅 7–16KB、sessions 2–4 个；共用一次 `atomicWriteJson` 才能保证 offset 与消息内容的原子性 |
 
 ## Errors Encountered
 
