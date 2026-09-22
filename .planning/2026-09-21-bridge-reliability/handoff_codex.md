@@ -388,16 +388,73 @@ npm run install:<instance>
 - `index.js:1017` 目前只删锁文件 + `process.exit(143)`。需补：①`store.save({ force: true })` 强制落盘，绕过 `:1821` 的 1 秒节流 ②记录所有在飞 curl 子进程并在退出前全部 kill（`:1877` getUpdates 的 `--max-time` 是 45 秒）③正常停掉 codex app-server
 - 验收：单测覆盖「SIGTERM 后 store 已落盘」与「无遗留 curl 子进程」；实测强杀后 `pgrep curl` 无残留
 
-**T2.3 offset write-ahead**（R6，读 F7 的损失路径）
-- `index.js:8671` 现为「处理 update → 推进内存 offset → 节流写盘」。改为「取得 update → 立即强制写盘 offset → 再处理」
-- 取舍：最坏变成**重复处理一次**（用户能理解），而非**消息凭空消失**。宁可重复，不要丢
-- 验收：单测覆盖「写盘发生在处理之前」；模拟处理中崩溃，重启后不再重取该批
-- 与 T2.2 应连着做，分开会留下半修状态
+**T2.3 持久化入站 inbox + 重启重放**（R6，读 F7 的损失路径）
+
+> ⚠️ **2026-09-22 规格修正。** 原文写「取得 update → 立即强制写盘 offset → 再处理」，**是错的**。
+> Telegram 的 offset 同时是「这些我收到了，你可以删」的回执：先存推进后的 offset 再处理，
+> 一旦处理中崩溃，重启后按盘上 offset 去问，Telegram 已把那批删掉 → **消息永久消失**。
+> 与 T2.2 的强制落盘叠加后，这个损失会从偶发变成**每次优雅关闭必然发生**。
+> Codex 于 T2.2/T2.3 联动前照 §6 停下并指出该矛盾，判断正确。
+
+- **核心不变量**：持久化的 offset 只允许在**对应消息内容也已落盘**时前进，且两者必须在**同一次原子写**内完成。
+  `Store.save()` 已用 `atomicWriteJson`，所以把 inbox 挂在同一个 store 对象上、一次 `save({ force: true })` 即可满足
+- **流程**（`index.js:8712` 附近）：
+  1. 取得 updates → 逐条写入 `store.data.telegram.inbox` 并推进 `offset` → **一次 `store.save({ force: true })`** → 之后才 dispatch
+  2. 处理正常结束 → 从 inbox 删除该条 → save
+  3. 进程启动时：先按 `update_id` 升序重放 inbox 中未完成条目，再进入 `pollingLoop`
+- **每条 inbox 只存重放所需最小字段**：`update_id`、`kind`（message / callback_query）、`chatId`、`message_id`、
+  `text`、`from.id`、`reply_to_message` 的必要字段、`receivedAt`、`replayCount`。
+  **不要**存整条 update 原文，**不要**存 Codex turn 状态
+- **四条护栏（缺任何一条都会造出新问题）**：
+  1. **重放次数上限 `replayCount <= 2`** —— 超限即停止重放，向该 chat 发一条中文说明
+     （「这条消息在处理时服务重启了 N 次，已放弃，请重发」）并出队。
+     **这条最关键**：本机历史有 274 次强杀、一次连续 13h44m 重启风暴；没有上限，重放会变成
+     「重启 → 重放 → 又被杀 → 又重放」的死循环，永远出不来
+  2. **年龄上限 24 小时** —— 超时条目直接丢弃并记 errorClass。Telegram 自身也只留 24 小时，超时重放无意义
+  3. **条数上限**（建议 200）与单条 `text` 长度上限 —— `store.save()` 是全量重写，须防无界增长。
+     实测三实例 store.json 仅 7–16KB、sessions 2–4 个，直接放进 store 可行；若日后 store 显著变大，再拆独立文件
+  4. **重放条目带 `isReplay: true`** —— 供 T2.5 的 ack 逻辑判断「不要重复 ack，而应编辑已有状态消息」
+- **与 T2.2 必须同一个 commit 落地**。有了 inbox，T2.2 的 `store.save({ force: true })` 才是安全的
+  （保存的是「offset + 未完成消息」的一致快照）；分开做会留下比现状更糟的中间态
+- **与 T2.4 outbox 对称**：inbox 保入站不丢、outbox 保出站不丢。两者的存储风格与字段命名应一致，便于 T4.3 统一埋点
+- **取舍不变**：最坏是**重复处理一次**（用户能理解），而非**消息凭空消失**（用户完全无从判断）
+- **验收**：
+  - 单测：「消息内容与 offset 在同一次 save 内落盘」
+  - 单测：「dispatch 前 inbox 已含该条；正常结束后出队」
+  - 单测：「模拟处理中崩溃 → 重启后该条被重放且 `replayCount` 递增」
+  - 单测：「`replayCount` 超限 → 不再重放、发出中文放弃通知、出队」
+  - 单测：「超 24 小时条目被丢弃」「超条数上限时拒绝入队并记 errorClass」
+  - 实测：`kill -TERM` 运行中的实例 → 重启后未完成消息被重放，且 store 中 offset 与 inbox 一致
+
+**T2.3a 部署前必修：replay 不得阻塞 pollingLoop** ⚠️ 2026-09-22 验收发现的回归
+- 现状 `index.js` 启动尾部是 `await inbox.replay();` 然后 `await pollingLoop();`。
+  `replay()` 内部串行 `await run()` → `dispatch()` → `handleMessage()` → **一个完整 Codex turn，可能几分钟**
+- **后果**：replay 未跑完，`pollingLoop` 不启动，bot 对新消息完全没反应。
+  而 `findings.md` F5 已证明 turn 会卡死（6 次 `stream disconnected`、24 个孤儿 turn）——
+  一个卡住的重放 turn 会让 bridge **永远不开始轮询**，即彻底失联。
+  **这正是本计划要消灭的症状，被本次修复自身引入。** 与 08-30 重启风暴叠加会更严重
+- **改法**（最小）：
+  ```js
+  void inbox.replay().catch((err) => console.error("Inbox replay failed:", err));
+  await pollingLoop();
+  ```
+  `replay()` 内部串行顺序保持不变；`active` Set 已防同一 `update_id` 重复 dispatch，与新轮询并发安全
+- **验收**：单测「replay 中有一条 dispatch 永不 resolve 时，pollingLoop 仍能启动并处理新消息」；
+  部署后观察启动日志中 `Telegram Codex Bridge started.` 与首次成功轮询之间不被重放阻塞
+- **必须在 Phase 2 首次部署之前完成**，不得与它一起上线
 
 **T2.4 持久化 outbox**（R1 + R2）
-- 新增 `data/outbox.json`（或同级持久层）；发送失败入队，启动时先补发
+- 新增持久化出站队列；发送失败入队，启动时先补发。存储风格与字段命名须与 T2.3 的 inbox 对称
 - 注意：`data/` 被安装脚本的 rsync 排除，所以 outbox 不会被安装覆盖 —— 但要确认路径解析用的是运行时目录
-- 验收：单测覆盖「失败入队 → 重启后补发成功 → 出队」；杀进程再拉起能自动补发
+- **附带两项（2026-09-22 T2.2/T2.3 验收发现，非阻塞但必须在本任务内一并处理）**：
+  1. `TelegramInbox.run()` 里重放超限的放弃通知目前是 `await this.notify(...)` **直发**；
+     notify 一旦失败用户什么都收不到 —— 又回到零输出。改为经 outbox 投递
+  2. inbox 满（200 条）时 `accept()` 每轮立刻 `break`、offset 冻结、新消息全不处理，
+     但**群里没有任何提示**，只有一行 `bridge_inbox_full` 日志。应向受影响 chat 发一条中文说明
+     （例：「当前积压已满，暂时无法接收新消息，正在处理中」），并设最小间隔避免刷屏
+- 验收：单测覆盖「失败入队 → 重启后补发成功 → 出队」；
+  单测覆盖「放弃通知经 outbox 且 notify 失败时仍留存待补发」；
+  单测覆盖「inbox 满时发出中文提示且有最小间隔」；杀进程再拉起能自动补发
 
 **T2.5 收到即确认 + 编辑同一条**（R2 / R6 / R9 的共同兜底）
 - 受理消息后立刻回「已收到，正在处理」，带短 `requestId`；此后状态变化**编辑这一条**

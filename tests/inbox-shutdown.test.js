@@ -101,3 +101,33 @@ test('SIGTERM flushes store and terminates tracked child before exiting', async 
   assert.equal(disk.telegram.offset, 7); assert.equal(disk.telegram.inbox[0].text, 'pending');
   for (const pid of ready.pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
 });
+
+test('startup polls new messages while a replay dispatch remains pending', async t => {
+  const vm = require('node:vm');
+  const store = fixture(t);
+  new TelegramInbox(store).accept([update(10)]);
+  const handled = [];
+  const inbox = new TelegramInbox(store, { dispatch: async item => {
+    handled.push(item.update_id);
+    if (item.isReplay) await new Promise(() => {});
+  }});
+  // Execute the production startup tail, not a duplicated scheduling algorithm.
+  const source = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+  const tail = source.slice(source.indexOf('  console.log(`Telegram Codex Bridge started.'));
+  const startup = tail.slice(0, tail.indexOf('\n}\n\nmodule.exports'));
+  let polled = false;
+  const run = vm.runInNewContext(`(async () => { ${startup} })()`, {
+    console: { log() {}, warn() {}, error() {} }, INDEX_CODE_SHA256: 'test', INDEX_CODE_VERSION: 'test',
+    allowlist: null, storePath: store.storePath, sourceRegistry: {}, inbox,
+    pollingLoop: async () => {
+      polled = true;
+      const [item] = inbox.accept([update(11)]);
+      await inbox.run(item);
+    },
+  });
+  const result = await Promise.race([run.then(() => 'done'), new Promise(resolve => setTimeout(() => resolve('blocked'), 100))]);
+  assert.equal(result, 'done', 'a pending replay must not block polling startup');
+  assert.equal(polled, true);
+  assert.deepEqual(handled, [10, 11]);
+  assert.deepEqual(store.data.telegram.inbox.map(item => item.update_id), [10]);
+});

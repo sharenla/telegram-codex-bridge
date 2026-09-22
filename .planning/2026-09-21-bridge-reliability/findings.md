@@ -349,3 +349,7 @@ Phase 1 仍 in_progress，Phase 2 pending。已部署三实例且哈希一致，
 ### T2.2/T2.3 implementation finding (2026-09-22)
 
 The corrected inbox contract is implemented in the same change as graceful shutdown. `store.json` now provides the atomic boundary for offset plus minimal pending update data; no separate inbox file is used. Tests prove pending data is present before dispatch and survives a fresh Store reload. Production kill/restart smoke is intentionally deferred until the Phase 2 deployment gate.
+
+### T2.3a 回归验证（2026-09-22）
+
+串行等待启动重放导致 pollingLoop 不启动已通过真实启动尾部的隔离测试复现。仅将启动重放改为后台 Promise 后，新消息在旧 dispatch 永不完成时仍能处理，未完成项保留在 inbox；117/117 与完整语法检查通过，尚待灰度运行验证。

@@ -9,7 +9,7 @@
 
 ## Next Step
 
-继续 Phase 2，执行 T2.4：持久化出站 outbox，重启后补发失败回复。T2.2/T2.3 已在同一变更中完成；线上 kill smoke 仍需部署阶段执行。
+T2.3a 本地修复与回归验证已完成（117/117）。执行首次部署 + kill/restart smoke，灰度顺序 rv-prediction → 默认 → strategy-observation，每批真实应答通过后继续。之后执行 T2.4。
 
 ## Current Phase
 
@@ -39,7 +39,8 @@ Phase 2
 - [x] T2.1 `sendMessage` 纳入重试白名单 + 429 按 `retry_after` 退避
 - [x] T2.2 SIGTERM 优雅关闭：强制落盘 + kill 在飞 curl + 停 app-server
 - [x] T2.3 持久化入站 inbox + 重启重放（offset 与消息内容原子同写；含重放上限护栏）
-- [ ] T2.4 持久化 outbox，进程重启后补发
+- [x] T2.3a 部署前必修：replay 不得阻塞 pollingLoop（本次修复引入的回归）
+- [ ] T2.4 持久化 outbox，进程重启后补发（含放弃通知走 outbox、inbox 满时用户提示）
 - [ ] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
 - [ ] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [ ] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
@@ -93,6 +94,7 @@ Phase 2
 | T2.3 改为「offset 与消息内容原子同写 + 重启重放」，而非单纯提前写 offset | 原规格把 offset 当书签，但它同时是给 Telegram 的删除回执。先存回执后干活 = 崩溃即永久丢失；与 T2.2 强制落盘叠加后从偶发变必然。Codex 于 2026-09-22 照 §6 指出该矛盾，判断正确 |
 | 重放必须设次数上限（≤2 次） | 本机历史 274 次强杀、一次连续 13h44m 重启风暴。无上限的重放会形成「重启→重放→又被杀」死循环，比原问题更糟 |
 | inbox 直接挂在 store 内，不另开文件 | 实测三实例 store.json 仅 7–16KB、sessions 2–4 个；共用一次 `atomicWriteJson` 才能保证 offset 与消息内容的原子性 |
+| 新增 T2.3a 而非直接改 T2.3 | T2.2/T2.3 的核心不变量（原子同写、重放上限持久化）实现正确且已提交；replay 阻塞轮询是同一改动引入的**独立回归**，单列一个任务便于独立验证与独立回滚 |
 
 ## Errors Encountered
 

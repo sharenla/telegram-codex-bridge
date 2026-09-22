@@ -107,6 +107,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
+| T2.3a replay 不阻塞 polling | 真实启动尾部 + 永不完成 dispatch | polling 处理新消息 | 修复前失败；修复后 117/117 全部通过 | complete |
 | 语法检查（基线） | `node -c index.js` | 无输出即通过 | SYNTAX OK | complete |
 | 单测（基线） | `node --test ./tests/*.test.js` | 全通过 | **tests 99 / pass 99 / fail 0**（362ms） | complete |
 | 业务代码未被污染 | `git diff --shortstat` | `9 files changed, 510 insertions(+), 27 deletions(-)` | 完全一致 | complete |
@@ -398,3 +399,45 @@ T2.2 与 T2.3 须在同一个 commit 落地，分开会留下比现状更糟的�
 - Validation: **116/116 tests pass**, `node -c index.js`, and all four zsh syntax checks pass.
 - Files: `index.js`, `tests/inbox-shutdown.test.js`.
 - Deployment remains pending; this branch has not used production tokens or restarted installed services.
+
+### T2.2 + T2.3 验收（2026-09-22）—— 通过，但部署前需修一个回归
+
+**核心不变量逐条核验通过**（读代码，非依据总结）：
+
+| 检查项 | 位置 | 结果 |
+|---|---|---|
+| offset 与 inbox 原子同写 | `TelegramInbox.accept()` | ✅ 快照 old → 改副本 → **一次** `save({force:true})` → 失败回滚；两者同在一个 store 对象，共用同一次 `atomicWriteJson` |
+| `replayCount` 递增并持久化**在 dispatch 之前** | `TelegramInbox.run()` | ✅ `item.replayCount++` + `save({force:true})` 先于 `await this.dispatch(...)`，崩溃时盘上已有递增值，上限真实生效 |
+| 重放上限语义 | `run()` | ✅ 允许 2 次重放，第 3 次放弃并出队 |
+| SIGTERM 三件事 | `installGracefulShutdown()` | ✅ `store.save({force:true})` → `telegram.close()` + `server.stopAndWait()` → exit |
+| curl 子进程追踪与终止 | `TelegramApi.children` / `terminateChild()` | ✅ `add` + `once("close")` 清理；SIGTERM 后 1 秒 SIGKILL |
+| 四条护栏 | — | ✅ 200 条 / 16384 字符 / 24 小时 / `isReplay` 全部落地 |
+| 测试 | `tests/inbox-shutdown.test.js` | ✅ 8 个用例，覆盖要求的 6 项 + 2 项额外（原子写失败回滚、callback 路由元数据）。**116/116** |
+
+**三处实现优于规格，记录备查**：
+1. 容量超限时 `break` 在 `state.offset = update.update_id + 1` **之前** —— 存不下的 update 不予确认，交由 Telegram 重投。规格未要求
+2. 放弃通知**先 `remove` 再 `notify`** —— 否则 notify 抛异常会导致永久重放。规格未要求
+3. `this.closing = true` 且 `callOnce` 在 closing 时直接抛错 —— 关闭期间不再发起新请求。规格未要求
+
+**发现一个回归 → 立 T2.3a，部署前必修**：
+
+启动尾部为 `await inbox.replay();` 然后 `await pollingLoop();`。`replay()` 内部串行 `await run()` →
+`dispatch()` → `handleMessage()` → 完整 Codex turn（可能数分钟）。
+一条卡住的重放 turn 会让 `pollingLoop` **永不启动** → bot 对新消息完全无反应。
+`findings.md` F5 已证明 turn 确会卡死（6 次 `stream disconnected`、24 个孤儿 turn），
+且与 08-30 重启风暴叠加会更严重。**这是本计划要消灭的症状被本次修复自身引入。**
+
+改法：`void inbox.replay().catch(...)` + 立即 `await pollingLoop()`。
+`replay()` 内部串行顺序不变；`active` Set 已防同一 `update_id` 重复 dispatch，与新轮询并发安全。
+
+**两项非阻塞后续，已并入 T2.4 规格**：
+1. 放弃通知目前直发 `notify`，失败即零输出 → 改走 outbox
+2. inbox 满 200 时 offset 冻结、新消息全不处理，但群里无任何提示 → 应发中文说明并设最小间隔
+
+### T2.3a 实现与本地验收（2026-09-22）
+
+- 修复前：新增测试直接执行 index.js 的真实启动尾部，注入永不 resolve 的 replay dispatch，100ms 内 pollingLoop 未启动，断言 blocked != done 失败，复现启动失联。
+- 修复：仅将启动尾部 await inbox.replay() 改为后台启动并捕获异常，pollingLoop 随即启动；保留内部串行 replay 和 active Set。
+- 修复后：同测试验证新 update 被处理、旧 pending update 仍持久化；npm test 117/117 pass，node 与四项 zsh 语法全部通过。
+- 文件：index.js、tests/inbox-shutdown.test.js；本轮维护者更新的 handoff/task_plan/progress 一起入库，避免部署脏树。
+- T2.3a 本地 complete，首次灰度与 kill/restart smoke 接下来执行。只从 rv-prediction 开始，未通过真实应答不推第二批。

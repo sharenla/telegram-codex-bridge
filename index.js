@@ -8895,7 +8895,7 @@ async function main() {
   console.log(`Source registry: ${sourceRegistry.registryPath || "(builtin)"}`);
   if (sourceRegistry.registryError) console.warn(`Source registry warning: ${sourceRegistry.registryError}`);
 
-  await inbox.replay();
+  void inbox.replay().catch((err) => console.error("Inbox replay failed:", err));
   await pollingLoop();
 }
 
