@@ -456,6 +456,34 @@ npm run install:<instance>
   单测覆盖「放弃通知经 outbox 且 notify 失败时仍留存待补发」；
   单测覆盖「inbox 满时发出中文提示且有最小间隔」；杀进程再拉起能自动补发
 
+**T2.4a 部署前必修：outbox 缺容量上限与放弃条件** ⚠️ 2026-09-22 验收发现
+- 为什么：inbox 有三道闸（200 条 / 16384 字符 / 24 小时）+ 放弃机制（`replayCount >= 2`），
+  **outbox 一道都没有**。`deliver()` 的 catch 不区分错误类型，只做 `replayCount++` 与
+  `nextAttemptAt = now + max(30s, retryDelay)`，因此：
+  1. **无界增长**：Telegram 长时间不可用时（08-30 那种 13h44m），每个 turn 的每条回复都入队且发不出去。
+     `store.save({ force: true })` 是全量重写 `store.json`，队列越长越慢，最终拖垮整个 bridge
+  2. **永久错误无限重试**：403 `bot was blocked by the user`、403 `bot is not a member of...`、
+     400 `chat not found` 这类**永久**拒绝，每 30 秒重试一次，永远留在队列里，与上一条叠加后队列永不排空
+- 做什么（四项）：
+  1. **条数上限 500**（比 inbox 宽松，因一个 turn 可能产生多条回复）。超限丢弃**最旧**条目，
+     记 `bridge_outbox_overflow` 并累加计数；给条目加 `priority` 字段，溢出时**优先丢非通知类**
+     （放弃通知与 inbox 满提示是最后的告知手段，不能先被丢）
+  2. **年龄上限 24 小时**，与 inbox 对称。超时丢弃并记 `bridge_outbox_expired`。
+     理由：一天前的「Turn failed」现在送达毫无意义，只会让人困惑
+  3. **永久错误立即放弃**：识别 403 / `chat not found` / `bot was blocked` / `bot was kicked` 等，
+     **不重试**，直接出队并记 `telegram_permanent_reject`
+  4. **可重试错误设次数上限**（建议 10 次，配合 30s 起的退避≈覆盖数十分钟）。
+     超限出队并记 `bridge_outbox_giveup`
+  5. 把「outbox 当前积压条数 / 累计丢弃数」暴露到 `/status`，便于自查（T4.5 的指标会正式覆盖）
+- **不做**：不要为保顺序做 per-chat head-of-line blocking（见下方取舍说明）
+- 验收：
+  - 单测「超过 500 条时丢最旧且优先保留通知类」
+  - 单测「超过 24 小时的条目被丢弃且不发送」
+  - 单测「403 bot was blocked 立即出队且不重试」
+  - 单测「可重试错误达 10 次后出队并记 giveup」
+  - 单测「`/status` 暴露 outbox 积压与丢弃计数」
+- **必须在 Phase 2 首次部署 outbox 之前完成**
+
 **T2.5 收到即确认 + 编辑同一条**（R2 / R6 / R9 的共同兜底）
 - 受理消息后立刻回「已收到，正在处理」，带短 `requestId`；此后状态变化**编辑这一条**
 - **不做**定时进度推送。只在状态真实变化时更新，并设最小间隔
@@ -501,6 +529,16 @@ npm run install:<instance>
 **T4.4 中文文案 + 处置建议**（R9 / R-C）— 群内只给中文状态 + 处置建议；英文原文只进结构化日志与 `/health`。验收：文案快照测试；群内不再出现 `Bad Gateway`、`refresh_token_invalidated` 等原始串
 
 **T4.5 指标计数器 + 日报** — `inbound_received_total` / `inbound_ack_sent_total` / `turn_started_total` / `turn_completed_total` / `reply_sent_total` / `reply_send_failed_total` / `no_feedback_timeout_total` / `telegram_unreachable_seconds` / `codex_recovery_total` / `account_switch_total` / `queue_wait_seconds` / `turn_duration_seconds`。日报口径：收到数、成功反馈数、>30s 未反馈数、>2min 未反馈数、最终无反馈数、各原因占比、平均恢复时间。验收：计数器落盘且不受日志轮转影响
+
+**T4.8 bot token 不再出现在 curl 的 argv 里**
+- 为什么：Telegram Bot API 把 token 放在 URL 路径里，而 `TelegramApi.callOnce()` 用 `execFile("curl", [... url ...])`，
+  于是完整 token 出现在进程命令行中，`ps -Ao args` 可见。任何以 `wukong` 身份运行的进程（含各类 agent、脚本）都能读到。
+  2026-09-22 验收时即因一条未脱敏的 `pgrep -fl curl` 把三个 token 带进了会话记录
+- 做什么：改用 `curl --config -`，把含 token 的 URL 从 **stdin** 传给 curl，使 argv 里不再出现 token。
+  同时给仓库内所有诊断类命令建立「先脱敏再输出」的约定
+- 验收：`ps -Ao args | grep -c "api.telegram.org/bot[0-9]"` 为 0；三实例功能不变（`/status` 正常应答）；
+  单测覆盖「callOnce 不把 token 放进 argv」
+- **不做**：不改 token 本身（轮换与否是运营决定）
 
 **T4.6 日志保留策略**（R9 ⑤）— errorClass 汇总单独长期保留；把 `launchd.stderr.log` 纳入轮转。验收：`zsh -n ./scripts/rotate-bridge-logs.sh` 通过；扩展 `tests/log-rotation.test.js`
 
