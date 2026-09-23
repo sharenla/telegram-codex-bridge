@@ -80,6 +80,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 ### Phase 2: 消除「完全无反馈」
 
 - **Status:** in_progress
+- T2.8a（2026-09-23）：跨目录同 token 抢锁缺陷已修复并灰度部署；三实例真实 `/status` 待维护者确认，Phase 2 收口尚未执行。
 - T2.5（2026-09-23）：未完成，遇到 inbox 生命周期与重启复用 ack 的契约前提冲突，停止业务修改与部署；详见 Error Log 和末尾记录。
 - Actions taken:
   - T2.4b completed and gray-deployed in the mandated order: rv-prediction → default → strategy-observation.
@@ -134,6 +135,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.4b permanent-reject hotfix | structured 429/403/blocked and transport-error regressions | 133/133 pass; all syntax checks pass | complete |
 | T2.5 ack + lifecycle | manager + integration lifecycle/restart/steer tests and required checks | **145/145 pass / fail 0**; node/zsh/diff check pass | complete |
 | T2.6 upstream transient retry | structured 5xx/stream classification, no-tool same-account retry, tool-aware partial-execution guard, group-safe ack | **151/151 pass / fail 0**; node/zsh/diff check pass | complete |
+| T2.8a 跨目录实例锁热修 | 存活持有者跨 serviceRoot 拒绝、不删锁；无关 PID 与退出进程可接管；同目录重复启动拒绝 | 新增测试旧代码先失败；**163/163 pass / fail 0**，node、四项 zsh 与 diff check 通过 | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -199,6 +201,10 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T2.6 correction rv-prediction | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
 | 2026-09-23 | T2.6 correction default | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
 | 2026-09-23 | T2.6 correction strategy-observation | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
+| 2026-09-23 | T2.8a rv-prediction | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度与观察一轮通过 |
+| 2026-09-23 | T2.8a rv-prediction 重启 | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 成功重新取得原锁 |
+| 2026-09-23 | T2.8a default | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
+| 2026-09-23 | T2.8a strategy-observation | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -856,3 +862,12 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 本意是「确实是一个 bridge 进程，而非 PID 被复用」。
 
 **Phase 2 收口推迟**到 T2.8a 部署并经人工 `/status` 确认之后。本轮 `8c9687df` 的 `/status` 不再单独验收。
+
+### T2.8a 热修与灰度部署（2026-09-23）—— 等待人工 `/status`
+
+- 维护者更新的 `handoff_codex.md`、`task_plan.md`、`progress.md` 已先原样单独提交为 `1dd3633`。只改 `index.js` 锁持有判断及新增 `tests/instance-lock.test.js` 回归；`findings.md` 未改。
+- 新增跨 serviceRoot 竞争测试先在旧代码失败：工作区竞争者会接管存活服务的锁。修复后只用锁里记录的 `indexPath` 校验持有者命令行，不再比较竞争者的 serviceRoot；无关 PID 与退出持有者仍可接管，同目录重复启动仍拒绝。
+- 代码提交 `666dd972513b2d18860375c3c1e6ee0455c1a2d2`；`node -c index.js`、**163/163 tests pass / fail 0**、四项 `zsh -n`、`git diff --check` 通过。
+- 灰度严格按 rv-prediction → 观察一轮 → default → strategy-observation。rv-prediction 额外经安装脚本重启一次后成功重新取得锁。四份 `index.js` SHA-256 相同，前 12 位 `be7cce0b8ad6`；三个 `DEPLOYED_REF` 均为代码提交 `666dd97`，启动日志均有 Deployed ref、Bridge started、`codeVersion=be7cce0b`。
+- 三个 LaunchAgent 与 node bridge 进程存活；持久锁目录权限 700、正好 3 把锁，锁内 pid 均对应各自 serviceRoot 的 index.js 进程。两个命名角色文件未覆盖；curl 仅三个正常轮询子进程，无孤儿（诊断输出只打印 pid/ppid，未暴露 token）。
+- **待维护者人工验收**：三个 bot 各发 `/status`，确认 `codeVersion=be7cce0b`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。Bot API 不能代用户发送，也不能用生产 token 抢 `getUpdates`。确认前保持 Phase 2 `in_progress`，不合并 main、不打 tag、不从 main 重装。

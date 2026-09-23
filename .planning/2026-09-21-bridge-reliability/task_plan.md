@@ -9,10 +9,8 @@
 
 ## Next Step
 
-执行 **T2.8a**（必修，已在线上）：`lockBelongsToThisInstance` 把「持有者是否活着的 bridge」错写成
-「持有者是否与我同一实例」，导致从工作区用同一 token 启动时会删掉线上锁并接管（实测确认）。
-改为用锁里记录的 `indexPath` 比对持有者命令行。规格见 `handoff_codex.md` T2.8a。
-**T2.8a 部署并经人工 `/status` 确认之后，才做 Phase 2 收口。**
+等待维护者人工确认 T2.8a 三个 bot 的 `/status`（`codeVersion=be7cce0b`、outbox 两项为 0、truthProfile 不变）。
+确认后按 `handoff_codex.md`「Phase 2 收口」合并 main、打 `v0.2.0`，并从 main 依序重装三实例。
 
 ## Current Phase
 
@@ -50,7 +48,7 @@ Phase 2
 - [x] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [x] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
 - [x] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动
-- [ ] T2.8a 必修：跨目录启动会抢走线上锁（锁持有判断须看持有者自身，已在线上）
+- [x] T2.8a 必修：跨目录启动会抢走线上锁（锁持有判断须看持有者自身，已在线上）
 - **Status:** in_progress
 
 ### Phase 3: 修重启死循环与失联可见
