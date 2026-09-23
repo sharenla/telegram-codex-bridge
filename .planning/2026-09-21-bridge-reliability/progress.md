@@ -81,9 +81,11 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
-  -
+  - T2.4b completed and gray-deployed in the mandated order: rv-prediction → default → strategy-observation.
+  - All three services are running the same `index.js` SHA-256 `3562402dbada`; each `DEPLOYED_REF` points to `364e0f3` and startup logs contain `Deployed ref`, `Telegram Codex Bridge started`, and `codeVersion=3562402d`.
+  - rv-prediction observation round passed; named role files remained instance-specific and the redacted curl check showed one active long-poll child per bot with no stale duplicate.
 - Files created/modified:
-  -
+  - `index.js`, `tests/outbox.test.js`, this `progress.md`, and `task_plan.md`.
 
 ### Phase 3: 修重启死循环与失联可见
 
@@ -158,6 +160,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-22 | T2.4a rv-prediction | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy + SIGTERM/restart smoke passed |
 | 2026-09-22 | T2.4a default | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
 | 2026-09-22 | T2.4a strategy-observation | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
+| 2026-09-23 | T2.4b rv-prediction | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | gray deploy + observation passed |
+| 2026-09-23 | T2.4b default | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
+| 2026-09-23 | T2.4b strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -640,3 +645,12 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 - Code commit: `af00a9b` (`Fix Telegram outbox permanent reject classification`), workspace `index.js` SHA-256 prefix `3562402dbada`.
 - Files: `index.js`, `tests/outbox.test.js`; `findings.md` unchanged.
 - Deployment pending; next step is gray deployment rv-prediction → default → strategy-observation, then manual `/status` confirmation by the maintainer.
+
+
+### T2.4b 灰度部署收口（2026-09-23）
+
+- 灰度顺序严格为 rv-prediction → 观察一轮 → default → strategy-observation；三批安装脚本均成功。
+- 最终四份 `index.js`（工作区 + 三服务目录）哈希一致：`3562402dbada`；三份 `DEPLOYED_REF` 均为 commit `364e0f3`。
+- 三个 LaunchAgent/bridge 进程存活；三份启动日志均有 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=3562402d`；两个命名实例角色文件未被覆盖。
+- 脱敏 curl 检查显示每个 bot 一个活动的 `getUpdates` 长轮询，无残留旧进程。
+- 人工 `/status` 仍需维护者执行：预期 `codeVersion=3562402d`、`outboxQueued=0`、`outboxDiscarded=0`，且各实例 `truthProfile` 与既有基线不变；不要调用 Bot API `getUpdates` 验收。
