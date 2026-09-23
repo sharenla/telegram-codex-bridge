@@ -987,3 +987,19 @@ R3 死循环至此两端均已处理：bridge 侧启动不再被 getMe 阻塞（
 - 灰度按 rv-prediction → 观察一轮 → default → strategy-observation 完成。各批安装后新 Supervisor ready 均带 start_grace=60，Deployed ref/Bridge started/codeVersion 三标记齐全；appServerSpawnedMs 为 **1175 / 1955 / 1011**。工作区与三实例 index.js 全部 `5334599a2dad`，supervisor 全部 `2257af0ad696`；DEPLOYED_REF 全部指向 `32d1202`。三个 bridge 与其 supervisor/app-server 父子关系正确，3 把锁对应各自 PID/indexPath，两个命名角色哈希与源文件匹配；最终只有三个正常 getUpdates curl 子进程，无孤儿。诊断输出先脱敏。
 - 三实例本地 store 已见部署后的成功轮询时间，telegramState=ok、offlineSince=0，outboxQueued/outboxDiscarded 均为 0；这不是人工 /status 应答验收的替代。**请维护者对三个 bot 各发一次 /status**，确认 `codeVersion=5334599a`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变，并且 `telegramState=ok`。
 - 真实断网验证留待下一次网络故障，未主动中断生产网络。T3.3 已勾选，Next Step 指向 T3.4，所有任务行保留；未 push。
+
+### T3.3 验收（2026-09-23）—— 通过
+
+| 检查项 | 结果 |
+|---|---|
+| 不再自杀 | ✅ pollingLoop 无 `process.exit`；`requestSupervisorRestart` 函数已整体删除，全仓库无调用方 |
+| 状态划分 | ✅ `offlineMs >= 90_000` → unreachable，`>= 30_000` → degraded |
+| 退避 | ✅ `min(30s, 2s × 2^min(n−1,4))` → 2/4/8/16/30 |
+| Clash 切换 | ✅ `maybeRecover` 原样保留 |
+| 测试 | ✅ **176 / 176** |
+| 四份哈希 | ✅ `5334599a2d` |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认 `codeVersion=5334599a`、`telegramState=ok` |
+
+**连带影响**：`requestSupervisorRestart` 删除后 `restartReason` 永不再写入，T3.4 原规格「读回 restartReason」失去意义，
+T3.4 已改为基于 `offlineSince` / `lastOutage`（网络失联）与 `lastPollSuccessAt` / 关机记录（进程停机）两类数据源。
+真实断网验证待下一次网络故障。

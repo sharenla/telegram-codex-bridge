@@ -784,21 +784,41 @@ npm run install:<instance>
   2. **内部状态**：以最近一次成功轮询为基准，连续失败 ≥30 秒记 `telegram_degraded`，≥90 秒记 `telegram_unreachable`；
      状态变化时各写一行带时间戳的日志；恢复成功轮询时回到 `ok` 并写日志（含本次失联总时长）
   3. **持久化失联起点**：进入 `degraded` 时在 store 中记录 `telegram.health.offlineSince`（毫秒时间戳），恢复后
-     记录 `lastOutage = { startedAt, endedAt, durationMs }` 并清空 `offlineSince`。这是 **T3.4 恢复播报**的数据来源；
-     本任务**只记录，不播报**
-  4. **重试间隔指数退避**：替换固定 `sleep(2000)`，从 2 秒起翻倍，上限 30 秒；成功后复位。
-     现有 Clash 节点切换（`telegramTransportRecovery.maybeRecover`）逻辑保持不变，仍按原条件触发
-  5. **`/status` 暴露**：`telegramState`（ok / degraded / unreachable）、`offlineSince`、`lastOutage`
-- **不做**：不做恢复播报与读回 restartReason（T3.4）；不改 supervisor（T3.2 已完成）；不改 Clash 切换条件
-- **验收**：
-  - 测试「连续轮询失败超过 180 秒、错误次数超过 6 次 → 进程不退出」（先在现代码上失败）
-  - 测试「30 秒进入 degraded、90 秒进入 unreachable，各写一次日志，不重复刷」
-  - 测试「恢复后状态回到 ok，`lastOutage.durationMs` 正确，`offlineSince` 清空」
-  - 测试「重试间隔 2→4→8→16→30→30 秒，成功后复位」
-  - 测试「`offlineSince` 在重启后仍可从 store 读回」
-  - 170+ 全绿，总数只增
+     记录 `lastOutage = { startedAt, endedAt, durationMs }` 并清空 `offlineSince`。这是 **T3.4 改写：恢复后告知失联时长与原因（2026-09-23）**
 
-**T3.4 恢复播报 + 读回 restartReason**（R2）— 恢复后在受影响会话发「刚与 Telegram 失联 X 分 Y 秒（原因：…），期间积压 N 条，正在按顺序处理」；启动时**先读**再清空（修 `:4319` 的无条件清空）。验收：单测覆盖「消费后才清空」
+> 原规格「恢复后播报 + 读回 restartReason 再清空」已失效：T3.3 删除了 `requestSupervisorRestart`，
+> `restartReason` 不再被写入。改为以下两类数据源。`restartReason` / `restartRequestedAt` 的残留字段**不要动**（不扩大范围）。
+
+- **两类失联**：
+  | 类型 | 数据来源 | 何时判定 |
+  |---|---|---|
+  | A. 网络失联（进程活着） | T3.3 已写的 `health.lastOutage = { startedAt, endedAt, durationMs }` | 轮询恢复成功的那一刻 |
+  | B. 进程停机（强杀 / 崩溃 / 部署 / 机器重启） | 启动时计算 `now − health.lastPollSuccessAt`；加上本任务新增的关机记录 | 进程启动、首次轮询成功之后 |
+- **新增关机记录**：`installGracefulShutdown` 的 `close()` 里，在 `store.save` 之前写入
+  `health.lastShutdown = { at, signal: "SIGTERM"|"SIGINT", graceful: true }`。启动时若停机时长超阈值且上次没有 graceful 记录
+  （或记录时间早于上次成功轮询），判定为「异常退出或被强杀」。启动完成后清掉 `lastShutdown`，避免下次误读
+- **阈值**：失联 / 停机时长 **≥ 120 秒**才告知。部署重启通常只有几秒，不应触发
+- **告知对象与方式（不做全群广播）**：
+  1. **受影响的消息**：失联期间发出、恢复后才收到的消息（Telegram `message.date` 早于恢复时刻且晚于失联起点），
+     在它自己的 ack 文案后追加一行：`（服务刚恢复，这条消息在 X 分钟前发出）`。复用 T2.5 的 ack，不新发消息
+  2. **维护者汇总**：发给 allowlist 中的**私聊**（chat id 为正数的项），每次失联一条，经 outbox（`priority: "notice"`）：
+     `⚠️ <bot 名> 刚才与 Telegram 失联 X 分 Y 秒（<原因>），<开始时间> – <恢复时间>。期间收到的 N 条消息已在处理。`
+     进程停机类的原因写「服务进程停止运行（正常关闭 / 异常退出或被强杀）」
+  3. 群聊不单独发汇总
+- **原因的中文化**（只做这几类，完整错误码表归 T4.2）：DNS 解析超时 → 「网络 DNS 解析失败」；
+  TLS / SSL / connection reset → 「代理或网络连接中断」；连接超时 → 「网络连接超时」；
+  502 / 503 / Bad Gateway → 「Telegram 服务端暂时不可用」；其他 → 「网络异常」。原因取自失联期间最后一次轮询错误
+- **只告知一次**：同一次失联只发一次汇总；汇总发出后在 store 标记 `health.lastOutageNotifiedAt`，重启后不重复发
+- **不做**：不做全群广播；不做 supervisor 直发（T3.5）；不改 T3.3 的状态阈值与退避
+- **验收**：
+  - 测试「网络失联 150 秒后恢复 → 私聊收到一条汇总，含时长与中文原因」（先在现代码上失败）
+  - 测试「失联 60 秒后恢复 → 不发汇总」
+  - 测试「失联期间发出的消息，恢复后其 ack 带『服务刚恢复，X 分钟前发出』」
+  - 测试「进程停机 10 分钟、无 graceful 记录 → 启动后私聊收到『异常退出或被强杀』汇总」
+  - 测试「正常部署（graceful、停机几秒）→ 不发汇总」
+  - 测试「汇总只发一次，重启后不重复」
+  - 测试「群聊 chat id（负数）不会收到汇总」
+  - 176+ 全绿，总数只增
 
 **T3.5 supervisor 兜底直发**（R3）— 连续强杀 ≥3 次时 supervisor 自己 curl 发通知。token 从 `.env` 读，**不得**写进日志或提交。验收：`zsh -n` 通过 + 模拟连续强杀能收到
 
