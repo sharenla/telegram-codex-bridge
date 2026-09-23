@@ -653,6 +653,33 @@ npm run install:<instance>
 - 验收：单测覆盖「同 token 第二个实例被拒绝」与「持有者已死时锁可接管」；三实例重启后锁目录下出现 **3 个**锁文件（当前只有 1 个）
 - **不做**：不新建 bot、不改任何 `.env`
 
+**T2.8 补充：锁挪到持久位置后，必须防「PID 被复用」（2026-09-23）**
+
+- **新风险**：`os.tmpdir()` 会被系统清理，这是原问题；但挪到持久目录后，锁文件会**跨重启、跨开机保留**。
+  机器重启后，锁文件里记录的旧 PID 可能已被某个**毫不相干**的进程复用。现有 stale 判断只用
+  `process.kill(pid, 0)` 看进程是否存在 —— 会误判「锁还被占着」→ **新实例拒绝启动 → bot 彻底起不来**。
+  这比原问题更糟
+- **要求**：判断锁是否仍被持有时，不能只看 PID 是否存活，还要确认那个进程**确实是同一个 bridge 实例**：
+  - 锁文件里额外记录进程启动时间（或启动时生成的随机 nonce）与 `serviceRoot`
+  - 校验时对比该 PID 的实际启动时间（macOS 可用 `ps -o lstart= -p <pid>`）或命令行是否含本实例的 `index.js` 路径
+  - 任何一项对不上 → 视为陈旧锁，接管
+- **锁目录**：`~/Library/Application Support/telegram-codex-bridge-locks/`，按 token 哈希命名（沿用现有命名），权限 700
+- **报错**：锁确实被另一个活着的 bridge 持有时，报错写明「另一个实例正在用同一个 bot token（pid、serviceRoot）」
+- **不做**：不新建 bot、不改任何 `.env`、不删除 `os.tmpdir()` 里残留的旧锁文件（让它们自然过期）
+- **补充验收**：
+  - 测试「锁文件中的 PID 存活但属于无关进程（启动时间 / 命令行不匹配）→ 视为陈旧并接管」
+  - 测试「锁被真实存活的同实例持有 → 拒绝启动，报错含 pid 与 serviceRoot」
+  - 测试「持有者已退出 → 接管」
+  - 部署后：锁目录下出现 **3 个**锁文件（当前旧位置只剩 1 个）；三实例各自重启一次后仍能正常拿到锁
+
+**Phase 2 收口（T2.8 部署并经人工 `/status` 确认之后才做）**
+
+1. 确认 `task_plan.md` Phase 2 所有条目已打勾，`**Status:**` 改为 `complete`，Phase 3 改为 `pending`→ 仍 `pending`，`## Current Phase` 改为 Phase 3
+2. `git switch main` → `git merge --no-ff feat/phase-2-no-silent-failure` → `git tag -a v0.2.0 -m "Phase 2: no silent failure"`
+3. 用 `git rev-list -n1 v0.2.0` 取 tag 指向的 commit，核对 `git show v0.2.0:index.js | shasum -a256` 与线上三实例哈希一致
+4. 从 main 按灰度顺序重装三实例一次，使 `DEPLOYED_REF` 指向 main 上的 commit（代码不变，只为可追溯）
+5. 台账补 tag 行；**不要 push**（公开仓库，是否推送由维护者决定）
+
 ### Phase 3 — 修重启死循环与失联可见（分支 `feat/phase-3-restart-loop`）
 
 **T3.1 调整启动顺序**（R3）— 先 spawn app-server 再做 getMe / 上下文同步 / 账号健康检查；或直接用 `store.telegram.botIdentity` 缓存起步、后台异步校验。验收：断网条件下启动，app-server 能在 15 秒内成为子进程，supervisor 不再强杀

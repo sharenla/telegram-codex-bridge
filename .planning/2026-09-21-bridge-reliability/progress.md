@@ -800,3 +800,16 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 
 1. 三个 bot 各发一次 `/status`，确认 `codeVersion=84ba0072`、`outboxQueued=0`、`outboxDiscarded=0`，且 `truthProfile` 不变。
 2. 模型满载无法人为制造；发生真实 `server_overloaded` 时确认同账号最多重试 2 次、不会切号，最终 ack 给出 `/model` 建议。
+
+### T2.7 验收（2026-09-23）—— 通过
+
+| 检查项 | 结果 |
+|---|---|
+| 切号表 | ✅ 已移除 `/capacity/i`、`/overloaded/i`；429 / quota / usage limit / billing 保留并补 `usageLimitExceeded` |
+| 满载判定 | ✅ `classifyServerOverloadedError`：有结构化字段只认 `server_overloaded`，无则看文本 |
+| 处理顺序 | ✅ 满载 → 上游 → 认证 → 切号 → 上下文；R5 原问题修复 |
+| 复用工具调用判定 | ✅ 复用 T2.6 的 `turnHasToolActivity` |
+| 测试 | ✅ **158 / 158** |
+| 四份哈希 | ✅ `84ba00725886`，三份 `DEPLOYED_REF` 均 `7b5045d` |
+| 清单 | ✅ T2.1–T2.7 全部打勾，无删行 |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot 均 `codeVersion=84ba0072` |
