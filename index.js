@@ -1800,11 +1800,12 @@ class TelegramOutbox {
   static MAX_AGE_MS = 24 * 60 * 60 * 1000;
   static MAX_RETRIES = 10;
 
-  constructor(store, { send, now = Date.now, logger = (event) => console.warn(JSON.stringify(event)) }) {
+  constructor(store, { send, now = Date.now, logger = (event) => console.warn(JSON.stringify(event)), onDelivered = null }) {
     this.store = store;
     this.send = send;
     this.now = now;
     this.logger = logger;
+    this.onDelivered = onDelivered;
     this.active = new Map();
     this.flushing = null;
     store.data.telegram.outbox ||= [];
@@ -1851,10 +1852,10 @@ class TelegramOutbox {
     }
   }
 
-  enqueue(params, { priority = "normal" } = {}) {
+  enqueue(params, { priority = "normal", requestId = null } = {}) {
     const queue = this.store.data.telegram.outbox;
     const item = { id: crypto.randomUUID(), kind: "sendMessage", chatId: params.chat_id,
-      params: { ...params }, priority, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
+      params: { ...params }, priority, requestId, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
     queue.push(item);
     try {
       this._trimOverflow();
@@ -1887,6 +1888,7 @@ class TelegramOutbox {
       }
       try {
         const result = await this.send(item.params);
+        if (this.onDelivered) await this.onDelivered(item, result);
         this._remove(item);
         return result;
       } catch (error) {
@@ -1927,6 +1929,191 @@ class TelegramOutbox {
       }
     })().finally(() => { this.flushing = null; });
     return this.flushing;
+  }
+}
+
+
+class TelegramAckManager {
+  constructor({ send, edit, persist = async () => {}, logger = () => {}, now = Date.now, minEditIntervalMs = 3000 } = {}) {
+    this.send = send;
+    this.edit = edit;
+    this.persist = persist;
+    this.logger = logger;
+    this.now = now;
+    this.minEditIntervalMs = minEditIntervalMs;
+    this.states = new Set();
+    this.byRequestId = new Map();
+  }
+
+  _text(state, status, reason = "", position = null) {
+    const suffix = `（#${state.requestId}）`;
+    if (status === "queued") return `🕒 已收到，前面还有 ${Math.max(0, Number(position || 0))} 个任务，排队中${suffix}`;
+    if (status === "processing") return `⚙️ 正在处理${suffix}`;
+    if (status === "steer") return `➕ 已追加到当前任务${suffix}`;
+    if (status === "completed") return `✅ 已完成${suffix}`;
+    if (status === "failed") return `❌ 处理失败${suffix}：${reason || "执行未完成"}`;
+    if (status === "replay") return `🔁 服务重启后继续处理${suffix}`;
+    if (status === "interrupted") return `⚠️ 服务重启，这条任务已中断，请确认后重发${suffix}`;
+    return `⏳ 已收到，正在处理${suffix}`;
+  }
+
+  _schedule(state) {
+    if (state.timer || !state.pendingText) return;
+    const wait = Math.max(0, this.minEditIntervalMs - (this.now() - state.lastEditAt));
+    state.timer = setTimeout(() => {
+      state.timer = null;
+      void this._flushState(state);
+    }, wait);
+    if (state.timer.unref) state.timer.unref();
+  }
+
+  async _flushState(state, force = false) {
+    if (!state.pendingText || !state.messageId) return false;
+    if (!force && this.now() - state.lastEditAt < this.minEditIntervalMs) {
+      this._schedule(state);
+      return false;
+    }
+    const text = state.pendingText;
+    state.pendingText = null;
+    try {
+      await this.edit({ chat_id: state.chatId, message_id: state.messageId, text });
+      state.lastEditAt = this.now();
+      state.lastText = text;
+      return true;
+    } catch (error) {
+      const description = String(error?.message || error);
+      if (!/message is not modified/i.test(description)) {
+        this.logger({ errorClass: "telegram_ack_edit_failed", chatId: state.chatId, requestId: state.requestId, detail: description });
+      }
+      state.lastEditAt = this.now();
+      state.lastText = text;
+      return false;
+    }
+  }
+
+  async start({ chatId, requestId, item = null, isReplay = false, initialStatus = "accepted", position = null }) {
+    const state = {
+      chatId, requestId, item, messageId: Number(item?.ackMessageId || 0) || null,
+      status: null, lastText: "", lastEditAt: -Infinity, pendingText: null, timer: null,
+    };
+    this.states.add(state);
+    this.byRequestId.set(requestId, state);
+    if (isReplay && state.messageId) {
+      state.status = "replay";
+      state.pendingText = this._text(state, "replay");
+      await this._flushState(state, true);
+      return state;
+    }
+    state.status = initialStatus;
+    if (state.messageId) return state;
+    try {
+      const sent = await this.send({ chat_id: chatId, text: this._text(state, initialStatus, "", position) }, { requestId });
+      state.messageId = Number(sent?.message_id || 0) || null;
+      state.lastEditAt = this.now();
+      state.lastText = this._text(state, initialStatus, "", position);
+      if (state.messageId && item) {
+        item.ackMessageId = state.messageId;
+        try { await this.persist(item); }
+        catch (error) { this.logger({ errorClass: "telegram_ack_state_save_failed", requestId, detail: String(error?.message || error) }); }
+      }
+    } catch (error) {
+      this.logger({ errorClass: "telegram_ack_send_failed", chatId, requestId, detail: String(error?.message || error) });
+    }
+    return state;
+  }
+
+  restore(entry) {
+    const state = {
+      chatId: entry.chatId,
+      requestId: entry.requestId,
+      item: null,
+      messageId: Number(entry.ackMessageId || 0) || null,
+      status: entry.state === "queued" ? "queued" : "processing",
+      lastText: "",
+      lastEditAt: -Infinity,
+      pendingText: null,
+      timer: null,
+    };
+    this.states.add(state);
+    this.byRequestId.set(state.requestId, state);
+    return state;
+  }
+
+  async interrupt(state) {
+    if (!state) return false;
+    state.status = "interrupted";
+    state.pendingText = this._text(state, "interrupted");
+    if (!state.messageId) {
+      try {
+        const sent = await this.send({ chat_id: state.chatId, text: state.pendingText }, { requestId: state.requestId });
+        state.messageId = Number(sent?.message_id || 0) || null;
+      } catch (error) {
+        this.logger({ errorClass: "telegram_ack_send_failed", requestId: state.requestId, detail: String(error?.message || error) });
+      }
+      state.pendingText = null;
+      return Boolean(state.messageId);
+    }
+    return this._flushState(state, true);
+  }
+
+  async handleDelivered(item, result) {
+    const state = this.byRequestId.get(item?.requestId);
+    const messageId = Number(result?.message_id || 0) || null;
+    if (!state || !messageId) return;
+    state.messageId = messageId;
+    state.lastEditAt = this.now();
+    if (state.item) state.item.ackMessageId = messageId;
+    try { await this.persist(state.item || { requestId: state.requestId, ackMessageId: messageId }); }
+    catch (error) { this.logger({ errorClass: "telegram_ack_state_save_failed", requestId: state.requestId, detail: String(error?.message || error) }); }
+    if (state.pendingText) await this._flushState(state, false);
+  }
+
+  async update(state, status, { reason = "", position = null, force = false } = {}) {
+    if (!state || state.status === status && !reason && status !== "queued") return false;
+    state.status = status;
+    this.logger({ event: "telegram_ack_state", requestId: state.requestId, chatId: state.chatId, state: status });
+    state.pendingText = this._text(state, status, reason, position);
+    if (!state.messageId) return false;
+    return this._flushState(state, false);
+  }
+
+  async flushDue(force = false) {
+    for (const state of this.states) await this._flushState(state, force);
+  }
+}
+
+
+class TelegramActiveRequests {
+  constructor(store, { now = Date.now, logger = () => {} } = {}) {
+    this.store = store;
+    this.now = now;
+    this.logger = logger;
+    store.data.telegram.activeRequests ||= [];
+  }
+
+  list() { return this.store.data.telegram.activeRequests; }
+
+  create(entry) {
+    const next = { ...entry, createdAt: entry.createdAt || this.now(), replayCount: Number(entry.replayCount || 0) };
+    this.store.data.telegram.activeRequests.push(next);
+    this.store.save({ force: true });
+    this.logger({ event: "telegram_request_state", requestId: next.requestId, state: next.state });
+    return next;
+  }
+
+  update(requestId, patch) {
+    const entry = this.list().find(item => item.requestId === requestId);
+    if (!entry) return null;
+    Object.assign(entry, patch);
+    this.store.save({ force: true });
+    this.logger({ event: "telegram_request_state", requestId, state: entry.state });
+    return entry;
+  }
+
+  remove(requestId) {
+    const previous = this.list().length;
+    this.store.data.telegram.activeRequests = this.list().filter(item => item.requestId !== requestId);
+    if (this.list().length !== previous) this.store.save({ force: true });
   }
 }
 
@@ -1973,7 +2160,7 @@ class TelegramInbox {
           text, from: { id: (cb?.from || message.from)?.id },
           reply_to_message: message.reply_to_message ? { message_id: message.reply_to_message.message_id,
             from: { id: message.reply_to_message.from?.id } } : undefined,
-          callbackId: cb?.id, receivedAt: this.now(), replayCount: 0 };
+          callbackId: cb?.id, receivedAt: this.now(), replayCount: 0, ackMessageId: null };
         state.inbox.push(item);
         accepted.push(item);
       }
@@ -4550,10 +4737,27 @@ async function main() {
   const store = new Store(storePath);
   store.load();
   const shutdown = installGracefulShutdown({ store, telegram, getServer: () => codex });
+  const activeRequests = new TelegramActiveRequests(store, {
+    logger: event => console.log(JSON.stringify(event)),
+  });
+  let ackManager = null;
   const outbox = new TelegramOutbox(store, {
     send: params => telegram.call("sendMessage", params, { serialize: true }),
+    onDelivered: (item, result) => ackManager?.handleDelivered(item, result),
   });
   telegram.outbox = outbox;
+  ackManager = new TelegramAckManager({
+    send: (params, { requestId } = {}) => {
+      const item = outbox.enqueue(params, { priority: "notice", requestId });
+      return outbox.deliver(item);
+    },
+    edit: params => telegram.editMessageText(params),
+    persist: async item => {
+      if (item?.requestId) activeRequests.update(item.requestId, { ackMessageId: item.ackMessageId });
+      else store.save({ force: true });
+    },
+    logger: event => console.warn(JSON.stringify(event)),
+  });
   // Start recovery before intake, without allowing a stalled send to block polling.
   void outbox.flush().catch(() => console.error("Outbox recovery failed"));
 
@@ -5511,6 +5715,7 @@ async function main() {
           chatId,
           session,
           text: inputMeta.text,
+          ack: inputMeta.acks?.[0] || inputMeta.ack || null,
           kind: inputMeta.kind || "user",
           silent: Boolean(inputMeta.silent),
           contextRetryCount: Number(inputMeta.contextRetryCount || 0),
@@ -5538,6 +5743,7 @@ async function main() {
       isCompactionTurnKind(turnMeta?.kind) ? "compaction_auth_failure" : "turn_auth_failure",
     );
     if (replayTask) {
+      replayTask.ack = turnMeta?.acks?.[0] || turnMeta?.ack || null;
       queueAuthRecoveryReplayTask(rt, replayTask);
     }
 
@@ -5570,6 +5776,7 @@ async function main() {
       session,
       rt,
       text: inputMeta.text,
+      ack: inputMeta.acks?.[0] || inputMeta.ack || null,
       attemptedProfileIds: inputMeta.attemptedProfileIds || [],
       contextRetryCount: Number(inputMeta.contextRetryCount || 0),
       source: "turn_failure",
@@ -5730,6 +5937,7 @@ async function main() {
           chatId,
           session,
           text: retryTask.text,
+          ack: retryTask.ack || null,
           attemptedProfileIds: retryTask.attemptedProfileIds || null,
           kind: retryTask.kind || "user",
           silent: Boolean(retryTask.silent),
@@ -5757,10 +5965,12 @@ async function main() {
     contextRetryCount = 0,
     source = "turn",
     detail = "",
+    ack = null,
   }) {
     if (!text || contextRetryCount >= 1 || rt.compactionInProgress) return false;
     rt.postCompactionRetryTask = {
       text,
+      ack,
       attemptedProfileIds: attemptedProfileIds || [],
       kind: "user",
       silent: false,
@@ -5910,7 +6120,10 @@ async function main() {
         rt.lastGroupProgressByBucket = {};
         rt.sentGroupVisibleTexts = new Set();
         if (turn?.id && rt.pendingInputMeta) {
-          rt.turnInputMetaByTurnId[turn.id] = { ...rt.pendingInputMeta };
+          const existingMeta = rt.turnInputMetaByTurnId[turn.id] || {};
+          const acks = [...(existingMeta.acks || [])];
+          if (rt.pendingInputMeta.ack && !acks.includes(rt.pendingInputMeta.ack)) acks.push(rt.pendingInputMeta.ack);
+          rt.turnInputMetaByTurnId[turn.id] = { ...existingMeta, ...rt.pendingInputMeta, acks };
           rt.pendingInputMeta = null;
         }
         return;
@@ -5969,6 +6182,19 @@ async function main() {
                 if (shouldRedactCodexTurnOutput(chatId)) rememberGroupVisibleText(rt, text);
               }
             }
+            if (!authRetried && !retried && !contextRetried) {
+              for (const ack of turnMeta?.acks || (turnMeta?.ack ? [turnMeta.ack] : [])) {
+                await ackManager?.update(ack, "failed", {
+                  reason: isGroupChat(chatId) ? "上游处理失败" : truncateMiddle(extractTurnErrorText(turn) || "执行未完成", 120),
+                });
+                if (ack?.requestId) activeRequests.remove(ack.requestId);
+              }
+            }
+          }
+        } else if (!silentTurn) {
+          for (const ack of turnMeta?.acks || (turnMeta?.ack ? [turnMeta.ack] : [])) {
+            await ackManager?.update(ack, "completed");
+            if (ack?.requestId) activeRequests.remove(ack.requestId);
           }
         }
 
@@ -6881,12 +7107,13 @@ async function main() {
     });
   }
 
-  function enqueuePendingTask(rt, text) {
+  function enqueuePendingTask(rt, text, ack = null) {
     if (!Array.isArray(rt.pendingTasks)) rt.pendingTasks = [];
     if (!Number.isFinite(rt.queuedTaskSeq)) rt.queuedTaskSeq = 1;
     const task = {
       id: rt.queuedTaskSeq,
       text,
+      ack,
       createdAt: nowIso(),
     };
     rt.queuedTaskSeq += 1;
@@ -7239,6 +7466,7 @@ async function main() {
             chatId,
             session,
             text: replayTask.text,
+            ack: replayTask.ack || null,
             attemptedProfileIds: replayTask.attemptedProfileIds || null,
             kind: replayTask.kind || "user",
             silent: Boolean(replayTask.silent),
@@ -7504,7 +7732,6 @@ async function main() {
         rememberProjectThreadState(session);
         const rt = getRuntime(chatId);
         rt.activeTurnId = null;
-        rt.pendingInputMeta = null;
         rt.turnInputMetaByTurnId = {};
         rt.items = {};
         rt.turnDiffByTurnId = {};
@@ -7630,13 +7857,7 @@ async function main() {
     const nextTask = shiftPendingTask(rt);
     if (!nextTask) return false;
 
-    const remaining = getQueuedTaskCount(rt);
-    const suffix = remaining > 0 ? `，后面还剩 ${remaining} 条` : "";
-    await telegram.sendMessage({
-      chat_id: chatId,
-      text: `开始处理排队中的下一条任务${suffix}。`,
-    });
-    await startOrSteerTurn({ chatId, session, text: nextTask.text });
+    await startOrSteerTurn({ chatId, session, text: nextTask.text, ack: nextTask.ack || null });
     return true;
   }
 
@@ -7652,6 +7873,7 @@ async function main() {
     threadRetryCount = 0,
     skipBackendRecoveryWait = false,
     ignoreWorkspaceLock = false,
+    ack = null,
   }) {
     if (!skipBackendRecoveryWait) {
       await waitForCodexBackendRecovery();
@@ -7672,11 +7894,14 @@ async function main() {
       contextRetryCount,
       authReplayCount,
       threadRetryCount,
+      ack,
     };
 
     try {
       if (rt.compactionInProgress && !isCompactionTurnKind(kind)) {
         rt.pendingInputMeta = null;
+        await ackManager?.update(ack, "failed", { reason: "当前正在压缩上下文，请稍后重试" });
+        if (ack?.requestId) activeRequests.remove(ack.requestId);
         await telegram.sendMessage({
           chat_id: chatId,
           text: "正在压缩上下文，请稍后再发这条消息。",
@@ -7687,6 +7912,8 @@ async function main() {
       const autoReason = kind === "user" ? shouldAutoCompact(session, rt) : null;
       if (kind === "user" && autoReason === "emergency" && rt.activeTurnId) {
         rt.pendingInputMeta = null;
+        await ackManager?.update(ack, "failed", { reason: "上下文接近上限，请稍后重试" });
+        if (ack?.requestId) activeRequests.remove(ack.requestId);
         await telegram.sendMessage({
           chat_id: chatId,
           text: isGroupChat(chatId)
@@ -7698,6 +7925,8 @@ async function main() {
 
       if (kind === "user" && autoReason && !rt.activeTurnId) {
         rt.pendingInputMeta = null;
+        await ackManager?.update(ack, "failed", { reason: "正在自动压缩上下文，请稍后重试" });
+        if (ack?.requestId) activeRequests.remove(ack.requestId);
         const started = await startCompaction({
           chatId,
           session,
@@ -7715,14 +7944,9 @@ async function main() {
       }
 
       if (isGroupChat(chatId) && isChatBusy(rt) && !isCompactionTurnKind(kind)) {
-        const { position } = enqueuePendingTask(rt, text);
+        const { position } = enqueuePendingTask(rt, text, ack);
         rt.pendingInputMeta = null;
-        await telegram.sendMessage({
-          chat_id: chatId,
-          text: position === 1
-            ? "当前任务还在进行中，新任务已进入队列（第 1 条待处理）。如果你想改方向，请先发 /stop，再发新任务。"
-            : `当前任务还在进行中，新任务已进入队列（第 ${position} 条待处理）。如果你想改方向，请先发 /stop，再发新任务。`,
-        });
+        await ackManager?.update(ack, "queued", { position });
         return;
       }
 
@@ -7750,6 +7974,8 @@ async function main() {
         && await maybeBlockWorkspaceConflict({ chatId, session, ignore: ignoreWorkspaceLock })
       ) {
         rt.pendingInputMeta = null;
+        await ackManager?.update(ack, "failed", { reason: "工作区当前被其他任务占用" });
+        if (ack?.requestId) activeRequests.remove(ack.requestId);
         return;
       }
 
@@ -7757,10 +7983,16 @@ async function main() {
       if (threadId === AUTH_RECOVERY_HANDOFF) {
         return;
       }
+      await ackManager?.update(ack, "processing");
+      if (ack?.requestId) activeRequests.update(ack.requestId, { state: "running" });
       startTyping(chatId);
 
       if (rt.activeTurnId) {
-        rt.turnInputMetaByTurnId[rt.activeTurnId] = { ...rt.pendingInputMeta };
+        const existingMeta = rt.turnInputMetaByTurnId[rt.activeTurnId] || {};
+        const pendingMeta = { ...rt.pendingInputMeta };
+        const acks = [...(existingMeta.acks || [])];
+        if (ack && !acks.includes(ack)) acks.push(ack);
+        rt.turnInputMetaByTurnId[rt.activeTurnId] = { ...existingMeta, ...pendingMeta, acks };
         rt.pendingInputMeta = null;
         const steerInputItems = [
           { type: "text", text },
@@ -7901,6 +8133,7 @@ async function main() {
           chatId,
           session,
           text,
+          ack: pendingMeta?.acks?.[0] || pendingMeta?.ack || ack || null,
           attemptedProfileIds: pendingMeta?.attemptedProfileIds || attemptedProfileIds || [],
           kind,
           silent,
@@ -7926,6 +8159,7 @@ async function main() {
           contextRetryCount: Number(pendingMeta?.contextRetryCount || contextRetryCount || 0),
           source: "request_failure",
           detail: extractCodexErrorText(err),
+          ack: pendingMeta?.acks?.[0] || pendingMeta?.ack || ack || null,
         });
         if (handled) return;
       }
@@ -8237,7 +8471,7 @@ async function main() {
     return { token, promise };
   }
 
-  async function handleMessage({ chatId, text, message, isReplay = false }) {
+  async function handleMessage({ chatId, text, message, isReplay = false, inboxItem = null }) {
     if (allowlist && !allowlist.has(chatId)) {
       await notifyUnauthorizedChat(chatId);
       return;
@@ -8257,6 +8491,43 @@ async function main() {
       : normalizeIncomingText(text, botIdentity.username);
     const trimmed = (normalizedText || "").trim();
     if (!trimmed) return;
+
+    const beginAckedTurn = async (turnText, options = {}) => {
+      const rt = getRuntime(chatId);
+      const busy = isChatBusy(rt);
+      const steering = Boolean(rt.activeTurnId && message?.chat?.type === "private");
+      const requestId = inboxItem?.requestId || makeToken().slice(0, 6);
+      if (inboxItem) inboxItem.requestId = requestId;
+      const ackStatus = steering ? "steer" : busy ? "queued" : "accepted";
+      const active = activeRequests.list().find(entry => entry.requestId === requestId)
+        || activeRequests.create({
+          requestId,
+          chatId,
+          ackMessageId: Number(inboxItem?.ackMessageId || 0) || null,
+          state: steering ? "running" : busy ? "queued" : "running",
+          text: turnText,
+          kind: options.kind || "user",
+          replayCount: Number(inboxItem?.replayCount || 0),
+        });
+      const ack = await ackManager.start({
+        chatId,
+        requestId,
+        item: inboxItem,
+        isReplay,
+        initialStatus: ackStatus,
+        position: busy && !steering ? getQueuedTaskCount(rt) + 1 : null,
+      });
+      try {
+        await startOrSteerTurn({ ...options, chatId, session, text: turnText, ack });
+      } catch (err) {
+        await ackManager.update(ack, "failed", {
+          reason: isGroupChat(chatId) ? "上游处理失败" : truncateMiddle(err.message || String(err), 120),
+        });
+        activeRequests.remove(requestId);
+        throw err;
+      }
+      return ack;
+    };
 
     if (trimmed === "/start" || trimmed === "/help") {
       await telegram.sendMessage({ chat_id: chatId, text: buildHelpText() });
@@ -8406,12 +8677,7 @@ async function main() {
         await telegram.sendMessage({ chat_id: chatId, text: "Usage: /continue <message>" });
         return;
       }
-      await startOrSteerTurn({
-        chatId,
-        session,
-        text: continuedText,
-        ignoreWorkspaceLock: true,
-      });
+      await beginAckedTurn(continuedText, { ignoreWorkspaceLock: true });
       return;
     }
 
@@ -8431,15 +8697,11 @@ async function main() {
     }
 
     if (trimmed === "/review") {
-      await startOrSteerTurn({
-        chatId,
-        session,
-        text: [
-          "Review the current working tree diff for this repository.",
-          "Use code-review stance: findings first, prioritize bugs/regressions/missing tests, include file/line references when possible.",
-          "Do not edit files unless I explicitly ask after the review.",
-        ].join("\n"),
-      });
+      await beginAckedTurn([
+        "Review the current working tree diff for this repository.",
+        "Use code-review stance: findings first, prioritize bugs/regressions/missing tests, include file/line references when possible.",
+        "Do not edit files unless I explicitly ask after the review.",
+      ].join("\n"));
       return;
     }
 
@@ -8799,7 +9061,7 @@ async function main() {
     }
 
     try {
-      await startOrSteerTurn({ chatId, session, text: trimmed });
+      await beginAckedTurn(trimmed);
     } catch (err) {
       stopTyping(chatId);
       await telegram.sendMessage({
@@ -8998,10 +9260,48 @@ async function main() {
         chat: { id: item.chatId, type: item.chatType }, from: item.from,
         reply_to_message: item.reply_to_message };
       return item.kind === "message"
-        ? handleMessage({ chatId: item.chatId, text: item.text, message, isReplay: item.isReplay })
+        ? handleMessage({ chatId: item.chatId, text: item.text, message, isReplay: item.isReplay, inboxItem: item })
         : handleCallbackQuery({ id: item.callbackId, data: item.text, from: item.from, message, isReplay: item.isReplay });
     },
   });
+
+  async function recoverActiveRequests() {
+    for (const entry of [...activeRequests.list()]) {
+      const ack = ackManager.restore(entry);
+      if (entry.state === "running") {
+        await ackManager.interrupt(ack);
+        activeRequests.remove(entry.requestId);
+        continue;
+      }
+      if (Number(entry.replayCount || 0) >= 2) {
+        await ackManager.update(ack, "failed", { reason: "服务重启次数过多，请重发" });
+        activeRequests.remove(entry.requestId);
+        continue;
+      }
+      activeRequests.update(entry.requestId, {
+        state: "running",
+        replayCount: Number(entry.replayCount || 0) + 1,
+      });
+      try {
+        const session = getOrCreateSession(entry.chatId);
+        await startOrSteerTurn({
+          chatId: entry.chatId,
+          session,
+          text: entry.text,
+          kind: entry.kind || "user",
+          ack,
+          skipBackendRecoveryWait: true,
+        });
+      } catch (error) {
+        await ackManager.update(ack, "failed", {
+          reason: isGroupChat(entry.chatId) ? "上游处理失败" : truncateMiddle(error.message || String(error), 120),
+        });
+        activeRequests.remove(entry.requestId);
+      }
+    }
+  }
+
+  void recoverActiveRequests().catch(error => console.error("Active request recovery failed:", error));
 
   async function pollingLoop() {
     let offset = Number(store.data.telegram?.offset || 0);
@@ -9075,6 +9375,8 @@ module.exports = {
     Store,
     TelegramInbox,
     TelegramOutbox,
+    TelegramAckManager,
+    TelegramActiveRequests,
     getOutboxStatus,
     installGracefulShutdown,
     terminateChild,
