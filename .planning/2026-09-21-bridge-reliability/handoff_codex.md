@@ -629,6 +629,24 @@ npm run install:<instance>
 - `index.js:104` 移除 `/capacity/i`、`/overloaded/i`，另建 `MODEL_CAPACITY_PATTERNS`；命中后同号退避重试，仍失败则提示换模型。仅 429 / quota / usage_limit / billing 触发切号
 - 验收：单测覆盖「`Selected model is at capacity` 不触发切号」与「usage_limit 仍触发切号」
 
+**T2.7 补充（2026-09-23）**
+
+- **判定**：优先用结构化字段 `codexErrorInfo === "server_overloaded"`；文本 `Selected model is at capacity` 仅作补充。
+  从 `ACCOUNT_FAILOVER_PATTERNS` 中移除 `/capacity/i` 与 `/overloaded/i`
+- **切号仍然保留给真正的账号问题**：`usageLimitExceeded`、429、quota、usage limit、billing。
+  移除两条模式后，要有测试证明这些仍然触发切号
+- **重试规则沿用 T2.6**：只有该 turn 内**尚无工具调用**才同号退避重试（上限 2 次）；已有工具调用 → 不重试，提示可能已部分执行
+- **用尽后只建议、不自动换模型**：ack 改为
+  `❌ 当前模型繁忙（#id）：已重试 N 次仍未成功。可以稍后重发，或用 /model 换一个模型后重发`
+  不自动降级模型，也不切号
+- **处理顺序**：满载处理要排在切号之前，确保 `server_overloaded` 不会再被切号逻辑先截走（R5 的原问题）
+- **补充验收**：
+  - 测试「结构化 server_overloaded → 同号重试，不切号」
+  - 测试「文本 Selected model is at capacity、无结构化字段 → 同样按满载处理」
+  - 测试「usageLimitExceeded / 429 / quota 仍然触发切号」（回归）
+  - 测试「满载且已有工具调用 → 不重试，提示可能已部分执行」
+  - 测试「重试用尽 → ack 为建议换模型的中文提示，模型设置未被修改」
+
 **T2.8 修好防重复启动的实例锁**（R7）
 - `index.js:954` 现用 `os.tmpdir()`，macOS 会定期清理 `/var/folders/*/T/` —— 这正是实测只剩 1 个锁文件的原因
 - 迁到不会被系统清理的位置（如 `~/Library/Application Support/telegram-codex-bridge-locks/`），保持按 token 哈希命名，保留 stale-pid 清理逻辑；锁被占用时报错要指明「另一个实例正在用同一个 bot token」
