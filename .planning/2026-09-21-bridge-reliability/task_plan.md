@@ -9,7 +9,8 @@
 
 ## Next Step
 
-Phase 2 已收口：`v0.2.0` 指向 main 合并提交 `0211392`，三实例已从 main 重装。下一项按 Phase 3 契约执行 **T3.1**；本轮不实施 Phase 3 代码。
+开 Phase 3 分支 `feat/phase-3-restart-loop`，执行 **T3.1**：bot 身份改为「先用缓存、后台校验」，
+不再让 getMe 阻塞 app-server 启动；并列出启动路径上其余可能的网络阻塞点。规格见 `handoff_codex.md`「T3.1 补充」。
 
 ## Current Phase
 

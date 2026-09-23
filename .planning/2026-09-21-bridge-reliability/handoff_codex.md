@@ -713,6 +713,30 @@ npm run install:<instance>
 
 **T3.1 调整启动顺序**（R3）— 先 spawn app-server 再做 getMe / 上下文同步 / 账号健康检查；或直接用 `store.telegram.botIdentity` 缓存起步、后台异步校验。验收：断网条件下启动，app-server 能在 15 秒内成为子进程，supervisor 不再强杀
 
+**T3.1 补充（2026-09-23，基于 v0.2.0 代码现状）**
+
+- **现状**（`v0.2.0`）：启动主流程中 `await resolveBotIdentity()`（约 `index.js:5007`）远早于
+  `await startCodexServer()`（约 `:8092`）。断网时 getMe 重试可耗时 40 秒以上，而 supervisor 15 秒
+  （`POLL_INTERVAL=5` × `APP_SERVER_MISS_LIMIT=3`）看不到 app-server 子进程即强杀 → 死循环（R3）
+- **首选改法：bot 身份改为「先用缓存、后台校验」，不阻塞启动**
+  - `store.data.telegram.botIdentity` 有缓存（id 与 username 都在）→ 立即使用，**后台**调用 getMe 校验；
+    校验结果与缓存不同 → 更新 store、写日志，并让消息方向判断（`evaluateTelegramMessageDirection` 所用的 botIdentity）
+    改用新值 —— 因此 botIdentity 必须是可更新的引用，不能是启动时拷贝的常量
+  - 无缓存（首次安装）→ 仍需阻塞等 getMe；此情况由 T3.2 的启动宽限期兜底
+- **不要**为此大挪 `startCodexServer()` 的位置：它依赖其后才定义的 `codexEnv` / `codexBin` 等 `const`，
+  提前调用会撞上未初始化。如确需调整顺序，只允许移动**不依赖网络**的步骤，并在报告中说明
+- **检查启动路径上还有没有别的网络阻塞**：从进程启动到 `startCodexServer()` 之间，逐个列出每个 `await`
+  是否可能访问网络（Telegram / chatgpt.com / codex-lb）。凡可能阻塞的，要么改后台、要么加超时；在 progress.md 里给出清单
+- **启动计时日志**：启动时打印一行 `startup phase: appServerSpawnedMs=<从进程启动到 app-server 子进程创建的毫秒数>`，
+  作为部署后的客观证据
+- **验收**：
+  - 测试「有缓存身份时，getMe 永不返回，app-server 仍被启动」（先在现代码上失败）
+  - 测试「后台 getMe 返回不同身份 → store 更新，且方向判断使用新身份」
+  - 测试「无缓存身份时仍等待 getMe」（回归）
+  - 部署后三实例启动日志均有 `appServerSpawnedMs`，正常网络下应为数秒量级，**必须远小于 15000**
+  - 163+ 全绿，总数只增
+- **不做**：不改 supervisor（T3.2 的事）；不改轮询卡死阈值（T3.3 的事）
+
 **T3.2 supervisor 宽限期 + 强杀退避**（R3）— 进程存活 <60s 不计 miss；连续强杀后退避到 60s / 300s。验收：`zsh -n` 通过 + 脚本测试覆盖 + 模拟启动慢不再触发循环
 
 **T3.3 轮询卡死不再 exit**（R4）— 改持续退避重试，只标记 `telegram_degraded`(30s) / `telegram_unreachable`(90s)，**不退出进程**。依赖 T2.2 / T2.4。验收：单测覆盖两级状态迁移；长时间断网不再出现 `Bridge self-recovery restart requested`

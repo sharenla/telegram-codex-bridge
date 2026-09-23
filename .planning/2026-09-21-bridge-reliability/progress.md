@@ -889,3 +889,15 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 - `git show v0.2.0:index.js | shasum -a256`、工作区及三实例 `index.js` 均为 `be7cce0b8ad60ca926e2f19634a4b5886bd55fb9d68e1184a80cef809e78b7fc`。
 - 从 main 按 rv-prediction → 观察一轮 → default → strategy-observation 重装三实例；三个 `DEPLOYED_REF` 均为 `commit=021139200a113d5cf1870246ed6a0c9a70abbd59`、`ref=v0.2.0`。三个 LaunchAgent 与 bridge 进程存活、启动日志三标记齐全；角色文件保持专属，3 把锁均对应正确进程，curl 仅有正常轮询子进程。
 - 此次重装代码内容与人工验收的 `be7cce0b` 完全相同；未 push。Phase 2 状态为 `complete`，Current Phase 指向 Phase 3，下一项 T3.1。
+
+### Phase 2 收口验收（2026-09-23）—— 通过
+
+- main 上 `v0.2.0` → `0211392`（`rev-list` 核实），tag 内 `index.js` 与三实例同为 `be7cce0b8ad6`
+- 三实例 `DEPLOYED_REF` 均为 `commit=0211392 ref=v0.2.0`；163/163；未 push（本地领先 origin/main 51 个提交）
+- 仍未经线上真实故障验证的路径：上游 5xx 重试（T2.6）、模型满载（T2.7）
+
+### Phase 3 开始前的根因复核（2026-09-23，基于 v0.2.0）
+
+R3 仍原样存在：`await resolveBotIdentity()`（约 `:5007`）先于 `await startCodexServer()`（约 `:8092`）；
+supervisor 仍为 `POLL_INTERVAL=5` × `APP_SERVER_MISS_LIMIT=3` = 15 秒。
+Phase 2 让重启「不丢消息、有提示」，但没有让重启循环不再发生。
