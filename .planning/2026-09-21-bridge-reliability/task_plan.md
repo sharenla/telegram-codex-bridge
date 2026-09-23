@@ -9,10 +9,9 @@
 
 ## Next Step
 
-执行 **T3.5**：supervisor 兜底直发，按 handoff_codex.md 规格推进。
-T3.4 已完成实现、188/188 检查与 rv-prediction → 观察 → default → strategy-observation 灰度部署；
-codeVersion=`8fea81fe`。维护者仍需完成 progress.md 中的三 bot `/status` 与 rv-prediction 约 3 分钟停机演练；
-网络失联 A 类线上验证等待真实故障。
+执行 **T3.4b**（必修，零输出）：认证恢复耗尽后请求必须收尾，并让 backend 健康状态反映持续的认证失败；同一轮顺带做 **T3.4a**。
+规格见 `handoff_codex.md`「T3.4a / T3.4b」。来源：2026-09-23 真实断网实战（见 progress.md）。
+**维护者另需重新登录 strategy-observation 与 rv-prediction 使用的 Codex 账号**（refresh token 已吊销，属凭证操作，agent 不得处理）。
 
 ## Current Phase
 
@@ -59,8 +58,12 @@ Phase 3
 - [x] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
 - [x] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
 - [x] T3.4 恢复后播报失联时长与原因（网络失联用 lastOutage；进程停机用上次成功轮询时间 + 关机记录；2026-09-23 因 restartReason 已不再写入而改写）
+- [x] T3.4 已线上验收（2026-09-23 真实断网 26 分钟，三实例汇总送达）
+- [ ] T3.4a 汇总原因取最早发生的原因；时间用本地时间
+- [ ] T3.4b 【零输出，必修】认证恢复耗尽后请求必须收尾（❌ + 中文原因）；backend 健康状态须反映持续的认证失败
 - [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
 - [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
+- [ ] T3.7 修复 Clash 控制 socket 探测（现路径 ENOENT，断网时自动换节点未生效）
 - **Status:** in_progress
 
 ### Phase 4: 错误分类与可观测指标
@@ -68,7 +71,7 @@ Phase 3
 - [ ] T4.1 先用 rollout jsonl 出一版基线数字（只读脚本，不依赖新埋点）
 - [ ] T4.2 固定 15 项错误码表
 - [ ] T4.3 结构化日志（每行 JSON，含 `ts` / `chatId` / `requestId` / `errorClass`）
-- [ ] T4.4 群内改中文文案 + 处置建议；英文原文只进日志与 `/health`
+- [ ] T4.4 群内改中文文案 + 处置建议；英文原文只进日志与 `/health`；既有生命周期通知（认证恢复、`Started new thread`、thread 失效）并入 ack，不再单独发
 - [ ] T4.5 指标计数器 12 项 + 日报口径
 - [ ] T4.6 日志保留策略：errorClass 汇总长期留，`launchd.stderr.log` 纳入轮转
 - [ ] T4.7 收口沉淀：把 `findings.md` 的根因结论提炼成 `docs/reliability-postmortem.md`

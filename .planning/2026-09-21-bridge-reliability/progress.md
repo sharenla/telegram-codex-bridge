@@ -1044,3 +1044,31 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sharenla.telegram-co
 预期：allowlist 私聊收到一条 rv-prediction 的失联汇总，时长约 3 分钟，原因为「服务进程停止运行（正常关闭）」；停机期间那条消息的原 ack 带「服务刚恢复，这条消息在 X 分钟前发出」，之后编辑仍在同一条 ack 上；群聊不收到独立汇总。该演练未由 Codex 执行。A 类网络恢复等待下一次真实断网。
 
 剩余边界：Telegram 已接收发送请求、但成功响应或本地送达标记尚未落盘就崩溃时，沿用既有 outbox 的至少一次投递语义，仍可能重复；送达标记已落盘后的重启已覆盖去重测试，不扩大为全局 exactly-once 协议。汇总中的 N 仅为首个恢复批次，后续批次受影响消息仍有 ack 注记。
+
+### T3.4 线上验收 + 意外的真实断网实战（2026-09-23 20:29–20:55）
+
+维护者 20:33 按计划停掉 rv-prediction 做 3 分钟停机演练，但 wukong 到 Telegram 的网络在 **20:29 已经真实中断**
+（经代理 `127.0.0.1:1082` 与直连均 `SSL_ERROR_SYSCALL`），于 **20:55 恢复**。演练因此同时覆盖了 A 类（网络）与 B 类（进程停机）。
+
+**生效的部分（T3.3 / T3.4 首次真实验证）**：
+| 实例 | 失联区间 | 时长 | 汇总 |
+|---|---|---|---|
+| rv-prediction | 20:29:30 – 20:55:31 | 26m00s | ✅ 20:55:31 入队并送达（outbox 清零） |
+| default | 20:29:29 – 20:55:20 | 25m51s | ✅ 20:55:20 |
+| strategy-observation | 20:29:26 – 20:55:22 | 25m56s | ✅ 20:55:22 |
+- 26 分钟内无一次自杀、无重启循环（按历史中位数 183s，改造前约自杀 8 次）；rv 重启后 app-server 1113ms 起来
+- 状态日志：degraded（20:30:33）→ unreachable（20:31:26）→ telegram_recovered，各一行
+- 停机期间发出的消息被补收，ack 附「（服务刚恢复，这条消息在 22 分钟前发出）」✅
+
+**暴露的问题**：
+1. **【零输出】认证恢复耗尽后请求永不收尾** —— 请求 `#023b89` 在 20:55:53 最后一次 turn 以
+   `refresh token was revoked` 失败后，无任何消息，ack 停在「⚙️ 正在处理」，activeRequests 中保持 `running`（22:23 仍如此）。
+   认证恢复（Phase 1 前既有逻辑）接管请求并排队「恢复后重跑」，但全部账号恢复失败时无人将其置为终态 → **T3.4b**
+2. **【运维，需维护者】** strategy-observation 与 rv-prediction 的 Codex 账号 refresh token 已被吊销，
+   app-server 持续 `Failed to refresh token`（近 400 行分别 115 / 160 条）；default 走 codex-lb 不受影响。
+   同时两实例 `codexBackend.state` 仍显示 `ok`、`lastRecoveryResult=success:*` —— **健康状态与事实不符** → 并入 T3.4b
+3. **汇总原因选错** —— rv 汇总写「服务进程停止运行（正常关闭）」，但网络 20:29 先断、进程 20:33 才停（停机仅占 8/26 分钟）。
+   应取**最早发生**的原因；时间显示为 UTC ISO（`2026-09-23T12:29:30.635Z`），应为本地时间 → **T3.4a**
+4. **消息太吵 / 上下文丢失** —— 一条请求额外刷出 6 条：认证恢复提示 ×2、`Started new thread: <id>` ×3（英文、暴露内部 id）、
+   thread 失效提示 ×1。均为 Phase 1 前既有通知，绕过 T2.5 ack 直发。连续新建 3 个 thread 意味着对话上下文丢失 → **T4.4 扩展**（见 task_plan）
+5. **Clash 节点自动切换失效** —— `connect ENOENT .../verge-mihomo.sock`，控制 socket 不在代码探测的路径上，本次断网自动换节点未生效 → **T3.7**
