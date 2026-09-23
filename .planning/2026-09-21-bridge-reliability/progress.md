@@ -151,6 +151,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | — | （尚未部署） | HEAD `952675e` | `952675e` | `fff69755` | 含 T1.3 日志增补，随 Phase 2 首次部署上线 |
 | 09-22 21:56 | rv-prediction | `feat/phase-2-no-silent-failure` | `746aab7` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
 | 09-22 21:56 | default / strategy-observation | `feat/phase-2-no-silent-failure` | `d265888` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `c4d4ef4` | `ec5dd004` | ✅ 2026-09-23 `/status` 验收通过；**含 T2.4b 待修缺陷** |
 
 | 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
 | 2026-09-22 | T2.4a rv-prediction | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy + SIGTERM/restart smoke passed |
@@ -586,3 +587,44 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 - rv-prediction SIGTERM/restart smoke passed before the other two deployments. After restart, store showed inbox 0, outbox 0, discarded 0. No stale curl was observed; final process inspection shows exactly one redacted getUpdates curl per bot.
 - T2.4a deployed. No source or runtime directories were manually edited.
 - Manual `/status` evidence is still required for this outbox build. Expected values for each bot: `codeVersion: ec5dd004`, `outboxQueued: 0`, `outboxDiscarded: 0`; verify `truthProfile` remains the instance baseline. Do not use Bot API/getUpdates for this check.
+
+### T2.4a 验收（2026-09-23）—— 五项全部落地，但发现一个已上线的丢消息缺陷
+
+**核实通过**（读代码 + 实跑验证，非依据总结）：
+
+| 检查项 | 结果 |
+|---|---|
+| 三项上限常量 | ✅ `MAX_ITEMS=500` / `MAX_AGE_MS=24h` / `MAX_RETRIES=10` |
+| 溢出优先丢非通知类 | ✅ `_trimOverflow()` 用 `findIndex(e => e.priority !== "notice")`，全为通知时才退回 index 0 |
+| 通知类正确标记 | ✅ inbox 满提示与重放放弃通知均以 `{ priority: "notice" }` 入队 |
+| 丢弃计数跨重启持久化 | ✅ `_stats()` 落在 `store.data.telegram.outboxStats`，`_remove` 失败时回滚计数 |
+| `/status` 新字段 | ✅ `outboxQueued` / `outboxDiscarded` |
+| 失败分支 save 不覆盖原始错误 | ✅ 独立 try/catch，记 `bridge_outbox_state_save_failed` 后仍 `throw error`（原始错误）—— 上轮要求的修复已正确落地 |
+| 测试 | ✅ **129 / 129 / fail 0** |
+| 四份哈希一致 | ✅ workspace 与三实例均 `ec5dd004`，三份 `DEPLOYED_REF` 同为 `c4d4ef4` |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot |
+
+**缺陷（已上线）→ 立 T2.4b 热修**：
+
+`_isPermanentReject()` 除结构化的 `error_code === 403` 外，还对**整条错误消息**做
+自由文本 `/(?:^|\D)403(?:\D|$)/` 匹配。把该函数抽出实跑验证：
+
+| 输入 | 实测判定 |
+|---|---|
+| 429 限流，description `Too Many Requests: retry after 403` | ❌ 判为永久 → **回复被永久丢弃** |
+| 传输层 `curl: (28) Operation timed out after 403 milliseconds` | ❌ 判为永久 → **丢弃** |
+| 真实 `403 Forbidden: bot was blocked by the user` | ✅ 正确 |
+
+**该分支只会制造假阳性、不可能带来真阳性**：`callOnce` 对所有 API 层错误都设了
+`err.body = parsed`，真实拒绝必然走得通结构化判断；`body` 缺失只发生在传输层错误，
+而传输层错误永远不是永久拒绝。所以自由文本匹配零收益、纯风险。
+
+**与前几轮的区别**：T2.3a / T2.4a 都是部署前拦下的，**这次已经在线上三个实例跑着**。
+单次触发概率低（需错误文本中恰好出现被非数字包围的 403），但后果是静默永久丢一条回复。
+
+**不回滚**：回滚会一并失去 T2.4a 的 outbox 有界化，而无界增长拖垮 bridge 的后果更重。
+按热修处理，排在 T2.5 之前。
+
+**一个仍未被真实验证的点**：`/status` 显示 `outboxQueued: 0 / outboxDiscarded: 0`，
+说明线上**尚未发生过真实的失败投递**，T2.4/T2.4a 的核心路径（失败 → 持久化 → 补发）
+目前只有单测覆盖。真正的验证要等一次真实网络抖动，或在 Phase 3 完成后主动制造一次。

@@ -484,6 +484,45 @@ npm run install:<instance>
   - 单测「`/status` 暴露 outbox 积压与丢弃计数」
 - **必须在 Phase 2 首次部署 outbox 之前完成**
 
+**T2.4b 热修：`_isPermanentReject` 的自由文本 403 匹配会丢消息** ⚠️ 已在线上
+- 现状（`index.js` `TelegramOutbox._isPermanentReject`）：
+  ```js
+  return code === 403 || /(?:^|\D)403(?:\D|$)/.test(message)
+    || /chat not found|bot (?:was )?blocked|.../i.test(message);
+  ```
+  第二个分支对**整条错误消息**做自由文本匹配，实测会误判（抽出该函数实跑验证）：
+  | 输入 | 实测判定 |
+  |---|---|
+  | 429 限流，description `Too Many Requests: retry after 403` | ❌ 判为永久 → **回复被永久丢弃** |
+  | 传输层 `curl: (28) Operation timed out after 403 milliseconds` | ❌ 判为永久 → **丢弃** |
+  | 真实 `403 Forbidden: bot was blocked by the user` | ✅ 正确 |
+- **为什么这个分支只会制造假阳性、不可能带来真阳性**：
+  `callOnce` 对所有 Telegram API 层错误都设了 `err.body = parsed`（含 `error_code` 与 `description`），
+  所以真实拒绝**一定**走得通 `code === 403` 这条结构化判断；
+  而 `body` 缺失只发生在**传输层错误**（curl 失败），传输层错误**永远不是**永久拒绝。
+  因此自由文本分支没有任何上行收益，只有下行风险
+- 改法：
+  ```js
+  _isPermanentReject(error) {
+    const body = error?.body;
+    if (!body) return false;                       // 传输层失败永远不是永久拒绝
+    if (Number(body.error_code) === 403) return true;
+    return /chat not found|bot (?:was )?blocked|bot (?:was )?kicked|not a member/i
+      .test(String(body.description || ""));
+  }
+  ```
+  描述类模式同样只对 `body.description` 匹配，不再扫整条消息
+- 验收：
+  - 单测「429 且 description 含 403 → 判为可重试，不出队」
+  - 单测「传输层错误消息含 403 → 判为可重试」
+  - 单测「`error_code === 403` → 判为永久并出队」
+  - 单测「`description` 含 `bot was blocked` → 判为永久」
+  - 129+ 全绿，总数只增
+- **严重度与处置**：单次触发概率低（需错误文本中恰好出现被非数字包围的 403），
+  但后果是**静默永久丢一条回复** —— 正是本计划存在的理由。
+  **不回滚**：回滚会一并失去 T2.4a 的 outbox 有界化，而无界增长拖垮 bridge 的后果更重。
+  按热修处理，**排在 T2.5 之前**，修完走完整灰度三批 + 人工 `/status`
+
 **T2.5 收到即确认 + 编辑同一条**（R2 / R6 / R9 的共同兜底）
 - 受理消息后立刻回「已收到，正在处理」，带短 `requestId`；此后状态变化**编辑这一条**
 - **不做**定时进度推送。只在状态真实变化时更新，并设最小间隔
