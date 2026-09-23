@@ -1870,10 +1870,12 @@ class TelegramOutbox {
   _isExpired(item) { return this.now() - Number(item.receivedAt || 0) > TelegramOutbox.MAX_AGE_MS; }
 
   _isPermanentReject(error) {
-    const message = error?.message ? String(error.message) : String(error);
-    const code = Number(error?.body?.error_code);
-    return code === 403 || /(?:^|\D)403(?:\D|$)/.test(message)
-      || /chat not found|bot (?:was )?blocked|bot (?:was )?kicked|not a member/i.test(message);
+    const body = error?.body;
+    if (!body) return false;
+    if (Number(body.error_code) === 403) return true;
+    const description = body.description || (error?.message && String(error.message));
+    return /chat not found|bot (?:was )?blocked|bot (?:was )?kicked|not a member/i
+      .test(String(description || ""));
   }
 
   deliver(item) {

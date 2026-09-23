@@ -138,3 +138,66 @@ test('send failure state-save error does not replace original send error', async
   const save = store.save.bind(store); let calls = 0; store.save = (...args) => { if (++calls > 1) throw Error('disk-full'); return save(...args); };
   await assert.rejects(outbox.sendMessage(params), /original-send-error/);
 });
+
+test('T2.4b 429 description mentioning retry after 403 remains retryable', async t => {
+  const store = fixture(t); const logs = []; let sends = 0;
+  const outbox = new TelegramOutbox(store, {
+    logger: event => logs.push(event),
+    send: async () => {
+      sends++;
+      const error = Error('Telegram API sendMessage failed: Too Many Requests: retry after 403');
+      error.body = { error_code: 429, description: 'Too Many Requests: retry after 403' };
+      throw error;
+    }
+  });
+  await assert.rejects(outbox.sendMessage(params), /retry after 403/);
+  assert.equal(sends, 1);
+  assert.equal(store.data.telegram.outbox.length, 1);
+  assert.equal(logs.some(event => event.errorClass === 'telegram_permanent_reject'), false);
+});
+
+test('T2.4b transport text mentioning 403 remains retryable without a body', async t => {
+  const store = fixture(t); const logs = []; let sends = 0;
+  const outbox = new TelegramOutbox(store, {
+    logger: event => logs.push(event),
+    send: async () => { sends++; throw Error('curl: (28) Operation timed out after 403 milliseconds'); }
+  });
+  await assert.rejects(outbox.sendMessage(params), /after 403 milliseconds/);
+  assert.equal(sends, 1);
+  assert.equal(store.data.telegram.outbox.length, 1);
+  assert.equal(logs.some(event => event.errorClass === 'telegram_permanent_reject'), false);
+});
+
+test('T2.4b structured 403 is permanent and discarded', async t => {
+  const store = fixture(t); const logs = []; let sends = 0;
+  const outbox = new TelegramOutbox(store, {
+    logger: event => logs.push(event),
+    send: async () => {
+      sends++;
+      const error = Error('Telegram API sendMessage failed');
+      error.body = { error_code: 403, description: 'Forbidden' };
+      throw error;
+    }
+  });
+  await assert.rejects(outbox.sendMessage(params));
+  assert.equal(sends, 1);
+  assert.equal(store.data.telegram.outbox.length, 0);
+  assert.equal(logs[0].errorClass, 'telegram_permanent_reject');
+});
+
+test('T2.4b structured blocked description is permanent', async t => {
+  const store = fixture(t); const logs = []; let sends = 0;
+  const outbox = new TelegramOutbox(store, {
+    logger: event => logs.push(event),
+    send: async () => {
+      sends++;
+      const error = Error('Telegram API sendMessage failed');
+      error.body = { error_code: 400, description: 'Forbidden: bot was blocked by the user' };
+      throw error;
+    }
+  });
+  await assert.rejects(outbox.sendMessage(params));
+  assert.equal(sends, 1);
+  assert.equal(store.data.telegram.outbox.length, 0);
+  assert.equal(logs[0].errorClass, 'telegram_permanent_reject');
+});
