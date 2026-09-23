@@ -564,6 +564,41 @@ npm run install:<instance>
   - **人工验收**（部署后由维护者执行）：在一个群里 @ bot 发一条真实消息，确认先出现「已收到」，
     之后状态在**同一条消息**上变化，最终变成「已完成」，正文回复另外出现；全程只有一条状态消息
 
+**T2.5 补充：任务生命周期（2026-09-23 裁决，解决 Codex 提出的出队边界矛盾）**
+
+> Codex 照 §6 停下并指出：inbox 条目在 dispatch 返回时即删除，而 dispatch 返回于 turn **启动或入队**，
+> 不是 turn **终态**；dispatch 还收到的是条目副本。因此 `ackMessageId` 无处持久化。判断正确，规格遗漏。
+> 由此还推出一个更大的缺口：**T2.3 的重放只覆盖「已收到、未开始」这段窗口**，turn 执行中被杀时
+> inbox 早已为空，不会重放、也无任何提示 —— 即 findings F5 的 24 个孤儿 turn，T2.3 并未修掉。
+
+- **不要把 inbox 保留到 turn 终态。** 那会让重启后把执行到一半的 turn 整个重跑。本 bot 在
+  `danger-full-access` 下执行 shell 命令（改文件、跑部署、涉及 Deribit 交易代码），重跑等于重复执行
+  有副作用的操作。「宁可重复，不要丢」只适用于消息，不适用于副作用
+- **inbox 保持现状**：职责只是「消息不丢」，dispatch 完成即出队，不改
+- **新增持久化「进行中任务台账」**（挂在同一 store，如 `store.data.telegram.activeRequests`，与 inbox/outbox 共用原子保存）：
+  - 每条字段：`requestId`、`chatId`、`ackMessageId`、`state`（`queued` / `running`）、`text`、`kind`、`createdAt`、`replayCount`
+  - 在消息被受理、ack 入 outbox 时建立；**只在 turn 进入终态（完成 / 失败 / 中断）时删除**
+  - outbox 延迟补发的 ack 成功后，要回填 `ackMessageId`（经 outbox item 关联 requestId）
+- **重启时按状态处理**：
+  | state | 处理 |
+  |---|---|
+  | `queued`（尚未执行） | 安全，重新入队；沿用 `replayCount ≤ 2` 上限，超限按放弃处理 |
+  | `running`（执行中被打断） | **不重跑**。把原 ack 改成 `⚠️ 服务重启，这条任务已中断，请确认后重发（#id）`（无 ackMessageId 则经 outbox 新发），然后出台账 |
+- **steer**（私聊中追加到正在运行 turn 的消息）：建立自己的台账条目，状态跟随它所属的 turn；
+  ack 文案 `➕ 已追加到当前任务（#id）`；该 turn 终态时一并结束
+- **内部重试**（切号、上下文压缩后重试、thread 失效重建）：同一 requestId、同一条 ack，重试期间不出台账、不新发 ack
+- **一并修掉 Codex 草稿复核中列出的问题**：`/continue` 与 `/review` 走 turn 的也要接 ack；
+  排队的旧提示（「开始处理排队中的下一条任务」等）改为编辑 ack，不再单独发；
+  失败更新同样受 3 秒间隔约束，不许用 force 绕过；requestId 持久化并在状态变化时写日志；
+  首次创建 thread 时不得清空 pendingInputMeta 导致丢失 requestId 关联
+- **补充验收**（在原 T2.5 验收之外）：
+  - 集成测试「消息从受理到 turn/completed，全程同一 requestId、同一 ackMessageId，终态后台账为空」
+  - 集成测试「running 状态下模拟重启 → 不重跑 turn，原 ack 被改为中断提示，台账清空」
+  - 集成测试「queued 状态下模拟重启 → 重新入队并执行」
+  - 集成测试「内部重试（切号 / 压缩重试）不产生第二条 ack」
+  - 集成测试「steer 消息的 ack 随所属 turn 终态结束」
+  - **只有管理器单测全绿不算完成**，必须有上述接入层集成测试
+
 **T2.6 上游 5xx / 流中断自动重试**（F5，27 个失败中的 13 个，目前零重试）
 - 新增 `upstream_transient` 分类，匹配 `stream disconnected`、`502`、`503`、`Hard affinity owner account is unavailable`、`No available accounts`、`proxy rejected connection`、`Codex upstream stream failed`；同账号指数退避重试 2–3 次后再报错
 - **不要**塞进 `ACCOUNT_FAILOVER_PATTERNS`

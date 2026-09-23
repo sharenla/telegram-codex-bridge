@@ -80,6 +80,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 ### Phase 2: 消除「完全无反馈」
 
 - **Status:** in_progress
+- T2.5（2026-09-23）：未完成，遇到 inbox 生命周期与重启复用 ack 的契约前提冲突，停止业务修改与部署；详见 Error Log 和末尾记录。
 - Actions taken:
   - T2.4b completed and gray-deployed in the mandated order: rv-prediction → default → strategy-observation.
   - All three services are running the same `index.js` SHA-256 `3562402dbada`; each `DEPLOYED_REF` points to `364e0f3` and startup logs contain `Deployed ref`, `Telegram Codex Bridge started`, and `codeVersion=3562402d`.
@@ -109,6 +110,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
+| T2.5 草稿检查 | 新增 ack 管理器 6 项 + 全套检查 | 完整验收后才能部署 | 旧代码 6/6 失败（类尚不存在）；草稿 139/139 pass；node、四项 zsh 语法与 diff check 通过，但缺少真实接入/持久化生命周期验证，不能视为验收通过 | in_progress |
 | T2.3a replay 不阻塞 polling | 真实启动尾部 + 永不完成 dispatch | polling 处理新消息 | 修复前失败；修复后 117/117 全部通过 | complete |
 | 语法检查（基线） | `node -c index.js` | 无输出即通过 | SYNTAX OK | complete |
 | 单测（基线） | `node --test ./tests/*.test.js` | 全通过 | **tests 99 / pass 99 / fail 0**（362ms） | complete |
@@ -181,6 +183,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
+| 2026-09-23 T2.5 | 重启复用 ack 的 inbox 持久化前提与实际生命周期冲突：dispatch 使用副本，turn/start 返回或进入内存队列即删除 inbox | 读取 TelegramInbox.run、startOrSteerTurn、turn/completed；新增 6 项管理器测试并做初步接入，复核发现缺口 | 停止修改业务代码及部署。需维护者明确 inbox 延迟出队与 turn/排队/steer/重试的完成边界；未勾选 T2.5，未推进 T2.6 |
 | 2026-09-21 调查期 | `~/mnt/wukong` 这个 rclone 挂载不含 `Library/`，读不到 wukong 的 service 日志 | 1 | 改用 SSH `remote-mac-wukong` 直接在 wukong 上统计 |
 | 2026-09-21 调查期 | SSH 非登录 shell 里 `npm` 与 `timeout` 均不存在 | 1 | 每个新 shell 先 `export PATH=/opt/homebrew/bin:$PATH`，测试直接用 `node --test` 而非 `npm test` |
 | 2026-09-21 调查期 | 经 rclone 挂载写文件出现 `.partial` 未 finalize | 1 | 写完回到 wukong 用 `ls` / `wc -l` / `tail -1` 复验完整性，勿假定写入即生效 |
@@ -669,3 +672,34 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 
 与规格的一处出入（可接受）：`body` 存在但无 `description` 时回退到整条消息做描述匹配。
 只在 `body` 存在时可达，传输层错误碰不到；为保留既有 chat-not-found 测试而加，无需返工。
+
+
+### T2.5 未完成：生命周期前提冲突（2026-09-23）
+
+- 维护者三份规划文件已原样单独提交为 `2d60d73`（Record T2.4b acceptance and refine T2.5 spec）。
+- 草稿文件：`index.js`、新增 `tests/ack.test.js`；均未提交、未部署。`findings.md` 保持只读；task_plan 的 T2.5 保持未勾选，Next Step 仍为 T2.5。
+- 现象：`TelegramInbox.run()` 调用 `dispatch({ ...item, isReplay })`，dispatch 收到副本；完成 dispatch 后直接 `remove(item)`。实际 `handleMessage` 等待的是 `startOrSteerTurn`，它在 `turn/start` RPC 返回或入内存队列时结束，不等待 `turn/completed`。所以 ack ID 写副本不会持久化，改写原条目也会很快被删除，无法实现处理中重启后编辑原 ack。
+- 需要明确的最小规格补充：Codex 消息是否必须保留 inbox 到 turn 终态；明确排队、private steer、多次内部恢复重试的 inbox/ack 归属与出队条件。T2.5 规格当前没有定义这些，既有文档将 dispatch 完成当成 turn 完成；本轮不擅自改出队架构。
+- 已尝试：6 项新增测试先在旧代码失败（缺少 TelegramAckManager），草稿实现后 6/6 通过；全套 **139/139 pass / fail 0**，`node -c index.js`、指定四项 `zsh -n`、`git diff --check` 通过。测试只覆盖管理器，不证明生产接入正确，因此 T2.5 不算完成。
+- 草稿复核还需修正：`/continue` 与 `/review` 未接 ack；排队旧提示仍单独发；首发 outbox 延迟补发结果尚未关联 ack；失败更新使用 force 可绕过 3 秒间隔；requestId 未持久化且无正常状态日志；首次创建 thread 会清空 pendingInputMeta；这些都不能以管理器单测全绿替代验收。
+- 影响面：本轮未调用安装脚本、未重启服务、未读取真实 env 或使用生产 token 发请求。线上保持上轮已验收部署，本轮未另作运行健康检查。没有本轮部署台账行。
+- 建议：维护者明确上述最小生命周期修正属于 T2.5 后，继续在当前草稿补集成测试和修复，再跑全套检查及灰度；不要部署当前草稿。
+- 部署成功后仍需人工验收（新 codeVersion 待实际构建产生）：三个 bot 各 `/status` 核对新版本、outboxQueued=0、outboxDiscarded=0、truthProfile 不变；一个群 @ bot 发真实消息，确认只有一条状态消息从已收到变化到已完成，正文另发。当前尚未到此步骤。
+
+### T2.5 阻塞裁决（2026-09-23）
+
+**Codex 判断正确，规格遗漏**（这是第三次在规格矛盾处正确停下）。inbox 在 dispatch 返回时出队，
+而 dispatch 返回于 turn 启动或入队、非终态；dispatch 还收到副本 —— `ackMessageId` 无处持久化。
+
+**由此推出的更大缺口**：T2.3 的重放只覆盖「已收到、未开始」窗口。turn 执行中被杀时 inbox 已空，
+不重放也不提示。findings F5 的 24 个孤儿 turn，T2.3 并未修掉。
+
+**裁决**：
+- **不**把 inbox 保留到终态 —— 会重跑执行到一半的 turn，而本 bot 以 danger-full-access 执行有副作用的命令
+- inbox 保持现状；新增持久化「进行中任务台账」，终态才出队
+- 重启：`queued` 重新入队（安全，未执行过）；`running` 不重跑，原 ack 改为中断提示后出台账
+- steer 跟随所属 turn；内部重试沿用同一 requestId 与 ack
+- Codex 草稿复核列出的 6 项问题一并在 T2.5 内修掉
+- 必须有接入层集成测试；管理器单测全绿不算完成
+
+规格见 `handoff_codex.md`「T2.5 补充：任务生命周期」。当前草稿（`index.js`、`tests/ack.test.js`）在此基础上续做，未提交、未部署。
