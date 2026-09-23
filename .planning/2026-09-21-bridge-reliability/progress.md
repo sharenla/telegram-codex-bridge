@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.2 完成（2026-09-23）：代码提交 `6f7c701`；按 rv-prediction → 观察一轮 → default → strategy-observation 灰度部署。三实例新 Supervisor ready 分别为本次 17:20:41 / 17:21:42 / 17:22:18（UTC+8），均带 start_grace=60；脚本哈希 `2257af0ad696`，index.js 仍为 `1eacb1e58346`。详细证据与人工验收见末尾 T3.2 完成记录。
   - T3.2 续做（2026-09-23）：按已裁决的数值执行固定三级 60/120/300，原“翻倍”为规划方笔误；阻塞已解除。新增假 bridge / 假 app-server 的四项进程测试逐项先红后绿，170/170 通过；实现与检查完成，准备按 rv → default → strategy 灰度部署。新参数 START_GRACE_SECONDS 已在 `.env.example` 说明，supervisor 从进程环境读取，不读取 dotenv；测试用短基数按 1/2/5 比例缩短三级时间。
   - T3.2（2026-09-23）：维护者三份规划文件已在 `feat/phase-3-restart-loop` 原样单独提交为 `4838e81`。读取 supervisor 后停在实现前：规格同时要求每轮翻倍和 `60 → 120 → 300`，需要明确是否包含 240 秒这一轮，详见 Error Log。未改脚本、未运行新测试、未部署；T3.2 保持未勾选。
   - T3.1：main 上原样提交维护者的三份规划文件（`ddec91b`），建立 `feat/phase-3-restart-loop`；新增测试先在旧代码上失败，再实现缓存身份优先、后台 getMe 校验、身份变化持久化与实时方向判断。
@@ -233,6 +234,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T3.1 rv-prediction | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 1854 ms |
 | 2026-09-23 | T3.1 default | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 2275 ms |
 | 2026-09-23 | T3.1 strategy-observation | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 1414 ms |
+| 2026-09-23 | T3.2 rv-prediction | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度与观察通过；supervisor `2257af0ad696`，ready 17:20:41 +0800，start_grace=60 |
+| 2026-09-23 | T3.2 default | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度通过；supervisor `2257af0ad696`，ready 17:21:42 +0800，start_grace=60 |
+| 2026-09-23 | T3.2 strategy-observation | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度通过；supervisor `2257af0ad696`，ready 17:22:18 +0800，start_grace=60 |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -942,3 +946,14 @@ Phase 2 让重启「不丢消息、有提示」，但没有让重启循环不再
 
 规格写「翻倍 60 → 120 → 300 封顶」，文字与数值不一致（120 翻倍为 240）。**裁决：固定三级 60 → 120 → 300 秒**，以明确写出的数值为准；「翻倍」为规划方笔误。
 Codex 照 §6 停下是合规的。同时在 handoff §6.1.1 增补：文字与完整数值不一致时以数值为准并记录，不必停下。
+
+### T3.2 完成与灰度部署（2026-09-23）
+
+- 裁决已落实：按数值执行 60 → 120 → 300 秒三级宽限期，300 后保持；原“翻倍”为笔误。首次强制重启后下一轮为 120 秒，再次为 300 秒；见到健康 app-server 时立刻清零 miss/连续重启计数并恢复 60 秒。强制重启后仅等待旧进程结束（复用既有有界退出等待），随即启动新进程，不按宽限期停机等待。
+- 宽限期跳过、计入 miss、强制重启（连续次数/下一轮宽限期）、健康复位均写时间戳日志；Supervisor ready 增加 start_grace。自定义 START_GRACE_SECONDS 用 1/2/5 比例缩放三级，供短时间行为测试；默认仍是裁决的完整数值。
+- 新增 `tests/supervisor-grace.test.js` 四项真实进程测试，逐项观察红灯后实现至绿灯；临时目录 fake index.js 不访问 Telegram，fake-codex 仅提供可识别的子进程。每项有超时、独立进程组并清理整个组；全套检查后复验测试残留进程为 0。
+- 检查：`node -c index.js`、`node --test ./tests/*.test.js` **170/170 pass，fail 0**、四项 `zsh -n`、`git diff --check` 全通过。已有测试断言未改。
+- 部署严格按 rv-prediction → 观察一轮 → default → strategy-observation；安装脚本已执行 bootout/bootstrap/kickstart。三个 supervisor 的新 ready 时间均晚于各批安装开始时间且带 start_grace=60；LaunchAgent/supervisor/bridge/app-server 父子关系均核实，确认常驻循环已换新。appServerSpawnedMs：rv **1517**、default **2412**、strategy **1497**，均远小于 15000。
+- 工作区和三实例的两种文件分别哈希一致：index.js `1eacb1e58346`，supervisor `2257af0ad696`；DEPLOYED_REF 均指向 `6f7c70135bea2efaff833625f5fb5fbd33e41fc6`。命名角色文件哈希与各自源文件一致；3 把锁的 pid/indexPath 对应各自 service 进程；最终 curl 仅三条正常 getUpdates 子进程，没有孤儿。诊断先脱敏，未输出 token。
+- 本轮修改：`scripts/codex-launch-supervisor.sh`、新增 `tests/supervisor-grace.test.js`、`.env.example` 的 supervisor 参数注释、`progress.md`、`task_plan.md`。维护者的契约修訂单独提交为 `a3e41b7`。没有修改 index.js、findings.md 或真实 env，也未推进 T3.3/T3.5；未 push。
+- **待维护者人工验收**：三个 bot 各发一次 `/status`，预期 `codeVersion=1eacb1e5`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。本轮只改 supervisor，codeVersion 由 index.js 哈希计算，因此保持 T3.1 的值；新部署身份由 DEPLOYED_REF 与 supervisor 哈希/ready 日志共同确认。三级重启行为已有假进程测试覆盖，未在线上主动制造连续强杀。

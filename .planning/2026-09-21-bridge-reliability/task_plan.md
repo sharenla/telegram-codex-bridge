@@ -9,9 +9,8 @@
 
 ## Next Step
 
-执行 **T3.2**：supervisor 启动宽限期 + 连续强杀时延长宽限期（退避不是停机）。规格见 `handoff_codex.md`「T3.2 补充」。
-**部署时必须确认 supervisor 自身已重启**（日志出现新时间戳的 `Supervisor ready`），否则跑的仍是旧脚本。
-T3.1（`1eacb1e5`）§4.4 验收已于 2026-09-23 完成。
+执行 **T3.3**：轮询卡死不再退出进程，改为内部 degraded / unreachable 状态，规格见 `handoff_codex.md`。
+T3.2 已通过测试并灰度部署；三个新 supervisor 均已确认 `start_grace=60`，部署后人工 `/status` 验收待维护者执行。
 
 ## Current Phase
 
@@ -55,7 +54,7 @@ Phase 3
 ### Phase 3: 修重启死循环与失联可见
 
 - [x] T3.1 调整启动顺序：先起 app-server，或用缓存 botIdentity 起步
-- [ ] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
+- [x] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
 - [ ] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
 - [ ] T3.4 恢复后播报失联时长与积压数；`restartReason` 先消费再清空
 - [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
