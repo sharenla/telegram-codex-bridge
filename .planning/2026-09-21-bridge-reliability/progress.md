@@ -1421,3 +1421,20 @@ OpenClaw 自身配置 `~/.openclaw/openclaw.json` 当前有 9 项无法识别的
 
 门禁「任何 curl 命令行都不含 token」范围写错：bridge 自身的 getUpdates curl 本就含 token（既有问题，归 T4.8）。
 **裁决：门禁只针对 supervisor 发起的 curl；T4.8 保持原位，不提前。** Codex 按 §6 停下合规。rv-prediction 已先行部署新版本，继续 default、strategy-observation。
+
+### T3.4c / T3.5 灰度部署完成（2026-09-24）
+
+- 维护者更正后的 T3.5 门禁原样提交为 `0695eba5071d5640db4a1383145480dc1b04c5c6`。rv-prediction 按修正范围复核通过：父进程为该实例 supervisor 的 curl 数量 **0**，其中 token 匹配 **0**；bridge curl 仅报告数量 **1**，未输出命令行。
+- 随后按 `rv-prediction → 观察一轮 → default → strategy-observation` 完成安装。三实例 index.js SHA-256 前 12 为 `29cd2ee8711a`，supervisor SHA-256 前 12 为 `7a7878924997`；三实例进程均存活，启动日志均含 `Supervisor ready`、`Deployed ref`、`Bridge started`、`codeVersion`，且 `start_grace=60`。`appServerSpawnedMs`：rv-prediction **1941**、default **5773**、strategy-observation **3321**。
+- 本轮 Supervisor ready 时间（UTC+8）：rv-prediction **2026-09-23 23:42:17**，default **2026-09-24 00:02:07**，strategy-observation **2026-09-24 00:03:23**。父进程为各自 supervisor 的 curl 数量分别为 **0 / 0 / 0**，token 匹配均为 **0**；bridge curl 数量分别为 **1 / 1 / 1**，仅计数不打印命令行。3 把锁均存在，pid 与各自 `index.js` 命令行匹配；无残留测试进程。
+- 三个实例的 `DEPLOYED_REF` 已指向本轮代码（rv 保留先行部署的 `657df60`，default/strategy 指向仅含规划文档提交的 `0695eba`；运行代码哈希一致）。未修改真实 `.env`、凭证、service/store 文件，未 push。
+
+**人工验收：请维护者对三个 bot 各发一次 `/status`，逐项记录：**
+
+| 实例 | 预期核对项 | codexBackend |
+|---|---|---|
+| rv-prediction | `codeVersion=29cd2ee8`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变 | 待维护者确认 `ok` |
+| default | 同上 | 待维护者确认 `ok` |
+| strategy-observation | 同上 | 待维护者确认 `ok` |
+
+T3.5 告警路径未在线上主动制造，已由新增 supervisor 假 curl 测试覆盖；T4.8 的 bridge 自身 curl token 命令行问题保持原位。
