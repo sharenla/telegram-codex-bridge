@@ -5244,6 +5244,7 @@ async function main() {
 
   function recordTelegramPollSuccess(onRecovery = null) {
     const health = ensureTelegramHealthState();
+    if (typeof refreshTelegramConflictState === "function") refreshTelegramConflictState(health, Date.now());
     health.lastPollSuccessAt = Date.now();
     const recovered = Boolean(health.offlineSince);
     if (recovered) {
@@ -5256,7 +5257,7 @@ async function main() {
         errorClass: "telegram_recovered", telegramState: "ok", ...health.lastOutage }));
       health.offlineSince = 0;
     }
-    health.state = "ok";
+    health.state = health.state === "conflict" ? "conflict" : "ok";
     health.lastPollErrorAt = 0;
     health.consecutivePollErrors = 0;
     health.lastPollError = null;
