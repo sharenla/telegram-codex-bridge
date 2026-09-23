@@ -42,7 +42,7 @@ Phase 2
 - [x] T2.3a 部署前必修：replay 不得阻塞 pollingLoop（本次修复引入的回归）
 - [x] T2.4 持久化 outbox，进程重启后补发（含放弃通知走 outbox、inbox 满时用户提示）
 - [x] T2.4a 部署前必修：outbox 补容量/年龄上限 + 永久错误放弃（2026-09-23 验收通过并已部署）
-- [ ] T2.4b 热修：`_isPermanentReject` 自由文本 403 匹配会误丢消息（**已在线上**）
+- [x] T2.4b 热修：`_isPermanentReject` 自由文本 403 匹配会误丢消息（2026-09-23 完成并灰度部署）
 - [ ] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
 - [ ] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [ ] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
