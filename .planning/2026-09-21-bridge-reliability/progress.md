@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.2（2026-09-23）：维护者三份规划文件已在 `feat/phase-3-restart-loop` 原样单独提交为 `4838e81`。读取 supervisor 后停在实现前：规格同时要求每轮翻倍和 `60 → 120 → 300`，需要明确是否包含 240 秒这一轮，详见 Error Log。未改脚本、未运行新测试、未部署；T3.2 保持未勾选。
   - T3.1：main 上原样提交维护者的三份规划文件（`ddec91b`），建立 `feat/phase-3-restart-loop`；新增测试先在旧代码上失败，再实现缓存身份优先、后台 getMe 校验、身份变化持久化与实时方向判断。
   - 不移动 `startCodexServer()`；在实际 app-server 子进程创建后打印 `appServerSpawnedMs`。代码提交 `bfb8c79f4785fe848dfca32b41ad50faffb7c73f`，`index.js` SHA-256 前 12 位 `1eacb1e58346`。
   - 按 rv-prediction → 观察一轮 → default → strategy-observation 灰度安装。三实例启动计时分别为 **1854 / 2275 / 1414 ms**，均远小于 15000 ms；部署后三者轮询成功、错误计数 0。四份 `index.js` 哈希一致，三个 bridge 进程与各自锁 PID 对应，命名角色文件哈希与源文件一致；仅有三条由各自 bridge 持有的正常 getUpdates curl，没有残留孤儿进程。
@@ -247,6 +248,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
+| 2026-09-23 T3.2 | 宽限期递增规则存在数值矛盾：handoff「T3.2 补充」同时写“下一轮宽限期翻倍”和“60 → 120 → 300 秒封顶”；严格翻倍并封顶应为 60 → 120 → 240 → 300 | 已按顺序读取契约、Next Step/Decisions、T3.1 验收和 supervisor 全文；原样提交维护者三份规划文件 `4838e81` | 按用户硬约束停在实现前，请维护者选择严格翻倍含 240 秒，或固定三级 60/120/300。脚本及已有测试未改，没有安装或重启，线上仍为上轮已验收的 T3.1 版本；本轮未另作线上健康检查 |
 | 2026-09-23 T2.5 | 重启复用 ack 的 inbox 持久化前提与实际生命周期冲突：dispatch 使用副本，turn/start 返回或进入内存队列即删除 inbox | 读取 TelegramInbox.run、startOrSteerTurn、turn/completed；新增 6 项管理器测试并做初步接入，复核发现缺口 | 停止修改业务代码及部署。需维护者明确 inbox 延迟出队与 turn/排队/steer/重试的完成边界；未勾选 T2.5，未推进 T2.6 |
 | 2026-09-21 调查期 | `~/mnt/wukong` 这个 rclone 挂载不含 `Library/`，读不到 wukong 的 service 日志 | 1 | 改用 SSH `remote-mac-wukong` 直接在 wukong 上统计 |
 | 2026-09-21 调查期 | SSH 非登录 shell 里 `npm` 与 `timeout` 均不存在 | 1 | 每个新 shell 先 `export PATH=/opt/homebrew/bin:$PATH`，测试直接用 `node --test` 而非 `npm test` |
@@ -933,3 +935,8 @@ Phase 2 让重启「不丢消息、有提示」，但没有让重启循环不再
 | §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot 均 `codeVersion=1eacb1e5` |
 
 断网启动路径仅测试覆盖，未在线上实际断网验证。
+
+### T3.2 阻塞裁决（2026-09-23）
+
+规格写「翻倍 60 → 120 → 300 封顶」，文字与数值不一致（120 翻倍为 240）。**裁决：固定三级 60 → 120 → 300 秒**，以明确写出的数值为准；「翻倍」为规划方笔误。
+Codex 照 §6 停下是合规的。同时在 handoff §6.1.1 增补：文字与完整数值不一致时以数值为准并记录，不必停下。
