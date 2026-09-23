@@ -10,6 +10,7 @@ const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
 const { setTimeout: sleep } = require("node:timers/promises");
+const PROCESS_STARTED_AT = Date.now();
 
 function getIndexCodeSha256() {
   return crypto.createHash("sha256").update(fs.readFileSync(__filename)).digest("hex");
@@ -1783,6 +1784,28 @@ function shouldHandleTelegramMessage(message, botIdentity) {
   return evaluateTelegramMessageDirection(message, botIdentity).shouldHandle;
 }
 
+async function resolveStartupBotIdentity({ cached, getMe, onIdentity = () => {}, onError = () => {} }) {
+  const state = { current: cached?.id && cached?.username ? cached : null };
+  const refresh = async () => {
+    const me = await getMe();
+    const identity = {
+      id: me?.id || null,
+      username: typeof me?.username === "string" ? me.username : null,
+    };
+    if (identity.id !== state.current?.id || identity.username !== state.current?.username) {
+      const previous = state.current;
+      state.current = identity;
+      onIdentity(identity, previous);
+    }
+  };
+  if (state.current) {
+    void refresh().catch(onError);
+  } else {
+    await refresh();
+  }
+  return state;
+}
+
 function toNumericIdOrNull(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
@@ -2641,10 +2664,11 @@ class TelegramApi {
 }
 
 class CodexAppServer {
-  constructor({ codexBin = "codex", env = process.env, codexLbEnabled = false } = {}) {
+  constructor({ codexBin = "codex", env = process.env, codexLbEnabled = false, onSpawn = null } = {}) {
     this.codexBin = codexBin;
     this.env = env;
     this.codexLbEnabled = Boolean(codexLbEnabled);
+    this.onSpawn = onSpawn;
     this.proc = null;
     this._stdoutRl = null;
     this._stderrRl = null;
@@ -2684,6 +2708,7 @@ class CodexAppServer {
       stdio: ["pipe", "pipe", "pipe"],
       env: this.env,
     });
+    if (this.proc.pid) this.onSpawn?.(this.proc);
 
     this._stdoutRl = readline.createInterface({ input: this.proc.stdout });
     this._stdoutRl.on("line", (line) => this._handleLine(line));
@@ -4883,7 +4908,7 @@ async function discoverChatIds(telegram) {
 }
 
 async function main() {
-  const processStartedAt = Date.now();
+  const processStartedAt = PROCESS_STARTED_AT;
   let codex = null;
   const deployedRefPath = path.join(__dirname, "DEPLOYED_REF");
   if (fs.existsSync(deployedRefPath)) {
@@ -4983,28 +5008,17 @@ async function main() {
     console.warn("Telegram event-driven transport failover unavailable: Clash controller was not detected.");
   }
 
-  async function resolveBotIdentity() {
-    const cached = store.data.telegram?.botIdentity;
-    try {
-      const me = await telegram.getMe();
-      const identity = {
-        id: me?.id || null,
-        username: typeof me?.username === "string" ? me.username : null,
-      };
+  const botIdentity = await resolveStartupBotIdentity({
+    cached: store.data.telegram?.botIdentity,
+    getMe: () => telegram.getMe(),
+    onIdentity: (identity, previous) => {
       store.data.telegram.botIdentity = identity;
       store.markDirty();
-      store.saveThrottled();
-      return identity;
-    } catch (err) {
-      if (cached?.id && cached?.username) {
-        console.warn(`Telegram getMe failed at startup, falling back to cached bot identity: ${err.message}`);
-        return cached;
-      }
-      throw err;
-    }
-  }
-
-  const botIdentity = await resolveBotIdentity();
+      store.save({ force: true });
+      if (previous) console.log("Telegram bot identity refreshed after startup.");
+    },
+    onError: () => console.warn("Telegram getMe background identity check failed; using cached identity."),
+  });
 
   const allowlist = parseCsvIds(process.env.TELEGRAM_ALLOWLIST);
   if (!allowlist) {
@@ -6331,7 +6345,15 @@ async function main() {
 
   async function startCodexServer() {
     if (shutdown.closing) return;
-    const server = new CodexAppServer({ codexBin, env: codexEnv, codexLbEnabled });
+    const server = new CodexAppServer({
+      codexBin, env: codexEnv, codexLbEnabled,
+      onSpawn: () => {
+        if (!appServerSpawnLogged) {
+          appServerSpawnLogged = true;
+          console.log(`startup phase: appServerSpawnedMs=${Date.now() - processStartedAt}`);
+        }
+      },
+    });
     server.onAuthWatchdog((event) => {
       queueCodexBackendRecovery(event);
     });
@@ -8089,6 +8111,7 @@ async function main() {
     }
   }
 
+  let appServerSpawnLogged = false;
   await startCodexServer();
   codexBackendRecoveryPromise = ensureHealthyStartupAccount()
     .catch((err) => {
@@ -8802,10 +8825,10 @@ async function main() {
       return;
     }
 
-    const direction = evaluateTelegramMessageDirection(message, botIdentity);
+    const direction = evaluateTelegramMessageDirection(message, botIdentity.current);
     if (!direction.shouldHandle) {
       if (shouldLogIgnoredGroupReplyDiagnostic(message, direction)) {
-        logIgnoredGroupReplyDiagnostic(message, botIdentity, direction.reason);
+        logIgnoredGroupReplyDiagnostic(message, botIdentity.current, direction.reason);
       }
       return;
     }
@@ -8813,7 +8836,7 @@ async function main() {
     const session = getOrCreateSession(chatId);
     const normalizedText = message?.chat?.type === "private"
       ? text
-      : normalizeIncomingText(text, botIdentity.username);
+      : normalizeIncomingText(text, botIdentity.current.username);
     const trimmed = (normalizedText || "").trim();
     if (!trimmed) return;
 
@@ -9818,6 +9841,7 @@ module.exports = {
     isReplyToBot,
     shouldHandleTelegramMessage,
     evaluateTelegramMessageDirection,
+    resolveStartupBotIdentity,
     shouldLogIgnoredGroupReplyDiagnostic,
     buildIgnoredGroupReplyDiagnosticMeta,
     resolveAgentMessageTurnId,
