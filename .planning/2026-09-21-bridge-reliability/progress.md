@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.4（2026-09-23）：维护者三份规划文件原样单独提交 `4279e79`。新增恢复汇总、延迟消息 ack 注记、正常关闭记录；网络恢复复用 T3.3 lastOutage，进程恢复使用启动前 lastPollSuccessAt。新增 12 项测试（先复现缺失与接入失败），全套 188/188；准备灰度部署。
   - T3.3 灰度完成（2026-09-23）：代码提交 `32d1202` 按 rv → 观察 → default → strategy 安装；四份 index.js `5334599a2dad`，supervisor 保持 `2257af0ad696`；appServerSpawnedMs 为 1175/1955/1011。检查与人工验收见末尾 T3.3 记录；Next Step 指向 T3.4。
   - T3.3（2026-09-23）：规划更新原样提交 `d36b4d8`。移除 pollingLoop 的卡死时长重启分支；`requestSupervisorRestart` 全仓只有该调用，移除后无其他调用方，故删除函数、私有标志与两项旧阈值。新增 30/90 秒状态迁移、失联起点/恢复时长持久化、2/4/8/16/30 秒退避与 `/status` 三字段；176/176 通过，准备灰度部署。Clash 调用条件、supervisor、现有 restartReason 清理逻辑未改。
   - T3.2 完成（2026-09-23）：代码提交 `6f7c701`；按 rv-prediction → 观察一轮 → default → strategy-observation 灰度部署。三实例新 Supervisor ready 分别为本次 17:20:41 / 17:21:42 / 17:22:18（UTC+8），均带 start_grace=60；脚本哈希 `2257af0ad696`，index.js 仍为 `1eacb1e58346`。详细证据与人工验收见末尾 T3.2 完成记录。
@@ -133,6 +134,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
+| T3.4 recovery notices | 假 Telegram/假时钟，真实临时 Store/outbox/inbox/ack，生产 pollingLoop VM | ≥120s 私聊汇总、中文原因、同一 ack 注记、graceful/异常停机、重启去重 | 新功能测试先红；接入三项先失败再通过；新增 12 项，全套 188/188 pass / fail 0；node、四项 zsh、diff check 通过 | complete |
 | T3.3 polling health | 实际 pollingLoop/状态函数在隔离 VM 中使用假时钟、假 Telegram；真实临时 Store | >180s/6次失败不退出；30/90s迁移去重；恢复时长；指数退避复位；重载持久化；status字段 | 旧退出路径测试先失败；新增 6 项通过；176/176 pass、fail 0，node、四项 zsh 与 diff check 通过 | complete |
 | T3.2 supervisor | 假 bridge、短宽限期与轮询间隔；真实假 app-server 子进程 | 宽限期不杀、连续 miss 才重启、三级封顶、健康即复位；清理测试进程 | 四项新增测试逐项先失败再通过；170/170 pass、fail 0；node 与四项 zsh 语法、diff check 通过 | complete |
 | T2.5 草稿检查 | ack 管理器、接入层生命周期集成测试 + 全套检查 | 通过后灰度部署 | 旧代码新增测试先失败；实现后 **145/145 pass / fail 0**；node、四项 zsh 语法与 diff check 通过 | complete |
@@ -1003,3 +1005,13 @@ R3 死循环至此两端均已处理：bridge 侧启动不再被 getMe 阻塞（
 **连带影响**：`requestSupervisorRestart` 删除后 `restartReason` 永不再写入，T3.4 原规格「读回 restartReason」失去意义，
 T3.4 已改为基于 `offlineSince` / `lastOutage`（网络失联）与 `lastPollSuccessAt` / 关机记录（进程停机）两类数据源。
 真实断网验证待下一次网络故障。
+
+
+### T3.4 实现与检查（2026-09-23）
+
+- 维护者规划更新原样提交 `4279e79`；只修改 index.js、新增 tests/recovery-notice.test.js 和本轮进度/计划文档。findings.md、supervisor、T3.3 的状态阈值/退避/Clash 条件、restartReason 残留行为保持原样。
+- 网络恢复在成功轮询清空错误前保存最后错误快照，复用 T3.3 生成的 lastOutage；进程启动首次轮询按启动前持久化 lastPollSuccessAt 计算。SIGTERM/SIGINT 保存 lastShutdown（at/signal/graceful），首次成功轮询消费后清除；缺失或早于上次成功轮询视为异常退出/强杀。
+- ≥120 秒才告知。仅给 allowlist 正数私聊发送一条 notice 优先级 outbox 汇总，含 bot 名、时长、中文原因、ISO 起止时间（UTC）。N 为恢复首个成功 getUpdates 批次中、allowlist 内且 date 落在失联区间的 message 数；后续批次仍会按 date 给受影响 ack 加注，但不另发或修改汇总。群聊不广播。
+- date 与 recoveryNote 跟随 inbox、activeRequests 持久化，ack 初次发送和后续编辑均保留注记，沿用原 3 秒节流。汇总准备记录、确定性的 outbox requestId 与完成入队记录防止重启后重复排队；实际发送成功后写 lastOutageNotifiedAt 及该 outbox 条目的已送达标记；若随后在出队前退出，重启后只清理条目、不再次发送（新增测试先失败后修复）。部分私聊入队后保存失败，也可从准备记录继续，测试覆盖已送达收件人不重复。
+- 测试红阶段：首项因缺少恢复管理器失败；接入三项分别因 date 丢失、关机记录缺失、生产 pollingLoop 未调用汇总失败。之后新增边界、错误映射、部分入队恢复测试；全套 188/188，旧测试文件与断言均未修改。检查：node -c index.js；node --test ./tests/*.test.js；四项 zsh -n；git diff --check。
+- 灰度与人工验收记录待部署后补齐。网络类 A 的真实验证留待下一次网络故障；不主动断生产网络。

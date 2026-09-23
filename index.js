@@ -1961,11 +1961,13 @@ function rememberGroupVisibleText(rt, text) {
 
 function installGracefulShutdown({ store, telegram, getServer = () => null, processRef = process }) {
   let closing = false;
-  const close = async (code) => {
+  const close = async (code, signal) => {
     if (closing) return;
     closing = true;
     try {
       telegram.closing = true;
+      const health = store.data.telegram.health ||= {};
+      health.lastShutdown = { at: Date.now(), signal, graceful: true };
       store.save({ force: true });
     } catch (error) {
       console.error("Shutdown persistence failed:", error.message);
@@ -1973,8 +1975,8 @@ function installGracefulShutdown({ store, telegram, getServer = () => null, proc
     await Promise.allSettled([telegram.close(), getServer()?.stopAndWait()]);
     processRef.exit(code);
   };
-  processRef.on("SIGTERM", () => { void close(143); });
-  processRef.on("SIGINT", () => { void close(130); });
+  processRef.on("SIGTERM", () => { void close(143, "SIGTERM"); });
+  processRef.on("SIGINT", () => { void close(130, "SIGINT"); });
   return { get closing() { return closing; } };
 }
 
@@ -1992,6 +1994,97 @@ function getOutboxStatus(store) {
     queued: store?.data?.telegram?.outbox?.length || 0,
     discarded: store?.data?.telegram?.outboxStats?.discardedTotal || 0,
   };
+}
+
+function recoveryNetworkReason(error) {
+  const text = String(error || "");
+  if (/DNS|resolv(?:e|ing)|ENOTFOUND|EAI_AGAIN/i.test(text)) return "网络 DNS 解析失败";
+  if (/TLS|SSL|connection reset|ECONNRESET/i.test(text)) return "代理或网络连接中断";
+  if (/timed? out|timeout|ETIMEDOUT/i.test(text)) return "网络连接超时";
+  if (/(?:HTTP(?:\/\d(?:\.\d)?)?|status(?: code)?|error(?: code)?)\s*[:=]?\s*50[23]\b|Bad Gateway|Service Unavailable/i.test(text)) return "Telegram 服务端暂时不可用";
+  return "网络异常";
+}
+
+function recoveryAckNote(messageDate, outage, now) {
+  const sentAt = Number(messageDate) * 1000;
+  if (!outage || outage.durationMs < 120000 || !(sentAt > outage.startedAt && sentAt < outage.endedAt)) return "";
+  return `（服务刚恢复，这条消息在 ${Math.max(1, Math.floor((now - sentAt) / 60000))} 分钟前发出）`;
+}
+
+function recordRecoveryNoticeDelivered(store, item) {
+  if (!item.recoveryNotice) return;
+  item.recoveryNotice.delivered = true;
+  const health = store.data.telegram.health;
+  const notice = health.pendingRecoveryNotice;
+  if (notice?.endedAt === item.recoveryNotice.endedAt) {
+    notice.delivered ||= [];
+    if (!notice.delivered.includes(item.chatId)) notice.delivered.push(item.chatId);
+  }
+  health.lastOutageNotifiedAt = Math.max(Number(health.lastOutageNotifiedAt || 0), item.recoveryNotice.endedAt);
+  store.save({ force: true });
+}
+
+class TelegramRecoveryNotices {
+  constructor({ store, outbox, allowlist, getBotName, now = Date.now, logger = event => console.log(JSON.stringify(event)) }) {
+    Object.assign(this, { store, outbox, allowlist, getBotName, now, logger });
+    const health = store.data.telegram.health ||= {};
+    this.startupLastSuccess = Number(health.lastPollSuccessAt || 0);
+    this.shutdown = health.lastShutdown;
+    this.firstSuccess = true;
+  }
+
+  capturePollState() {
+    const { offlineSince, lastPollError } = this.store.data.telegram.health;
+    return { offlineSince, lastPollError };
+  }
+
+  onPollSuccess(updates, previousPoll = this.capturePollState()) {
+    const health = this.store.data.telegram.health;
+    const now = this.now();
+    const startedAt = this.firstSuccess ? this.startupLastSuccess : Number(previousPoll.offlineSince || 0);
+    if (startedAt && now - startedAt >= 120000) {
+      const previous = health.lastRecoveryNotice;
+      // The outbox and this receipt survive a crash between queueing and poll-success persistence.
+      if (previous?.startedAt !== startedAt) {
+        const outage = !this.firstSuccess && health.lastOutage?.startedAt === startedAt
+          ? health.lastOutage
+          : { startedAt, endedAt: now, durationMs: Math.max(0, now - startedAt) };
+        health.lastOutage = outage;
+        const graceful = this.shutdown?.graceful && this.shutdown.at >= startedAt;
+        const reason = this.firstSuccess
+          ? `服务进程停止运行（${graceful ? "正常关闭" : "异常退出或被强杀"}）`
+          : recoveryNetworkReason(previousPoll.lastPollError);
+        const count = updates.filter(update => this.allowlist.has(update.message?.chat?.id)
+          && recoveryAckNote(update.message?.date, outage, now)).length;
+        const seconds = Math.floor(outage.durationMs / 1000);
+        const text = `⚠️ ${this.getBotName()} 刚才与 Telegram 失联 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒（${reason}），${new Date(startedAt).toISOString()} – ${new Date(now).toISOString()}。期间收到的 ${count} 条消息已在处理。`;
+        health.pendingRecoveryNotice = { ...outage, text,
+          recipients: [...this.allowlist].filter(id => Number(id) > 0), delivered: [] };
+        health.lastRecoveryNotice = outage;
+        this.store.save({ force: true });
+      }
+    }
+    // Resume a partially persisted enqueue after restart; delivery itself remains asynchronous.
+    const pending = health.pendingRecoveryNotice;
+    if (pending) {
+      for (const chatId of pending.recipients) {
+        if (pending.delivered.includes(chatId)) continue;
+        const requestId = `outage:${pending.endedAt}:${chatId}`;
+        if (this.store.data.telegram.outbox.some(item => item.requestId === requestId)) continue;
+        this.outbox.enqueue({ chat_id: chatId, text: pending.text }, {
+          priority: "notice", requestId, recoveryNotice: { endedAt: pending.endedAt },
+        });
+        this.logger({ ts: new Date(now).toISOString(), event: "telegram_recovery_notice_queued", chatId, durationMs: pending.durationMs });
+      }
+      delete health.pendingRecoveryNotice;
+      this.store.save({ force: true });
+    }
+    if (this.firstSuccess) {
+      delete health.lastShutdown;
+      this.store.save({ force: true });
+      this.firstSuccess = false;
+    }
+  }
 }
 
 class TelegramOutbox {
@@ -2051,10 +2144,10 @@ class TelegramOutbox {
     }
   }
 
-  enqueue(params, { priority = "normal", requestId = null } = {}) {
+  enqueue(params, { priority = "normal", requestId = null, recoveryNotice = null } = {}) {
     const queue = this.store.data.telegram.outbox;
     const item = { id: crypto.randomUUID(), kind: "sendMessage", chatId: params.chat_id,
-      params: { ...params }, priority, requestId, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
+      params: { ...params }, priority, requestId, recoveryNotice, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
     queue.push(item);
     try {
       this._trimOverflow();
@@ -2081,6 +2174,10 @@ class TelegramOutbox {
   deliver(item) {
     if (this.active.has(item.id)) return this.active.get(item.id);
     const task = Promise.resolve().then(async () => {
+      if (item.recoveryNotice?.delivered) {
+        this._remove(item);
+        return null;
+      }
       if (this._isExpired(item)) {
         this._remove(item, "bridge_outbox_expired");
         return null;
@@ -2145,6 +2242,11 @@ class TelegramAckManager {
   }
 
   _text(state, status, reason = "", position = null) {
+    const text = this._baseText(state, status, reason, position);
+    return state.recoveryNote ? `${text}\n${state.recoveryNote}` : text;
+  }
+
+  _baseText(state, status, reason = "", position = null) {
     const suffix = `（#${state.requestId}）`;
     if (status === "queued") return `🕒 已收到，前面还有 ${Math.max(0, Number(position || 0))} 个任务，排队中${suffix}`;
     if (status === "processing") return `⚙️ 正在处理${suffix}`;
@@ -2197,6 +2299,7 @@ class TelegramAckManager {
 
   async start({ chatId, requestId, item = null, isReplay = false, initialStatus = "accepted", position = null }) {
     const state = {
+      recoveryNote: item?.recoveryNote || "",
       chatId, requestId, item, messageId: Number(item?.ackMessageId || 0) || null,
       status: null, lastText: "", lastEditAt: -Infinity, pendingText: null, timer: null,
     };
@@ -2230,6 +2333,7 @@ class TelegramAckManager {
     const state = {
       chatId: entry.chatId,
       requestId: entry.requestId,
+      recoveryNote: entry.recoveryNote || "",
       item: null,
       messageId: Number(entry.ackMessageId || 0) || null,
       status: entry.state === "queued" ? "queued" : "processing",
@@ -2361,6 +2465,8 @@ class TelegramInbox {
         }
         const item = { update_id: update.update_id, kind: cb ? "callback_query" : "message",
           chatId: message.chat.id, chatType: message.chat.type, message_id: message.message_id,
+          date: message.date,
+          recoveryNote: cb ? "" : recoveryAckNote(message.date, state.health?.lastOutage, this.now()),
           text, from: { id: (cb?.from || message.from)?.id },
           reply_to_message: message.reply_to_message ? { message_id: message.reply_to_message.message_id,
             from: { id: message.reply_to_message.from?.id } } : undefined,
@@ -4952,7 +5058,10 @@ async function main() {
   let ackManager = null;
   const outbox = new TelegramOutbox(store, {
     send: params => telegram.call("sendMessage", params, { serialize: true }),
-    onDelivered: (item, result) => ackManager?.handleDelivered(item, result),
+    onDelivered: (item, result) => {
+      recordRecoveryNoticeDelivered(store, item);
+      return ackManager?.handleDelivered(item, result);
+    },
   });
   telegram.outbox = outbox;
   ackManager = new TelegramAckManager({
@@ -5027,6 +5136,10 @@ async function main() {
     return;
   }
 
+  telegram.recoveryNotices = new TelegramRecoveryNotices({
+    store, outbox, allowlist, getBotName: () => botIdentity.current.username || "Telegram bot",
+  });
+
   function ensureTelegramHealthState() {
     if (!store.data.telegram || typeof store.data.telegram !== "object") {
       store.data.telegram = { offset: 0 };
@@ -5048,7 +5161,7 @@ async function main() {
     return health;
   }
 
-  function recordTelegramPollSuccess() {
+  function recordTelegramPollSuccess(onRecovery = null) {
     const health = ensureTelegramHealthState();
     health.lastPollSuccessAt = Date.now();
     const recovered = Boolean(health.offlineSince);
@@ -5070,6 +5183,7 @@ async function main() {
     health.restartReason = null;
     reconcileTelegramTransportRecoveryHealth(health);
     telegramTransportRecovery?.markHealthy();
+    onRecovery?.();
     store.markDirty();
     if (recovered) store.save({ force: true });
     else store.saveThrottled();
@@ -8860,6 +8974,7 @@ async function main() {
           requestId,
           chatId,
           ackMessageId: Number(inboxItem?.ackMessageId || 0) || null,
+          recoveryNote: inboxItem?.recoveryNote || "",
           state: steering ? "running" : busy ? "queued" : "running",
           text: turnText,
           kind: options.kind || "user",
@@ -9616,7 +9731,7 @@ async function main() {
     dispatch: (item) => {
       if (shutdown.closing) throw new Error("Bridge shutting down");
       const message = { message_id: item.message_id, text: item.text,
-        chat: { id: item.chatId, type: item.chatType }, from: item.from,
+        chat: { id: item.chatId, type: item.chatType }, from: item.from, date: item.date,
         reply_to_message: item.reply_to_message };
       return item.kind === "message"
         ? handleMessage({ chatId: item.chatId, text: item.text, message, isReplay: item.isReplay, inboxItem: item })
@@ -9669,7 +9784,8 @@ async function main() {
     for (; !shutdown.closing;) {
       try {
         const updates = await telegram.getUpdates({ offset, timeout: pollTimeoutSeconds, allowed_updates });
-        recordTelegramPollSuccess();
+        const recovery = telegram.recoveryNotices?.capturePollState();
+        recordTelegramPollSuccess(() => telegram.recoveryNotices?.onPollSuccess(updates, recovery));
         void outbox.flush().catch(() => console.error("Outbox recovery failed"));
         const items = inbox.accept(updates);
         offset = Number(store.data.telegram.offset);
@@ -9852,6 +9968,9 @@ module.exports = {
     shouldRetryTelegramMethod,
     isTelegramTransientError,
     getTelegramRetryDelayMs,
+    TelegramRecoveryNotices,
+    recordRecoveryNoticeDelivered,
+    recoveryNetworkReason,
     TelegramApi,
     resolveClashControllerConfig,
     createClashController,
