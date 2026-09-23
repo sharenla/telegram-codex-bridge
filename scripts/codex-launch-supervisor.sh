@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
+zmodload zsh/datetime
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${0}")" && pwd)"
 BRIDGE_ROOT="${BRIDGE_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
@@ -10,6 +11,7 @@ BRIDGE_STDOUT="${LOG_DIR}/bridge.stdout.log"
 BRIDGE_STDERR="${LOG_DIR}/bridge.stderr.log"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 APP_SERVER_MISS_LIMIT="${APP_SERVER_MISS_LIMIT:-3}"
+START_GRACE_SECONDS="${START_GRACE_SECONDS:-60}"
 LOG_ROTATE_CHECK_INTERVAL="${LOG_ROTATE_CHECK_INTERVAL:-60}"
 LOG_ROTATE_SCRIPT="${BRIDGE_ROOT}/scripts/rotate-bridge-logs.sh"
 
@@ -48,7 +50,7 @@ if [[ -z "${CODEX_BIN:-}" || ! -x "${CODEX_BIN}" ]]; then
 fi
 
 codex_version="$("${CODEX_BIN}" --version 2>&1 | head -n 1 || true)"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Supervisor ready; node=${NODE_BIN}; codex=${CODEX_BIN}; version=${codex_version:-unknown}; health=bridge_child_app_server; miss_limit=${APP_SERVER_MISS_LIMIT}" >> "${BRIDGE_STDOUT}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Supervisor ready; node=${NODE_BIN}; codex=${CODEX_BIN}; version=${codex_version:-unknown}; health=bridge_child_app_server; miss_limit=${APP_SERVER_MISS_LIMIT}; start_grace=${START_GRACE_SECONDS}" >> "${BRIDGE_STDOUT}"
 
 bridge_pids() {
   pgrep -f "${BRIDGE_ENTRY}" || true
@@ -73,6 +75,7 @@ start_bridge() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Telegram Codex bridge" >> "${BRIDGE_STDOUT}"
   "${NODE_BIN}" "${BRIDGE_ENTRY}" >> "${BRIDGE_STDOUT}" 2>> "${BRIDGE_STDERR}" &
   echo $! > "${PID_FILE}"
+  bridge_started_at=${EPOCHREALTIME}
 }
 
 stop_bridge() {
@@ -144,19 +147,42 @@ cleanup() {
 trap cleanup INT TERM
 
 app_server_misses=0
+consecutive_unhealthy_restarts=0
+current_start_grace=${START_GRACE_SECONDS}
+bridge_started_at=${EPOCHREALTIME}
 while true; do
   rotate_logs_if_due
   if [[ -z "$(bridge_pids)" ]]; then
     start_bridge
     app_server_misses=0
   elif bridge_app_server_running; then
+    if (( app_server_misses > 0 || consecutive_unhealthy_restarts > 0 )); then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Bridge app-server healthy; reset misses=${app_server_misses}; consecutive=0; start_grace=${START_GRACE_SECONDS}" >> "${BRIDGE_STDOUT}"
+    fi
     app_server_misses=0
+    consecutive_unhealthy_restarts=0
+    current_start_grace=${START_GRACE_SECONDS}
   else
+    if (( EPOCHREALTIME - bridge_started_at < current_start_grace )); then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Bridge startup grace: skip missing app-server; grace=${current_start_grace}" >> "${BRIDGE_STDOUT}"
+      sleep "${POLL_INTERVAL}"
+      continue
+    fi
     (( app_server_misses += 1 ))
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Bridge app-server miss=${app_server_misses}/${APP_SERVER_MISS_LIMIT}" >> "${BRIDGE_STDOUT}"
     if (( app_server_misses >= APP_SERVER_MISS_LIMIT )); then
-      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Bridge app-server unhealthy for ${app_server_misses} checks; restarting" >> "${BRIDGE_STDERR}"
+      (( consecutive_unhealthy_restarts += 1 ))
+      # Three fixed levels: 60 / 120 / 300 by default, scaled for a custom base.
+      if (( consecutive_unhealthy_restarts == 1 )); then
+        current_start_grace=$(( START_GRACE_SECONDS * 2 ))
+      else
+        current_start_grace=$(( START_GRACE_SECONDS * 5 ))
+      fi
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Bridge app-server unhealthy for ${app_server_misses} checks; restarting; consecutive=${consecutive_unhealthy_restarts}; next_grace=${current_start_grace}" >> "${BRIDGE_STDERR}"
       stop_bridge
-      start_bridge
+      if wait_for_bridge_stop; then
+        start_bridge
+      fi
       app_server_misses=0
     fi
   fi
