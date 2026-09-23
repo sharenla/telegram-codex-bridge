@@ -920,3 +920,16 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 R3 仍原样存在：`await resolveBotIdentity()`（约 `:5007`）先于 `await startCodexServer()`（约 `:8092`）；
 supervisor 仍为 `POLL_INTERVAL=5` × `APP_SERVER_MISS_LIMIT=3` = 15 秒。
 Phase 2 让重启「不丢消息、有提示」，但没有让重启循环不再发生。
+
+### T3.1 验收（2026-09-23）—— 通过
+
+| 检查项 | 结果 |
+|---|---|
+| app-server 创建耗时 | ✅ rv 1854 / default 2275 / strategy 1414 ms（supervisor 底线 15000） |
+| 启动 await 审计 | ✅ 有缓存时 getMe 后台；`ensureHealthyStartupAccount()` 在 app-server 之后且后台；outbox flush 为 void。无遗漏阻塞点 |
+| 残留风险 | 首次安装无缓存身份时仍等待 getMe → 由 T3.2 启动宽限期兜底 |
+| 测试 | ✅ **166 / 166** |
+| 四份哈希 | ✅ `1eacb1e58346`，三份 `DEPLOYED_REF` 均 `bfb8c79` |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot 均 `codeVersion=1eacb1e5` |
+
+断网启动路径仅测试覆盖，未在线上实际断网验证。

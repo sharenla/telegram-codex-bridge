@@ -739,6 +739,32 @@ npm run install:<instance>
 
 **T3.2 supervisor 宽限期 + 强杀退避**（R3）— 进程存活 <60s 不计 miss；连续强杀后退避到 60s / 300s。验收：`zsh -n` 通过 + 脚本测试覆盖 + 模拟启动慢不再触发循环
 
+**T3.2 补充（2026-09-23）**
+
+- **现状**：`scripts/codex-launch-supervisor.sh` 每 `POLL_INTERVAL=5` 秒检查一次 bridge 是否有 app-server 子进程，
+  连续 `APP_SERVER_MISS_LIMIT=3` 次缺失即 `stop_bridge` + `start_bridge`。bridge 刚启动的几秒内必然没有子进程，
+  也会被计入 miss
+- **启动宽限期**：bridge 进程存活时间小于 `START_GRACE_SECONDS`（默认 60）时，缺失不计入 miss
+  （进程启动时间可取自 `ps -o etime= -p <pid>` 或 supervisor 自己记录的 start_bridge 时间戳）
+- **退避 = 延长宽限期，不是停机**：
+  - 若 bridge 被强杀后、下一次启动**始终没有**进入健康状态（从未看到 app-server 子进程）就又被强杀，
+    视为「连续强杀」，下一轮宽限期翻倍：60 → 120 → 300 秒封顶
+  - **不要**在强杀后停着不启动。等待期间 bot 完全离线，比循环重启还差
+  - 一旦看到 app-server 子进程（健康），连续计数与宽限期立刻复位为默认
+- **每个决定都写带时间戳的日志**：宽限期内跳过、计入 miss、强杀（附当前连续次数与下一轮宽限期）、复位
+- **supervisor 自身必须被重启才会生效**：supervisor 是 LaunchAgent 常驻的 shell 循环，只在启动时读取脚本。
+  仅 rsync 新脚本并重启 bridge 不会换掉正在运行的旧 supervisor。部署时须确认 `install-launch-agent.sh`
+  会 bootout/bootstrap LaunchAgent；若不会，用 `launchctl kickstart -k gui/$(id -u)/<label>` 重启该实例的 LaunchAgent
+  （这是 launchctl 命令，不是手工改 service 目录，允许）。验收以日志中出现**新时间戳的 `Supervisor ready`** 为准
+- **测试方式**：用一个假的 `BRIDGE_ENTRY`（不创建 app-server 子进程的小脚本）+ 很短的 `POLL_INTERVAL` 与
+  `START_GRACE_SECONDS` 跑 supervisor，断言：宽限期内不强杀；宽限期过后连续缺失才强杀；连续强杀时宽限期翻倍且封顶；
+  出现健康子进程后复位。测试须能在有限时间内结束，并清理自己启动的进程
+- **验收**：
+  - 上述 supervisor 行为测试（先在现脚本上失败）
+  - `zsh -n` 通过；166+ 全绿，总数只增
+  - 部署后三实例日志都有新时间戳的 `Supervisor ready`，且 supervisor 启动行里显示新参数（如 `start_grace=60`）
+- **不做**：不改 bridge 内的轮询卡死阈值（T3.3）；不做 supervisor 直发通知（T3.5）
+
 **T3.3 轮询卡死不再 exit**（R4）— 改持续退避重试，只标记 `telegram_degraded`(30s) / `telegram_unreachable`(90s)，**不退出进程**。依赖 T2.2 / T2.4。验收：单测覆盖两级状态迁移；长时间断网不再出现 `Bridge self-recovery restart requested`
 
 **T3.4 恢复播报 + 读回 restartReason**（R2）— 恢复后在受影响会话发「刚与 Telegram 失联 X 分 Y 秒（原因：…），期间积压 N 条，正在按顺序处理」；启动时**先读**再清空（修 `:4319` 的无条件清空）。验收：单测覆盖「消费后才清空」
