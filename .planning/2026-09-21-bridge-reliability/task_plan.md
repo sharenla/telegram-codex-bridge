@@ -9,9 +9,10 @@
 
 ## Next Step
 
-执行 **T3.4b**（必修，零输出）：认证恢复耗尽后请求必须收尾，并让 backend 健康状态反映持续的认证失败；同一轮顺带做 **T3.4a**。
-规格见 `handoff_codex.md`「T3.4a / T3.4b」。来源：2026-09-23 真实断网实战（见 progress.md）。
-**维护者另需重新登录 strategy-observation 与 rv-prediction 使用的 Codex 账号**（refresh token 已吊销，属凭证操作，agent 不得处理）。
+下一项 **T3.5**：supervisor 兜底直发，按 handoff_codex.md 规格推进。
+T3.4b / T3.4a 的实现、200/200 检查和三实例灰度部署已完成，codeVersion=`4e0985bd`。
+本轮人工 `/status` 验收仍待维护者完成；strategy-observation 已实测 auth_failing，rv-prediction 重启后未再出现新的认证错误、暂为 ok，不能将其记为认证已恢复或 auth_failing 验收通过，详见 progress.md。
+凭证操作仍由维护者处理；Next Step 不代表本轮人工验收已经通过。
 
 ## Current Phase
 
@@ -59,8 +60,8 @@ Phase 3
 - [x] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
 - [x] T3.4 恢复后播报失联时长与原因（网络失联用 lastOutage；进程停机用上次成功轮询时间 + 关机记录；2026-09-23 因 restartReason 已不再写入而改写）
 - [x] T3.4 已线上验收（2026-09-23 真实断网 26 分钟，三实例汇总送达）
-- [ ] T3.4a 汇总原因取最早发生的原因；时间用本地时间
-- [ ] T3.4b 【零输出，必修】认证恢复耗尽后请求必须收尾（❌ + 中文原因）；backend 健康状态须反映持续的认证失败
+- [x] T3.4a 汇总原因取最早发生的原因；时间用本地时间
+- [x] T3.4b 【零输出，必修】认证恢复耗尽后请求必须收尾（❌ + 中文原因）；backend 健康状态须反映持续的认证失败
 - [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
 - [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
 - [ ] T3.7 修复 Clash 控制 socket 探测（现路径 ENOENT，断网时自动换节点未生效）

@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.4b / T3.4a 已灰度部署（2026-09-23）：代码 `adbcca8`、四份 index.js `4e0985bd0bb3`，200/200 通过；rv #023b89 已自然清台账。strategy 为 auth_failing；rv 启动后无新认证错误、仍为 ok，该额外验收未证实，不能当成账号恢复。详见末尾台账与人工验收；Next Step 为 T3.5。
   - T3.4b / T3.4a（2026-09-23）：维护者三份规划更新原样提交 `4eef88f`。认证 turn / stderr 看门狗 / 重跑请求失败统一终态、一次重跑上限、工具调用安全门、auth_failing 与私聊汇总去重已实现；重叠失联原因和本地秒级时间已修。新增 12 项测试，全套 200/200；准备灰度部署。
   - T3.4 灰度完成（2026-09-23）：提交 `8043a59` 按 rv → 观察 → default → strategy 安装；四份 index.js `8fea81fe48e7`，supervisor `2257af0ad696`；启动 1000/1704/1078 ms。三实例均已成功轮询且没有生成失联汇总；T3.4 已勾选，Next Step 为 T3.5。人工验收见末尾。
   - T3.4（2026-09-23）：维护者三份规划文件原样单独提交 `4279e79`。新增恢复汇总、延迟消息 ack 注记、正常关闭记录；网络恢复复用 T3.3 lastOutage，进程恢复使用启动前 lastPollSuccessAt。新增 12 项测试（先复现缺失与接入失败），全套 188/188；准备灰度部署。
@@ -251,6 +252,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T3.4 rv-prediction | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:26:46 +0800、spawn 1000 ms；无恢复汇总；supervisor `2257af0ad696` |
 | 2026-09-23 | T3.4 default | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:27:48 +0800、spawn 1704 ms；无恢复汇总；supervisor `2257af0ad696` |
 | 2026-09-23 | T3.4 strategy-observation | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:28:14 +0800、spawn 1078 ms；无恢复汇总；supervisor `2257af0ad696` |
+| 2026-09-23 | T3.4b/T3.4a rv-prediction | `feat/phase-3-restart-loop` | `adbcca86c372b3b1d386acaaf1b97d2e6788be57` | `4e0985bd0bb3` | 安装与常规检查通过；ready 22:57:06 +0800，spawn 5504 ms；台账清空；auth_failing 待证实 |
+| 2026-09-23 | T3.4b/T3.4a default | `feat/phase-3-restart-loop` | `adbcca86c372b3b1d386acaaf1b97d2e6788be57` | `4e0985bd0bb3` | 安装与常规检查通过；ready 23:02:23 +0800，spawn 7707 ms；backend=ok |
+| 2026-09-23 | T3.4b/T3.4a strategy-observation | `feat/phase-3-restart-loop` | `adbcca86c372b3b1d386acaaf1b97d2e6788be57` | `4e0985bd0bb3` | 安装与常规检查通过；ready 23:03:04 +0800，spawn 2811 ms；backend=auth_failing |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -278,6 +282,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-21 T1.1 | 暂存内容含聊天 ID 格式值，与禁止提交标识及禁止修改实例 .env.* 的契约冲突 | 1：扫描并定位两份实例 env.example:3、multi-instance-launch-agent.test.js:43；不记录具体值 | 停在提交前，待最小模板脱敏授权及测试值确认；未 commit/部署 |
 
 | 2026-09-22 T2.2/T2.3 | 仅持久化递增 offset 不能保证未处理消息可恢复；与不丢目标矛盾 | 1：对照 pollingLoop 与 T2.3 规格，确认 handler 异步且无入站重放持久层 | 按 §6 停在联动改动前，待确认 T2.3 inbox 规格 |
+| 2026-09-23 T3.4b 灰度验收观察 | rv-prediction 的 auth_failing 预期尚未证实：重启后 backend=ok，未再有新认证 stderr；历史错误最后为 22:53:09，旧版持久化 lastAuthFailureAt 仍是 20:55 | 保持同一 PID 55600 观察超过 4.5 分钟，轮询持续成功、activeRequests=0、无 ack 编辑失败；未发测试 turn、未操作凭证。strategy 重启后新错误已正确标 auth_failing | 该项不记为通过，也不推断 rv 账号已恢复。已向维护者询问是否重新登录，尚无答复；三实例代码部署完成，真实 /status 与 rv 认证状态留待维护者确认。非规格冲突，未扩大修改范围 |
 
 > 执行期新错误请追加在上表，**不要覆盖历史行**。同一错误第二次出现时先换方法再重试。
 
@@ -1086,3 +1091,26 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sharenla.telegram-co
 - 12 项新增测试先复现失败再实现，覆盖实际认证函数与假 stderr 入口；全套 **200/200 pass、fail 0**。node -c、四项 zsh -n、git diff --check 通过。已有测试文件/断言未改；没有真实账号切换/凭证探测。
 - 部署前只读核实：rv 的 activeRequests 为 #023b89 / running / ackMessageId=27；rv 与 strategy 后台都仍标记 ok，但 stderr 最近 400 行分别有 176 / 118 行认证失败，default 为 0。符合本轮修复前的现象。部署后应由 T2.5 自然中断和清台账，不手改 store。
 - 代码检查完成，部署与人工验收台账待下方补齐。
+
+
+### T3.4b / T3.4a 灰度部署与待人工验收（2026-09-23）
+
+- 实现提交 `adbcca86c372b3b1d386acaaf1b97d2e6788be57`；灰度顺序 rv-prediction → 观察（超过一轮成功轮询，额外覆盖历史约 4.5 分钟认证刷新周期）→ default → strategy-observation。未 push。
+- 四份 index.js 完整 SHA-256：`4e0985bd0bb32e877ed523f2c0d2bb5721b7f62d00f1a2326790a0a164f12507`，codeVersion=`4e0985bd`；四份 supervisor 仍为 `2257af0ad696d0690572737e0875d5d326339fcb4acacb1a0c7e9959f7d41ee2`。
+- 三实例本次 Supervisor ready 时间（UTC+8）为 **22:57:06 / 23:02:23 / 23:03:04**，均带 start_grace=60；Deployed ref/Bridge started/codeVersion 齐全，appServerSpawnedMs 为 **5504 / 7707 / 2811**。rv 启动期间观察到一次宽限期 skip，之后正常；未改 supervisor。
+- 三个 bridge、supervisor 父进程和 app-server 子进程均存活；两个命名角色文件与源哈希匹配；3 把锁的 pid/indexPath 对应正确。最终新进程均有成功轮询，telegramState=ok、offlineSince=0，outboxQueued=0、outboxDiscarded=0。一次检查遇到短暂非 bridge curl，随后自行结束；最终只剩三条由各自 bridge 持有的正常 getUpdates curl，无残留/测试进程，未执行额外 kill。全部诊断输出先脱敏。
+- rv 部署前 activeRequests 含 `#023b89`、running、ackMessageId=27，部署后为空，未手工改 store。按现有 T2.5 恢复流程会编辑原 ack 为中断并移除台账，本次未见 telegram_ack_edit_failed。**台账清空已直接验证；Telegram 客户端中原消息 27 是否显示中断仍请维护者目视确认**，不把本地无错误当作已读回 Telegram 消息。
+- backend 实测：**strategy-observation=auth_failing**（新 lastAuthFailureAt=`1790175798101`、authFailureUnresolved=true），default=ok；rv=ok，但没有部署后成功 turn 或重新登录证据，且启动后没有新的认证错误。rv 的 auth_failing 额外验收尚未证实，见 Error Log。没有主动制造认证错误或操作任何凭证。
+- 两任务的代码/检查/部署项已打勾，所有原有任务行与顺序保留，Next Step 指向 T3.5；人工验收尚未完成。
+
+**请维护者对三个 bot 各发 `/status`，逐实例记录：**
+
+| 实例 | 应核对共同字段 | codexBackend 状态记录 |
+|---|---|---|
+| rv-prediction | codeVersion=4e0985bd、telegramState=ok、outboxQueued=0、outboxDiscarded=0、truthProfile 不变 | 当前本地 ok；请确认是否已重新登录，并记录真实 /status，不能据此认定账号可用 |
+| default | 同上 | 当前本地 ok；记录真实 /status |
+| strategy-observation | 同上 | 当前本地 auth_failing；重新登录且成功 turn 后应复位 ok |
+
+另请核对 rv 原 #023b89 的 ack 已变为「服务重启，这条任务已中断」。后续若认证失败再次发生，应在一次安全重跑耗尽后显示「Codex 账号登录已失效，需要维护者重新登录」并清台账；已有工具调用则提示「可能已部分执行」。本轮未代替用户发真实任务。
+
+剩余边界：凭证失效仍需要维护者处理；rv 额外健康状态观察未满足预期，待人工确认。汇总投递仍沿用现有 outbox 的至少一次语义（发送成功但回执未持久化时可能重复）；本轮去重防的是同一故障反复入队。旧认证恢复/新 thread/失效 thread 通知的冗余与英文保留给 T4.4。
