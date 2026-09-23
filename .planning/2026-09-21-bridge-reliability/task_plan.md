@@ -9,9 +9,7 @@
 
 ## Next Step
 
-继续 **T2.5**（在当前未提交草稿上续做）：按 `handoff_codex.md`「T2.5 补充：任务生命周期」实现持久化进行中任务台账。
-inbox 保持「dispatch 完成即出队」；新台账保留到 turn 终态；重启时 queued 重新入队、running **不重跑**只发中断提示。
-必须补接入层集成测试，管理器单测全绿不算完成。
+继续 **T2.6**：上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）。
 
 ## Current Phase
 
@@ -45,7 +43,7 @@ Phase 2
 - [x] T2.4 持久化 outbox，进程重启后补发（含放弃通知走 outbox、inbox 满时用户提示）
 - [x] T2.4a 部署前必修：outbox 补容量/年龄上限 + 永久错误放弃（2026-09-23 验收通过并已部署）
 - [x] T2.4b 热修：`_isPermanentReject` 自由文本 403 匹配会误丢消息（2026-09-23 完成并灰度部署）
-- [ ] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
+- [x] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
 - [ ] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [ ] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
 - [ ] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动

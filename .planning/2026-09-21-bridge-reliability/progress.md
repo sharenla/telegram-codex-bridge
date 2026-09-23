@@ -110,7 +110,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
-| T2.5 草稿检查 | 新增 ack 管理器 6 项 + 全套检查 | 完整验收后才能部署 | 旧代码 6/6 失败（类尚不存在）；草稿 139/139 pass；node、四项 zsh 语法与 diff check 通过，但缺少真实接入/持久化生命周期验证，不能视为验收通过 | in_progress |
+| T2.5 草稿检查 | ack 管理器、接入层生命周期集成测试 + 全套检查 | 通过后灰度部署 | 旧代码新增测试先失败；实现后 **145/145 pass / fail 0**；node、四项 zsh 语法与 diff check 通过 | complete |
 | T2.3a replay 不阻塞 polling | 真实启动尾部 + 永不完成 dispatch | polling 处理新消息 | 修复前失败；修复后 117/117 全部通过 | complete |
 | 语法检查（基线） | `node -c index.js` | 无输出即通过 | SYNTAX OK | complete |
 | 单测（基线） | `node --test ./tests/*.test.js` | 全通过 | **tests 99 / pass 99 / fail 0**（362ms） | complete |
@@ -132,6 +132,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.4 outbox | isolated store/process tests | failed sends survive restart and notices are durable | 123/123 pass; deployment pending | complete |
 | T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployed and smoke-checked | complete |
 | T2.4b permanent-reject hotfix | structured 429/403/blocked and transport-error regressions | 133/133 pass; all syntax checks pass | complete |
+| T2.5 ack + lifecycle | manager + integration lifecycle/restart/steer tests and required checks | **145/145 pass / fail 0**; node/zsh/diff check pass | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -139,6 +140,17 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 > 基线规则：改动后测试**总数只应增加**，`pass` 必须等于 `tests`，`fail` 必须为 0。
 
 ---
+
+### T2.5 完成与灰度部署（2026-09-23）
+
+- 完成收到即确认与单条 ack 状态编辑：受理、排队、处理中、完成/失败、steer、内部重试均复用同一 requestId 与 ack；编辑至少间隔 3 秒，失败不进入 outbox。
+- 新增持久化 `telegram.activeRequests` 台账：queued 重启后安全重入队，running 重启不重跑并编辑中断提示；终态清理。outbox 延迟 ack 成功后回填 `ackMessageId`。
+- 新增接入层生命周期测试覆盖正常终态、running/queued 重启、内部重试、steer 与延迟补发回填；旧代码新增测试先失败。
+- 提交：`04a3c130714b40ce3cea584b6b212ca2544aa824`（`index.js` SHA-256 前 12 位 `e5d5ac5285ff`）。
+- 灰度顺序 rv-prediction → 观察一轮 → default → strategy-observation：三实例哈希一致、进程存活、启动日志含 `Deployed ref` / `Bridge started` / `codeVersion`；rv-prediction 完成 SIGTERM/restart smoke，重启后 `activeRequests` 为空且恢复正常轮询。
+- 人工验收待维护者执行：
+  1. 三个 bot 各发一次 `/status`，确认 `codeVersion=e5d5ac52`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。
+  2. 一个群里 @ bot 发真实消息，确认只有一条状态消息从「已收到」变化到「已完成」，正文另发。
 
 ## 版本与部署台账
 
@@ -166,6 +178,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T2.4b rv-prediction | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | gray deploy + observation passed |
 | 2026-09-23 | T2.4b default | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
 | 2026-09-23 | T2.4b strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
+| 2026-09-23 | T2.5 rv-prediction | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | gray deploy + SIGTERM/restart smoke passed |
+| 2026-09-23 | T2.5 default | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | observe-one-round then deploy passed |
+| 2026-09-23 | T2.5 strategy-observation | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | deploy passed |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
