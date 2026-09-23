@@ -853,6 +853,36 @@ npm run install:<instance>
 
 **T3.5 supervisor 兜底直发**（R3）— 连续强杀 ≥3 次时 supervisor 自己 curl 发通知。token 从 `.env` 读，**不得**写进日志或提交。验收：`zsh -n` 通过 + 模拟连续强杀能收到
 
+**T3.4c 切号验证成功也视为认证恢复（2026-09-23，小修）**
+
+- 现状：T3.4b 规定 `auth_failing` 只在「turn 成功」后复位。实测 OBS 手动 `/accounts` 切号后，bridge 已通过
+  `verifySwitchedAccount` 验证新账号可用（`lastOkAt` 更新），但 `authFailureUnresolved` 仍为 true、状态仍显示 `auth_failing`
+- 改法：切号（手动 `/accounts` 或自动故障切换）且账号验证成功时，与 turn 成功同样清除 `authFailureUnresolved` 并复位 `ok`；
+  若随后同一账号又出现认证失败，照常再次标记 `auth_failing`
+- 验收：测试「auth_failing 状态下切号且验证成功 → 立即复位 ok」；测试「切号验证失败 → 保持 auth_failing」
+- 与 T3.5 同轮做，**单独一个 commit**
+
+**T3.5 补充：supervisor 兜底直发（2026-09-23）**
+
+- **场景**：bridge 反复起不来（supervisor 连续强杀），bridge 自身的 outbox 与恢复汇总都无从发出。只有 supervisor 还活着
+- **触发**：T3.2 的 `consecutive_unhealthy_restarts` 达到 **3** 时发一次告警
+- **收件人**：只发 allowlist 中的**私聊**（chat id 为正数），与 T3.4 相同；不发群
+- **限频**：同一实例 **30 分钟内最多发 1 次**告警；把上次发送时间写入 `${SERVICE_ROOT}/data/supervisor-alert.json`，重启 supervisor 后仍有效
+- **恢复通知**：发过告警之后，一旦 supervisor 看到 app-server 健康，再发一次「已恢复」，并清除告警标记。
+  未发过告警的普通复位不发任何消息
+- **文案**（中文、一行、不含内部路径与英文堆栈）：
+  - 告警：`⚠️ <实例名> 连续 <N> 次启动失败，app-server 没能起来。最近错误：<最多 120 字、已脱敏>。supervisor 会继续重试。`
+  - 恢复：`✅ <实例名> 已恢复运行（之前连续 <N> 次启动失败）`
+  「最近错误」取 bridge.stderr.log 最后一条非空错误行，**先脱敏**（去掉 `bot<id>:<token>`、URL 中的查询串），再截断
+- **token 不得出现在进程命令行里**：supervisor 从本实例 `.env` 读取 `TELEGRAM_BOT_TOKEN`（只读，不修改 .env），
+  调用 curl 时用 `curl --config -` 从 **stdin** 传入含 token 的 URL，命令行参数中不得出现 token（与 T4.8 同一原则，这里从一开始就做对）。
+  token 也不得写入任何日志
+- **尽力而为，不阻塞主循环**：发送失败（网络断了）只记一行日志，不重试、不影响强杀与宽限期逻辑；curl 加 `--max-time 10`
+- **测试**：用一个假的 `curl`（放在测试专用 PATH 前面，把 stdin 和参数记到文件）跑 supervisor，断言：
+  连续强杀 3 次时恰好发一次；30 分钟内不重复；恢复时发「已恢复」并清标记；只发给正数 chat id；
+  **假 curl 记录到的命令行参数里不含 token**；token 不出现在 supervisor 日志中；告警文案中的错误行已脱敏
+- **不做**：不改宽限期序列与强杀条件（T3.2 已完成）；不发群；不改 bridge 内的汇总逻辑
+
 **T3.6 409 Conflict 单独归类**（R6 / R7）— 归入 `telegram_poll_conflict`；检测到即查实例锁、退出重复实例并播报。验收：单测覆盖该分类
 
 ### Phase 4 — 错误分类与可观测指标（分支 `feat/phase-4-observability`）

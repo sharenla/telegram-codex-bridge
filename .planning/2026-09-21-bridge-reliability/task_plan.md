@@ -9,10 +9,8 @@
 
 ## Next Step
 
-下一项 **T3.5**：supervisor 兜底直发，按 handoff_codex.md 规格推进。
-T3.4b / T3.4a 的实现、200/200 检查和三实例灰度部署已完成，codeVersion=`4e0985bd`。
-本轮人工 `/status` 验收仍待维护者完成；strategy-observation 已实测 auth_failing，rv-prediction 重启后未再出现新的认证错误、暂为 ok，不能将其记为认证已恢复或 auth_failing 验收通过，详见 progress.md。
-凭证操作仍由维护者处理；Next Step 不代表本轮人工验收已经通过。
+执行 **T3.5**（supervisor 兜底直发），同一轮附带小修 **T3.4c**（切号验证成功视为认证恢复），两个任务分开提交。
+规格见 `handoff_codex.md`「T3.5 补充」与「T3.4c」。T3.4a/T3.4b 人工验收已于 2026-09-23 通过。
 
 ## Current Phase
 
@@ -62,6 +60,7 @@ Phase 3
 - [x] T3.4 已线上验收（2026-09-23 真实断网 26 分钟，三实例汇总送达）
 - [x] T3.4a 汇总原因取最早发生的原因；时间用本地时间
 - [x] T3.4b 【零输出，必修】认证恢复耗尽后请求必须收尾（❌ + 中文原因）；backend 健康状态须反映持续的认证失败
+- [ ] T3.4c 切号验证成功也视为认证恢复（清 authFailureUnresolved，状态复位 ok）
 - [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
 - [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
 - [ ] T3.7 修复 Clash 控制 socket 探测（现路径 ENOENT，断网时自动换节点未生效）

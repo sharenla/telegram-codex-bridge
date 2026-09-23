@@ -1114,3 +1114,20 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sharenla.telegram-co
 另请核对 rv 原 #023b89 的 ack 已变为「服务重启，这条任务已中断」。后续若认证失败再次发生，应在一次安全重跑耗尽后显示「Codex 账号登录已失效，需要维护者重新登录」并清台账；已有工具调用则提示「可能已部分执行」。本轮未代替用户发真实任务。
 
 剩余边界：凭证失效仍需要维护者处理；rv 额外健康状态观察未满足预期，待人工确认。汇总投递仍沿用现有 outbox 的至少一次语义（发送成功但回执未持久化时可能重复）；本轮去重防的是同一故障反复入队。旧认证恢复/新 thread/失效 thread 通知的冗余与英文保留给 T4.4。
+
+### T3.4a / T3.4b 人工验收（2026-09-23）—— 通过
+
+| 项 | 结果 |
+|---|---|
+| 三 bot `/status` | ✅ `codeVersion=4e0985bd`、telegramState=ok、outbox 两项 0、truthProfile 不变 |
+| rv 原 `#023b89` ack | ✅ 维护者确认已变为「服务重启，这条任务已中断」 |
+| rv backend=ok | ✅ 属实：rv 启动时账号健康检查已切到仍有效的账号 `33d1df3f…`，重启后无认证错误。原 Error Log 中「rv 未证实」一项关闭 |
+| OBS 失效 → 恢复全流程 | ✅ `auth_failing`（ae4ed98c…，每约 4.5 分钟一次 refresh 失败）→ 维护者用 `/accounts` 切到 `33d1df3f…`（23:21:47 验证成功，此后不再报错）→ 跑通一个任务 → `/status` 复位 `ok` |
+
+**发现（→ T3.4c）**：复位条件只认「turn 成功」，切号时 bridge 已实际验证新账号可用（`lastOkAt` 23:21:47），
+但 `authFailureUnresolved` 未清，状态仍显示 `auth_failing` 直到下一个 turn 成功。切号验证成功应同样视为恢复。
+
+**遗留（不在本计划范围，交维护者择机处理）**：账号池 `~/.openclaw/agents/main/agent/auth-profiles.json`
+（OpenClaw 与 bridge 共用）中 `ae4ed98c…`、`28a48728…` 的 refresh token 已吊销，需在 wukong 本机终端
+`openclaw models auth login --provider openai-codex` 重新登录（OAuth 需本人在浏览器操作）；
+OpenClaw 自身配置 `~/.openclaw/openclaw.json` 当前有 9 项无法识别的配置键，登录命令可能受影响，建议单独立项。
