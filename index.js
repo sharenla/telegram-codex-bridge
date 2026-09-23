@@ -303,6 +303,9 @@ const TELEGRAM_POLL_TIMEOUT_SECONDS = 5;
 const TELEGRAM_TRANSPORT_FAILOVER_ERROR_THRESHOLD = 3;
 const TELEGRAM_TRANSPORT_FAILOVER_MAX_CANDIDATES = 4;
 const TELEGRAM_TRANSPORT_FAILOVER_COOLDOWN_MS = 60 * 1000;
+const TELEGRAM_CONFLICT_WINDOW_MS = 5 * 60 * 1000;
+const TELEGRAM_CONFLICT_RECOVERY_MS = 10 * 60 * 1000;
+const TELEGRAM_CONFLICT_NOTICE_COOLDOWN_MS = 30 * 60 * 1000;
 const TELEGRAM_RETRYABLE_METHODS = new Set([
   "getUpdates",
   "getMe",
@@ -317,6 +320,62 @@ const CLASH_CONFIG_CANDIDATES = [
   path.join(os.homedir(), ".config", "mihomo", "config.yaml"),
   path.join(os.homedir(), ".config", "clash", "config.yaml"),
 ];
+
+function isTelegramPollConflictError(error) {
+  return Number(error?.body?.error_code) === 409;
+}
+
+function refreshTelegramConflictState(health, now = Date.now()) {
+  if (!health || typeof health !== "object") return false;
+  const events = Array.isArray(health.conflictEvents)
+    ? health.conflictEvents.map(Number).filter(Number.isFinite).filter(at => now - at < TELEGRAM_CONFLICT_WINDOW_MS)
+    : [];
+  health.conflictEvents = events;
+  const lastConflictAt = Number(health.lastConflictAt || events.at(-1) || 0);
+  if (health.state === "conflict" && (!lastConflictAt || now - lastConflictAt >= TELEGRAM_CONFLICT_RECOVERY_MS)) {
+    health.state = health.offlineSince ? "degraded" : "ok";
+    health.lastConflictAt = 0;
+    return true;
+  }
+  return false;
+}
+
+function recordTelegramPollConflict(health, error, { now = Date.now(), onEnter = null } = {}) {
+  if (!health || typeof health !== "object") return { entered: false, count: 0 };
+  refreshTelegramConflictState(health, now);
+  const events = Array.isArray(health.conflictEvents) ? health.conflictEvents : [];
+  events.push(now);
+  health.conflictEvents = events.filter(at => now - at < TELEGRAM_CONFLICT_WINDOW_MS);
+  health.lastConflictAt = now;
+  health.lastPollErrorAt = now;
+  health.lastPollError = truncateMiddle(error?.message || String(error), 220);
+  health.consecutivePollErrors = Number(health.consecutivePollErrors || 0) + 1;
+  const entered = health.state !== "conflict" && health.conflictEvents.length >= 3;
+  if (entered) {
+    health.state = "conflict";
+    onEnter?.();
+  } else if (health.state === "conflict") {
+    health.state = "conflict";
+  }
+  return { entered, count: health.conflictEvents.length };
+}
+
+function queueTelegramConflictNotice({ health, allowlist, botName = "Telegram bot", outbox, now = Date.now() } = {}) {
+  if (!health || !outbox?.enqueue) return false;
+  const lastSentAt = Number(health.lastConflictNoticeAt || 0);
+  if (lastSentAt && now - lastSentAt < TELEGRAM_CONFLICT_NOTICE_COOLDOWN_MS) return false;
+  const recipients = [...(allowlist || [])].map(Number).filter(chatId => Number.isInteger(chatId) && chatId > 0);
+  if (!recipients.length) return false;
+  const text = `⚠️ ${botName} 检测到另一个进程在用同一个 bot token 收消息（很可能在别的机器上），部分消息可能被它收走。请检查是否有别处运行着同一个 bot。`;
+  for (const chatId of recipients) {
+    outbox.enqueue({ chat_id: chatId, text }, {
+      priority: "notice",
+      requestId: `telegram-conflict:${now}:${chatId}`,
+    });
+  }
+  health.lastConflictNoticeAt = now;
+  return true;
+}
 
 function resolveUserPath(inputPath) {
   if (!inputPath || typeof inputPath !== "string") return inputPath;
@@ -5213,13 +5272,43 @@ async function main() {
 
   function recordTelegramPollError(error) {
     const health = ensureTelegramHealthState();
-    health.lastPollErrorAt = Date.now();
+    const now = Date.now();
+    const isConflict = typeof isTelegramPollConflictError === "function"
+      ? isTelegramPollConflictError(error)
+      : Number(error?.body?.error_code) === 409;
+    if (isConflict) {
+      const conflict = typeof recordTelegramPollConflict === "function"
+        ? recordTelegramPollConflict(health, error, {
+        now,
+        onEnter: () => {
+          const botName = botIdentity.current.username || "Telegram bot";
+          if (typeof queueTelegramConflictNotice === "function"
+            && queueTelegramConflictNotice({ health, allowlist, botName, outbox, now })) {
+            void outbox.flush().catch(() => console.error("Outbox recovery failed"));
+          }
+        },
+        })
+        : { entered: false, count: 0 };
+      console.log(JSON.stringify({
+        ts: new Date(now).toISOString(),
+        errorClass: "telegram_poll_conflict",
+        telegramState: health.state,
+        conflictCount: conflict.count,
+      }));
+      store.markDirty();
+      store.save({ force: true });
+      return health;
+    }
+    const conflictRecovered = typeof refreshTelegramConflictState === "function"
+      ? refreshTelegramConflictState(health, now)
+      : false;
+    health.lastPollErrorAt = now;
     health.consecutivePollErrors = Number(health.consecutivePollErrors || 0) + 1;
     health.lastPollError = truncateMiddle(error?.message || String(error), 220);
     const baseline = health.offlineSince || health.lastPollSuccessAt || health.lastPollErrorAt;
     const offlineMs = Math.max(0, health.lastPollErrorAt - baseline);
     const state = offlineMs >= 90_000 ? "unreachable" : offlineMs >= 30_000 ? "degraded" : "ok";
-    const changed = state !== health.state;
+    const changed = health.state === "conflict" ? conflictRecovered : state !== health.state;
     if (changed) {
       health.state = state;
       if (state !== "ok" && !health.offlineSince) health.offlineSince = baseline;
@@ -10077,6 +10166,10 @@ module.exports = {
     shouldRetryTelegramMethod,
     isTelegramTransientError,
     getTelegramRetryDelayMs,
+    isTelegramPollConflictError,
+    recordTelegramPollConflict,
+    refreshTelegramConflictState,
+    queueTelegramConflictNotice,
     TelegramRecoveryNotices,
     recordRecoveryNoticeDelivered,
     recoveryNetworkReason,
