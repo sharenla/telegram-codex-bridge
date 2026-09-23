@@ -889,6 +889,42 @@ npm run install:<instance>
 
 **T3.6 409 Conflict 单独归类**（R6 / R7）— 归入 `telegram_poll_conflict`；检测到即查实例锁、退出重复实例并播报。验收：单测覆盖该分类
 
+**T3.6 补充：409 Conflict（2026-09-23）**
+
+- 背景：T2.8a 后本机不可能再有同 token 第二进程，T2.2 后重启不留孤儿长轮询。此后出现的 409 基本意味着**其他机器**上有进程在用同一 bot token
+- 要做：
+  1. 轮询错误里识别 409（优先用结构化 `error.body.error_code === 409`，不用裸数字文本匹配），归为 `telegram_poll_conflict`，写结构化日志
+  2. 5 分钟内出现 ≥3 次 409 → 内部状态标记为 `conflict`（与 ok / degraded / unreachable 并列），在 `/status` 的 telegramState 显示
+  3. 进入 `conflict` 时经 outbox 给维护者私聊发一次（30 分钟内最多一次）：
+     `⚠️ <bot 名> 检测到另一个进程在用同一个 bot token 收消息（很可能在别的机器上），部分消息可能被它收走。请检查是否有别处运行着同一个 bot。`
+  4. **不退出进程**，不自动做任何其他处理；10 分钟内无新 409 自动回到正常状态
+- 验收：测试「结构化 409 → telegram_poll_conflict」；「5 分钟内 3 次 → conflict + 私聊一次」；「30 分钟内不重复」；「10 分钟无 409 → 复位」；「进程不退出」
+
+**T3.7 Clash 控制器探测与可达性（2026-09-23）**
+
+- 现状：`CLASH_CONFIG_CANDIDATES` 第一项读的是 Verge 应用设置 `clash-verge.yaml`，其中 socket 路径不存在；
+  运行时配置 `config.yaml` 的 unix socket 与 TCP 9097 当前也都不可达（Clash Verge 服务模式，控制器未对用户开放）
+- 要做：
+  1. 探测顺序改为优先读**运行时** `~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml`，
+     同时支持其 `external-controller`（TCP，带 `secret`）与 `external-controller-unix`；`clash-verge.yaml` 降为后备；
+     显式环境变量 `TELEGRAM_CLASH_CONTROLLER_SOCKET` / `_URL` 仍最优先
+  2. 启动时**实测一次**控制器可达性（请求 `/version`，超时 3 秒，不阻塞启动，后台执行）
+  3. `/status` 增加一行：`clashFailover: available（<来源>）` 或 `clashFailover: unavailable（<中文原因>，例：找不到 Clash 控制器）`
+  4. 不可用时启动日志写一行说明；断网时不再每次都报 `ENOENT` 刷屏，改为按不可用状态直接跳过自动换节点并记一次
+  5. **secret 不得出现在日志、/status 或进程命令行**（用 Node 的 http 模块直接请求，不要 shell 出去 curl）
+- **不做**：不修改任何 Clash 配置文件；不尝试启动或重启 Clash；不改换节点的判定条件
+- 验收：测试「运行时 config.yaml 优先于 clash-verge.yaml」；「socket 不存在 → unavailable 且原因正确」；
+  「TCP 控制器可达 → available」；「secret 不出现在日志和 /status」；「不可用时断网只记一次、不刷屏」
+- 部署后：三实例 `/status` 的 clashFailover 如实反映当前环境（预期 unavailable），并把原因写进 progress.md
+
+**Phase 3 收口（T3.6 / T3.7 部署并经人工 `/status` 确认之后）**
+
+1. `task_plan.md` 核对 Phase 3 全部条目已打勾，Status 改 complete，Current Phase 改为 Phase 4
+2. `git switch main` → `git merge --no-ff feat/phase-3-restart-loop` → `git tag -a v0.3.0 -m "Phase 3: restart loop and outage visibility"`
+3. 用 `git rev-list -n1 v0.3.0` 取 tag 指向的 commit，核对 tag 中 `index.js` 与 `scripts/codex-launch-supervisor.sh` 的哈希与三实例一致
+4. 从 main 按灰度顺序重装三实例一次，使 `DEPLOYED_REF` 指向 main 上的 commit
+5. 台账补 tag 行；**不要 push**
+
 ### Phase 4 — 错误分类与可观测指标（分支 `feat/phase-4-observability`）
 
 **T4.1 先出基线数字** — 只读脚本，从 `data/codex-home/sessions/**/*.jsonl` 算 turn 开始 / 完成 / 孤儿 / 失败分类。验收：在 wukong 上复现 F5 的数字（1,683 / 1,630 / 29 / 24 / 27）

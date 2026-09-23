@@ -1446,3 +1446,27 @@ OpenClaw 自身配置 `~/.openclaw/openclaw.json` 当前有 9 项无法识别的
 | strategy-observation | 同上 | 待维护者确认 `ok` |
 
 T3.5 告警路径未在线上主动制造，已由新增 supervisor 假 curl 测试覆盖；T4.8 的 bridge 自身 curl token 命令行问题保持原位。
+
+### T3.4c / T3.5 验收（2026-09-23）—— 通过
+
+- 四份哈希一致：`index.js` `29cd2ee871`、supervisor `7a78789249`；**204 / 204**
+- supervisor 发起的 curl 数量为 0、含 token 数为 0（门禁已按更正后的范围执行）
+- §4.4：维护者确认三个 bot `codeVersion=29cd2ee8`、telegramState=ok、outbox 两项 0、codexBackend=ok、truthProfile 不变
+- supervisor 告警路径线上无法安全制造，仅测试覆盖
+
+### T3.7 现状勘查（2026-09-23）
+
+Clash Verge 有两份配置，bridge 读错了：
+| 文件 | 控制器 | 实测 |
+|---|---|---|
+| `…/clash-verge-rev/clash-verge.yaml`（Verge 应用设置，`CLASH_CONFIG_CANDIDATES` 第一项） | unix `/var/folders/…/verge-mihomo.sock` | ❌ 文件不存在 |
+| `…/clash-verge-rev/config.yaml`（运行时内核配置） | unix `/tmp/verge/verge-mihomo.sock`；TCP `127.0.0.1:9097` | ❌ `/tmp/verge/` 为空；9097 无监听，连接被拒 |
+
+Clash Verge 以**服务模式**运行（内核在 `/Library/Application Support/clash-verge-service/`，root 身份），控制器未对当前用户开放。
+**结论：本机当前不存在 bridge 可访问的 Clash 控制器，自动换节点功能很可能自改用服务模式起就一直未生效。**
+代码侧能做的是：正确探测、启动时实测可达性、不可用时如实展示；真正启用需维护者在 Clash Verge 中打开外部控制器（可选）。
+
+### T3.6 现状勘查（2026-09-23）
+
+代码中无 Telegram 409 专门处理（`Conflict` 命中的均为无关的 workspace 冲突逻辑）。
+T2.8a 后本机已不可能出现同 token 第二进程；T2.2 后重启也不再留孤儿长轮询。**此后再出现 409，基本可判定为其他机器上有进程在用同一 bot token。**
