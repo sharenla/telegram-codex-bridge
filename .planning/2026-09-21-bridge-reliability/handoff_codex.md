@@ -773,6 +773,31 @@ npm run install:<instance>
 
 **T3.3 轮询卡死不再 exit**（R4）— 改持续退避重试，只标记 `telegram_degraded`(30s) / `telegram_unreachable`(90s)，**不退出进程**。依赖 T2.2 / T2.4。验收：单测覆盖两级状态迁移；长时间断网不再出现 `Bridge self-recovery restart requested`
 
+**T3.3 补充（2026-09-23，基于 v0.2.0 之后的代码）**
+
+- **现状**：`pollingLoop` 错误分支里，`consecutivePollErrors >= TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD(6)` 且
+  `stalledMs >= TELEGRAM_POLLING_STALL_THRESHOLD_MS(180000)` 时调用 `requestSupervisorRestart()` → `process.exit(1)`；
+  其余情况固定 `await sleep(2000)`。历史 88 次自杀，卡死时长中位 183s（R4）；重启对网络问题无效，只会引入冷启动并打断执行中任务
+- **改法**：
+  1. **网络类轮询错误永不退出进程**。删除 pollingLoop 中基于卡死时长的 `requestSupervisorRestart()` 调用
+     （`requestSupervisorRestart` 函数本身若还有其他调用方则保留，并在 progress.md 列出其余调用方）
+  2. **内部状态**：以最近一次成功轮询为基准，连续失败 ≥30 秒记 `telegram_degraded`，≥90 秒记 `telegram_unreachable`；
+     状态变化时各写一行带时间戳的日志；恢复成功轮询时回到 `ok` 并写日志（含本次失联总时长）
+  3. **持久化失联起点**：进入 `degraded` 时在 store 中记录 `telegram.health.offlineSince`（毫秒时间戳），恢复后
+     记录 `lastOutage = { startedAt, endedAt, durationMs }` 并清空 `offlineSince`。这是 **T3.4 恢复播报**的数据来源；
+     本任务**只记录，不播报**
+  4. **重试间隔指数退避**：替换固定 `sleep(2000)`，从 2 秒起翻倍，上限 30 秒；成功后复位。
+     现有 Clash 节点切换（`telegramTransportRecovery.maybeRecover`）逻辑保持不变，仍按原条件触发
+  5. **`/status` 暴露**：`telegramState`（ok / degraded / unreachable）、`offlineSince`、`lastOutage`
+- **不做**：不做恢复播报与读回 restartReason（T3.4）；不改 supervisor（T3.2 已完成）；不改 Clash 切换条件
+- **验收**：
+  - 测试「连续轮询失败超过 180 秒、错误次数超过 6 次 → 进程不退出」（先在现代码上失败）
+  - 测试「30 秒进入 degraded、90 秒进入 unreachable，各写一次日志，不重复刷」
+  - 测试「恢复后状态回到 ok，`lastOutage.durationMs` 正确，`offlineSince` 清空」
+  - 测试「重试间隔 2→4→8→16→30→30 秒，成功后复位」
+  - 测试「`offlineSince` 在重启后仍可从 store 读回」
+  - 170+ 全绿，总数只增
+
 **T3.4 恢复播报 + 读回 restartReason**（R2）— 恢复后在受影响会话发「刚与 Telegram 失联 X 分 Y 秒（原因：…），期间积压 N 条，正在按顺序处理」；启动时**先读**再清空（修 `:4319` 的无条件清空）。验收：单测覆盖「消费后才清空」
 
 **T3.5 supervisor 兜底直发**（R3）— 连续强杀 ≥3 次时 supervisor 自己 curl 发通知。token 从 `.env` 读，**不得**写进日志或提交。验收：`zsh -n` 通过 + 模拟连续强杀能收到

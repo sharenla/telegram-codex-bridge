@@ -9,8 +9,9 @@
 
 ## Next Step
 
-执行 **T3.3**：轮询卡死不再退出进程，改为内部 degraded / unreachable 状态，规格见 `handoff_codex.md`。
-T3.2 已通过测试并灰度部署；三个新 supervisor 均已确认 `start_grace=60`，部署后人工 `/status` 验收待维护者执行。
+执行 **T3.3**：轮询卡死不再退出进程；内部 ok / degraded(30s) / unreachable(90s) 状态；重试间隔指数退避（2s 起、30s 封顶）；
+持久化失联起点 `offlineSince` 与 `lastOutage`（供 T3.4 播报，本任务只记录不播报）。规格见 `handoff_codex.md`「T3.3 补充」。
+T3.2 §4.4 验收已于 2026-09-23 完成。
 
 ## Current Phase
 

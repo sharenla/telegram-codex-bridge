@@ -957,3 +957,16 @@ Codex 照 §6 停下是合规的。同时在 handoff §6.1.1 增补：文字与�
 - 工作区和三实例的两种文件分别哈希一致：index.js `1eacb1e58346`，supervisor `2257af0ad696`；DEPLOYED_REF 均指向 `6f7c70135bea2efaff833625f5fb5fbd33e41fc6`。命名角色文件哈希与各自源文件一致；3 把锁的 pid/indexPath 对应各自 service 进程；最终 curl 仅三条正常 getUpdates 子进程，没有孤儿。诊断先脱敏，未输出 token。
 - 本轮修改：`scripts/codex-launch-supervisor.sh`、新增 `tests/supervisor-grace.test.js`、`.env.example` 的 supervisor 参数注释、`progress.md`、`task_plan.md`。维护者的契约修訂单独提交为 `a3e41b7`。没有修改 index.js、findings.md 或真实 env，也未推进 T3.3/T3.5；未 push。
 - **待维护者人工验收**：三个 bot 各发一次 `/status`，预期 `codeVersion=1eacb1e5`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。本轮只改 supervisor，codeVersion 由 index.js 哈希计算，因此保持 T3.1 的值；新部署身份由 DEPLOYED_REF 与 supervisor 哈希/ready 日志共同确认。三级重启行为已有假进程测试覆盖，未在线上主动制造连续强杀。
+
+### T3.2 验收（2026-09-23）—— 通过
+
+| 检查项 | 结果 |
+|---|---|
+| 宽限期序列 | ✅ 60 → 120（×2）→ 300（×5）封顶，健康即复位 |
+| 时间模块 | ✅ 脚本第 3 行 `zmodload zsh/datetime`，`EPOCHREALTIME` 有值（未加载时为空，会使宽限期判断永远成立、永不强杀） |
+| supervisor 已换新 | ✅ 三实例 `Supervisor ready` 时间 17:20:41 / 17:21:42 / 17:22:18，均带 `start_grace=60` |
+| 两个文件四份哈希 | ✅ `index.js` `1eacb1e583`；supervisor 脚本 `2257af0ad6` |
+| 测试 | ✅ **170 / 170** |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认，`codeVersion=1eacb1e5`（本轮未改 index.js） |
+
+R3 死循环至此两端均已处理：bridge 侧启动不再被 getMe 阻塞（T3.1），supervisor 侧给出 60/120/300 秒宽限（T3.2）。
