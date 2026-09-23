@@ -5281,7 +5281,7 @@ async function main() {
 
   function recordCodexBackendHealthy({ recoveredProfileId = null, successfulTurn = false } = {}) {
     const health = ensureCodexBackendHealthState();
-    if (successfulTurn) {
+    if (successfulTurn || recoveredProfileId) {
       health.authFailureUnresolved = false;
       health.lastAuthResolvedAt = Date.now();
       health.authFailureNoticeRecipients = [];

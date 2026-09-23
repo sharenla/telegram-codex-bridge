@@ -164,3 +164,16 @@ test('recovery replay retains all request acks and its second auth failure close
  assert.equal(f.activeRequests.list().length,0);
  assert.deepEqual(new Set(f.edits.map(p=>p.message_id)),new Set([42,43]));
 });
+
+test('successful account switch clears auth_failing immediately; failed switch keeps it', () => {
+  const store = {data:{bridge:{}},markDirty(){},saveThrottled(){}};
+  const names = ['ensureCodexBackendHealthState','recordCodexBackendHealthy','recordCodexBackendFailure'];
+  const api = vm.runInNewContext(`${names.map(fn).join('\n')}\n({recordCodexBackendHealthy,recordCodexBackendFailure})`, {store,truncateMiddle:s=>s});
+  api.recordCodexBackendFailure('refresh token was revoked', {auth:true});
+  assert.equal(store.data.bridge.codexBackend.state,'auth_failing');
+  api.recordCodexBackendHealthy({recoveredProfileId:'valid-account'});
+  assert.equal(store.data.bridge.codexBackend.state,'ok');
+  api.recordCodexBackendFailure('HTTP 401 Unauthorized', {auth:true});
+  api.recordCodexBackendHealthy();
+  assert.equal(store.data.bridge.codexBackend.state,'auth_failing');
+});
