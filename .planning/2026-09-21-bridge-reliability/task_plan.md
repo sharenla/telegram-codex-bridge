@@ -9,7 +9,7 @@
 
 ## Next Step
 
-Phase 2 全部任务及 T2.8a 人工 `/status` 已验收。完成 `v0.2.0` 收口后，按 Phase 3 契约从 **T3.1** 开始；本轮不实施 Phase 3 代码。
+Phase 2 已收口：`v0.2.0` 指向 main 合并提交 `0211392`，三实例已从 main 重装。下一项按 Phase 3 契约执行 **T3.1**；本轮不实施 Phase 3 代码。
 
 ## Current Phase
 

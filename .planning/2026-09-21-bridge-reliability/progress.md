@@ -81,6 +81,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** complete
 - T2.1–T2.8a 清单逐项核对均已打勾，T2.3a / T2.4a / T2.4b / T2.8a 行均保留；T2.8a 三实例 `/status` 已由维护者人工确认，Phase 2 进入合并与 tag 收口。
+- Phase 2 已以 `git merge --no-ff` 并入 main；注解 tag `v0.2.0` 指向合并提交 `021139200a113d5cf1870246ed6a0c9a70abbd59`。三实例随后依序从 main 重装，`DEPLOYED_REF` 均指向该提交与 tag。
 - T2.8a（2026-09-23）：跨目录同 token 抢锁缺陷已修复并灰度部署；三实例真实 `/status` 待维护者确认，Phase 2 收口尚未执行。
 - T2.5（2026-09-23）：未完成，遇到 inbox 生命周期与重启复用 ack 的契约前提冲突，停止业务修改与部署；详见 Error Log 和末尾记录。
 - Actions taken:
@@ -206,6 +207,10 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T2.8a rv-prediction 重启 | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 成功重新取得原锁 |
 | 2026-09-23 | T2.8a default | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
 | 2026-09-23 | T2.8a strategy-observation | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
+| 2026-09-23 | Phase 2 tag | `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | 注解 tag 指向 main 的 `--no-ff` 合并提交；tag 源码哈希与线上一致 |
+| 2026-09-23 | rv-prediction | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装、观察一轮通过 |
+| 2026-09-23 | default | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装通过 |
+| 2026-09-23 | strategy-observation | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装通过 |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -241,11 +246,11 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 1 complete；T1.1–T1.5 complete，Phase 2 尚未开始 |
-| Where am I going? | Phase 1 → 2 → 3 → 4；Phase 1 在 main 上做，Phase 2–4 各走一个分支 |
+| Where am I? | Phase 2 complete；main 已合并并标记 `v0.2.0`；Phase 3 尚未开始 |
+| Where am I going? | 下一项 T3.1，Phase 3 与 Phase 4 仍按各自分支执行 |
 | What's the goal? | 让任何一条被受理的消息在任何故障下都至少收到一条中文状态说明，不再出现零输出 |
-| What have I learned? | 见 `findings.md`：9 条根因 R1–R9；头号问题是重启死循环（08-30 失联 13h44m）与上游 5xx 零重试，**不是**模型满载；工作区是三份代码的严格超集；最高风险是 510 行未提交且无 stash |
-| What have I done? | 完成调查与规划、T1.1 提交、T1.6 绑定迁移；101/101 与指定语法检查通过。T1.2–T1.5 未开始，未部署 |
+| What have I learned? | Phase 2 的 inbox/outbox、ack、上游安全重试和实例锁已上线；T2.8a 修正跨目录同 token 抢锁，三实例 `/status` 经维护者确认。Phase 3 下一步处理重启死循环与失联可见。 |
+| What have I done? | Phase 1 与 Phase 2 均完成；`v0.2.0` 指向 main 合并提交 `0211392`，三实例从 main 重新灰度安装；最近完整检查为 163/163 pass。 |
 
 ---
 
@@ -877,3 +882,10 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 
 - 维护者已在三个 bot 各发 `/status` 并确认：`codeVersion=be7cce0b`、`outboxQueued=0`、`outboxDiscarded=0`，`truthProfile` 均不变。
 - Phase 2 清单全部打勾，含 T2.3a、T2.4a、T2.4b、T2.8a；允许按 handoff 执行 main 的 `--no-ff` 合并、`v0.2.0` tag 与 main 灰度重装。
+
+### Phase 2 收口完成（2026-09-23）
+
+- `git merge --no-ff feat/phase-2-no-silent-failure` 在 main 生成提交 `021139200a113d5cf1870246ed6a0c9a70abbd59`；注解 tag `v0.2.0` 由 `git rev-list -n1 v0.2.0` 确认指向同一提交。
+- `git show v0.2.0:index.js | shasum -a256`、工作区及三实例 `index.js` 均为 `be7cce0b8ad60ca926e2f19634a4b5886bd55fb9d68e1184a80cef809e78b7fc`。
+- 从 main 按 rv-prediction → 观察一轮 → default → strategy-observation 重装三实例；三个 `DEPLOYED_REF` 均为 `commit=021139200a113d5cf1870246ed6a0c9a70abbd59`、`ref=v0.2.0`。三个 LaunchAgent 与 bridge 进程存活、启动日志三标记齐全；角色文件保持专属，3 把锁均对应正确进程，curl 仅有正常轮询子进程。
+- 此次重装代码内容与人工验收的 `be7cce0b` 完全相同；未 push。Phase 2 状态为 `complete`，Current Phase 指向 Phase 3，下一项 T3.1。
