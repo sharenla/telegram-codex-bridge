@@ -29,7 +29,7 @@
 
 ### Phase 1: 基线与版本对齐
 
-- **Status:** in_progress
+- **Status:** complete
 - **Started:** 2026-09-21
 - Actions taken:
   - T1.1：已完成四份计划阅读；当前分支 main，原业务改动仍为 9 files / +510 / -27；未修改业务代码。
@@ -79,11 +79,16 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ### Phase 2: 消除「完全无反馈」
 
-- **Status:** pending
+- **Status:** complete
+- T2.1–T2.8a 清单逐项核对均已打勾，T2.3a / T2.4a / T2.4b / T2.8a 行均保留；T2.8a 三实例 `/status` 已由维护者人工确认，Phase 2 进入合并与 tag 收口。
+- T2.8a（2026-09-23）：跨目录同 token 抢锁缺陷已修复并灰度部署；三实例真实 `/status` 待维护者确认，Phase 2 收口尚未执行。
+- T2.5（2026-09-23）：未完成，遇到 inbox 生命周期与重启复用 ack 的契约前提冲突，停止业务修改与部署；详见 Error Log 和末尾记录。
 - Actions taken:
-  -
+  - T2.4b completed and gray-deployed in the mandated order: rv-prediction → default → strategy-observation.
+  - All three services are running the same `index.js` SHA-256 `3562402dbada`; each `DEPLOYED_REF` points to `364e0f3` and startup logs contain `Deployed ref`, `Telegram Codex Bridge started`, and `codeVersion=3562402d`.
+  - rv-prediction observation round passed; named role files remained instance-specific and the redacted curl check showed one active long-poll child per bot with no stale duplicate.
 - Files created/modified:
-  -
+  - `index.js`, `tests/outbox.test.js`, this `progress.md`, and `task_plan.md`.
 
 ### Phase 3: 修重启死循环与失联可见
 
@@ -107,6 +112,8 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
+| T2.5 草稿检查 | ack 管理器、接入层生命周期集成测试 + 全套检查 | 通过后灰度部署 | 旧代码新增测试先失败；实现后 **145/145 pass / fail 0**；node、四项 zsh 语法与 diff check 通过 | complete |
+| T2.3a replay 不阻塞 polling | 真实启动尾部 + 永不完成 dispatch | polling 处理新消息 | 修复前失败；修复后 117/117 全部通过 | complete |
 | 语法检查（基线） | `node -c index.js` | 无输出即通过 | SYNTAX OK | complete |
 | 单测（基线） | `node --test ./tests/*.test.js` | 全通过 | **tests 99 / pass 99 / fail 0**（362ms） | complete |
 | 业务代码未被污染 | `git diff --shortstat` | `9 files changed, 510 insertions(+), 27 deletions(-)` | 完全一致 | complete |
@@ -121,7 +128,15 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T1.5 角色文件未被覆盖 | `head -5 <svc>/data/codex-home/AGENTS.md` | 仍为专属角色 | 保留 | complete |
 | **§4.4 真实应答（人工）** | 三 bot 私聊 `/status` | codeVersion 一致、truthProfile 匹配 | 三者均 `889d4bd3`，truthProfile 全部匹配 | complete |
 | 单测（Phase 1 收口） | `node --test ./tests/*.test.js` | 总数只增、fail 0 | **tests 104 / pass 104 / fail 0** | complete |
-| T2.2 无 curl 孤儿 | 强杀后 `pgrep -fl curl` | 无残留 | — | pending |
+| T2.1 最终验证 | npm test；发送失败与结构化 429 模拟 | 全通过且不截短 retry_after | 108/108 pass，全部语法检查通过 | complete |
+| T2.2 SIGTERM + T2.3 inbox | isolated child/process tests + rv-prediction smoke | store flush、子进程终止、重放护栏 | 116/116 pass；rv 首批 kill/restart 通过 | complete |
+| T2.3a deployment | rv → default → strategy install; hash/log/process checks | no replay startup blockage | all 3 running, hash f3226f55, startup logs present | complete |
+| T2.4 outbox | isolated store/process tests | failed sends survive restart and notices are durable | 123/123 pass; deployment pending | complete |
+| T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployed and smoke-checked | complete |
+| T2.4b permanent-reject hotfix | structured 429/403/blocked and transport-error regressions | 133/133 pass; all syntax checks pass | complete |
+| T2.5 ack + lifecycle | manager + integration lifecycle/restart/steer tests and required checks | **145/145 pass / fail 0**; node/zsh/diff check pass | complete |
+| T2.6 upstream transient retry | structured 5xx/stream classification, no-tool same-account retry, tool-aware partial-execution guard, group-safe ack | **151/151 pass / fail 0**; node/zsh/diff check pass | complete |
+| T2.8a 跨目录实例锁热修 | 存活持有者跨 serviceRoot 拒绝、不删锁；无关 PID 与退出进程可接管；同目录重复启动拒绝 | 新增测试旧代码先失败；**163/163 pass / fail 0**，node、四项 zsh 与 diff check 通过 | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -129,6 +144,27 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 > 基线规则：改动后测试**总数只应增加**，`pass` 必须等于 `tests`，`fail` 必须为 0。
 
 ---
+
+### T2.5 完成与灰度部署（2026-09-23）
+
+- 完成收到即确认与单条 ack 状态编辑：受理、排队、处理中、完成/失败、steer、内部重试均复用同一 requestId 与 ack；编辑至少间隔 3 秒，失败不进入 outbox。
+- 新增持久化 `telegram.activeRequests` 台账：queued 重启后安全重入队，running 重启不重跑并编辑中断提示；终态清理。outbox 延迟 ack 成功后回填 `ackMessageId`。
+- 新增接入层生命周期测试覆盖正常终态、running/queued 重启、内部重试、steer 与延迟补发回填；旧代码新增测试先失败。
+- 提交：`04a3c130714b40ce3cea584b6b212ca2544aa824`（`index.js` SHA-256 前 12 位 `e5d5ac5285ff`）。
+- 灰度顺序 rv-prediction → 观察一轮 → default → strategy-observation：三实例哈希一致、进程存活、启动日志含 `Deployed ref` / `Bridge started` / `codeVersion`；rv-prediction 完成 SIGTERM/restart smoke，重启后 `activeRequests` 为空且恢复正常轮询。
+- 人工验收待维护者执行：
+  1. 三个 bot 各发一次 `/status`，确认 `codeVersion=e5d5ac52`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。
+  2. 一个群里 @ bot 发真实消息，确认只有一条状态消息从「已收到」变化到「已完成」，正文另发。
+
+### T2.6 完成与灰度部署（2026-09-23）
+
+- 新增 `upstream_transient` 分类：优先读取结构化 HTTP 状态 / `codexErrorInfo`，文本只匹配明确上下文，不使用裸数字；未加入 `ACCOUNT_FAILOVER_PATTERNS`。
+- 仅对尚未产生工具调用的 turn 做同账号指数退避，最多两次重试；工具调用后不重跑，ack 显示「上游中断：本次任务可能已部分执行，请确认后重发」。重试耗尽显示「上游服务暂时不可用，请稍后重发」。
+- 重试沿用同一 requestId 与同一 ack；群聊失败文案为中文短句，不带上游英文或 URL。
+- 测试先在旧代码上失败（新增测试 5 项失败、1 项既有边界行为通过），修复后全套 **151/151 pass / fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- 实现提交：`859235637e374c41d3cb106a7908b5025a91ce8b`；随后补充工具 item 保守标记提交 `c7fc195b3e36b8d7a8f4376b50d92973515398dc`，最终 `index.js` SHA-256 前 12 位为 `fdae9bcf5cfa`。
+- 灰度顺序 rv-prediction → 观察一轮 → default → strategy-observation 完成；最终三实例哈希、ref、进程、启动三标记与角色文件检查通过，未发现残留 curl。
+- 人工验收待维护者执行：三个 bot 各发 `/status`，确认新 `codeVersion=fdae9bcf`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。上游 5xx 无法人工制造，重试路径需等待真实上游故障验证。
 
 ## 版本与部署台账
 
@@ -144,6 +180,32 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-21 | strategy-observation | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
 | 2026-09-21 | Phase 1 tag | `v0.1.1` | `8c8e8b3` | `889d4bd36bfc` | Phase 1 closeout tag |
 | — | （尚未部署） | HEAD `952675e` | `952675e` | `fff69755` | 含 T1.3 日志增补，随 Phase 2 首次部署上线 |
+| 09-22 21:56 | rv-prediction | `feat/phase-2-no-silent-failure` | `746aab7` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
+| 09-22 21:56 | default / strategy-observation | `feat/phase-2-no-silent-failure` | `d265888` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `c4d4ef4` | `ec5dd004` | ✅ 2026-09-23 `/status` 验收通过；**含 T2.4b 待修缺陷** |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3` | `3562402d` | ✅ 2026-09-23 `/status` 验收通过（T2.4b 热修） |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `04a3c13` | `e5d5ac52` | ✅ 2026-09-23 三项人工验收通过（T2.5） |
+
+| 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
+| 2026-09-22 | T2.4a rv-prediction | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy + SIGTERM/restart smoke passed |
+| 2026-09-22 | T2.4a default | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
+| 2026-09-22 | T2.4a strategy-observation | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
+| 2026-09-23 | T2.4b rv-prediction | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | gray deploy + observation passed |
+| 2026-09-23 | T2.4b default | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
+| 2026-09-23 | T2.4b strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
+| 2026-09-23 | T2.5 rv-prediction | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | gray deploy + SIGTERM/restart smoke passed |
+| 2026-09-23 | T2.5 default | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | observe-one-round then deploy passed |
+| 2026-09-23 | T2.5 strategy-observation | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | deploy passed |
+| 2026-09-23 | T2.6 rv-prediction | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | gray deploy passed |
+| 2026-09-23 | T2.6 default | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | observe-one-round then deploy passed |
+| 2026-09-23 | T2.6 strategy-observation | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | deploy passed |
+| 2026-09-23 | T2.6 correction rv-prediction | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
+| 2026-09-23 | T2.6 correction default | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
+| 2026-09-23 | T2.6 correction strategy-observation | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
+| 2026-09-23 | T2.8a rv-prediction | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度与观察一轮通过 |
+| 2026-09-23 | T2.8a rv-prediction 重启 | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 成功重新取得原锁 |
+| 2026-09-23 | T2.8a default | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
+| 2026-09-23 | T2.8a strategy-observation | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -161,12 +223,15 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
+| 2026-09-23 T2.5 | 重启复用 ack 的 inbox 持久化前提与实际生命周期冲突：dispatch 使用副本，turn/start 返回或进入内存队列即删除 inbox | 读取 TelegramInbox.run、startOrSteerTurn、turn/completed；新增 6 项管理器测试并做初步接入，复核发现缺口 | 停止修改业务代码及部署。需维护者明确 inbox 延迟出队与 turn/排队/steer/重试的完成边界；未勾选 T2.5，未推进 T2.6 |
 | 2026-09-21 调查期 | `~/mnt/wukong` 这个 rclone 挂载不含 `Library/`，读不到 wukong 的 service 日志 | 1 | 改用 SSH `remote-mac-wukong` 直接在 wukong 上统计 |
 | 2026-09-21 调查期 | SSH 非登录 shell 里 `npm` 与 `timeout` 均不存在 | 1 | 每个新 shell 先 `export PATH=/opt/homebrew/bin:$PATH`，测试直接用 `node --test` 而非 `npm test` |
 | 2026-09-21 调查期 | 经 rclone 挂载写文件出现 `.partial` 未 finalize | 1 | 写完回到 wukong 用 `ls` / `wc -l` / `tail -1` 复验完整性，勿假定写入即生效 |
 | 2026-09-21 调查期 | `sort \| uniq -c \| head -60` 漏算：得出 32 次，实际 2,866 次 | 1 | cf-ray 使每行唯一，桶被打散到 head 之外。改用 `grep -c` 直接计数 |
 
 | 2026-09-21 T1.1 | 暂存内容含聊天 ID 格式值，与禁止提交标识及禁止修改实例 .env.* 的契约冲突 | 1：扫描并定位两份实例 env.example:3、multi-instance-launch-agent.test.js:43；不记录具体值 | 停在提交前，待最小模板脱敏授权及测试值确认；未 commit/部署 |
+
+| 2026-09-22 T2.2/T2.3 | 仅持久化递增 offset 不能保证未处理消息可恢复；与不丢目标矛盾 | 1：对照 pollingLoop 与 T2.3 规格，确认 handler 异步且无入站重放持久层 | 按 §6 停在联动改动前，待确认 T2.3 inbox 规格 |
 
 > 执行期新错误请追加在上表，**不要覆盖历史行**。同一错误第二次出现时先换方法再重试。
 
@@ -341,3 +406,474 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 原 T1.3 验收写「`DEPLOYED_REF` 等于 `git rev-parse HEAD`」—— 该等式只在**部署当刻**成立。
 HEAD 此后前进属正常，不应据此判失败。正确表述：**`DEPLOYED_REF` 等于部署当刻的 HEAD，并在台账留痕**。
+
+
+## Session: 2026-09-22 — Phase 2
+
+### T2.1 complete
+
+- `sendMessage` is now in the Telegram retry whitelist.
+- Telegram transient detection includes HTTP 429 / `Too Many Requests`; `parameters.retry_after` controls millisecond backoff without shortening the server delay, with linear fallback for transport errors.
+- Added focused tests for send retry success and 429 retry-after calculation.
+- Validation: `node -c index.js`, **106/106 tests pass**, and all four zsh syntax checks pass.
+- Files: `index.js`, `tests/context-compaction.test.js`.
+
+### T2.1 补充验证与 T2.2/T2.3 阻塞（2026-09-22）
+
+- T2.1：识别结构化 error_code=429；不把 retry_after 截短到 120s；长延迟分片等待避免 Node timer 溢出；空值回退到 500 × attempt 毫秒。新增实际 retry loop 的 180s 退避测试（注入 sleep、不真实等待）、永久失败不重试及最多四次请求测试。
+- 指定完整验证 `npm test`：108/108 pass，fail 0，node 与四项 zsh 语法检查通过。
+- 原 `sendMessage at-most-once=false` 断言随 T2.1 明确要求改变发送语义而改为 true；这是与契约“已有断言不可改”的冲突，已发生且在此显式记录，未通过条件分支伪装兼容旧语义。
+- T2.2/T2.3 未写代码、未部署。读取 pollingLoop 后发现 T2.3 规格与“不丢消息”目标矛盾：当前先推进 offset，再异步启动 handler；强制落盘递增 offset 只会使崩溃后跳过已取回但未处理消息的行为持久化。
+- 具体路径：取回 update_id=N → 持久化 offset=N+1 → handler 尚未完成即崩溃 → 重启请求 N+1；没有持久化 update 内容就无从重放。SIGTERM 只 flush offset 也不能补齐这一点。T2.4 出站 outbox 对尚未产生回复的入站消息无帮助。
+- 建议修正规格为持久化 inbox：入站 update 与 offset 原子写入；恢复时重放未完成项；定义成功处理/可恢复交接后再移除，并通过崩溃恢复测试验证。需要确认允许在 T2.3 内加入这项持久层，不自行扩展。
+- 影响：线上仍为已验收 Phase 1；本分支仅 T2.1，未合并 main、未部署、未使用生产 token 测试。
+
+### T2.3 规格矛盾的裁决（2026-09-22）
+
+**Codex 的判断正确，规格是我写错的。** 原 T2.3 写「取得 update → 立即强制写盘 offset → 再处理」，
+忽略了 Telegram 的 `offset` 同时是「这些我收到了，你可以删」的回执语义：
+
+```
+1. 收到 5 条，offset 推到 6，存盘 ✅
+2. 处理第 1 条时进程被杀
+3. 重启读到 offset=6，向 Telegram 要第 6 条以后
+4. Telegram：前 5 条你早确认过了，已删 → 5 条消息永久消失且无记录
+```
+
+与 T2.2 的 `store.save({ force: true })` 叠加后，该损失从偶发变为**每次优雅关闭必然发生** ——
+与「宁可重复，不要丢」的既定取舍完全相反。
+
+**裁决：批准修正为「offset 与消息内容原子同写 + 重启重放未完成消息」**，并强制实现四条护栏：
+重放次数 ≤2（超限发中文放弃通知并出队）、年龄 ≤24h、条数 ≤200 + 单条长度上限、重放条目带 `isReplay`。
+其中**重放上限最关键** —— 本机历史 274 次强杀、一次连续 13h44m 重启风暴，无上限即死循环。
+
+**范围说明**：T2.3 由「调换两行顺序」变成「实现入站日志」，属**规格纠错**而非执行方扩大范围。
+T2.2 与 T2.3 须在同一个 commit 落地，分开会留下比现状更糟的中间态。
+
+
+### T2.2 + T2.3 complete
+
+- Implemented `installGracefulShutdown`: force-saves the store, marks Telegram transport closing, terminates tracked curl children, stops app-server, then exits with the signal code. Lock cleanup remains attached to process exit.
+- Implemented durable in-store Telegram inbox: accepted updates persist minimal message/callback metadata and the advanced offset in one atomic store save before dispatch; successful handlers dequeue and save.
+- Startup replays inbox items in ascending update order with `isReplay`; safeguards enforce max two replays, 24-hour age, 200 entries, and 16,384-character text. Exhausted items are removed and receive a Chinese abandonment notice; expired/overflow items emit error classes.
+- Added isolated tests for atomic persistence, replay ordering/counters, exhaustion, expiry, capacity/text limits, rollback on save failure, callback metadata, SIGTERM flush, curl/app-server child termination, and secret-field omission.
+- Validation: **116/116 tests pass**, `node -c index.js`, and all four zsh syntax checks pass.
+- Files: `index.js`, `tests/inbox-shutdown.test.js`.
+- Deployment remains pending; this branch has not used production tokens or restarted installed services.
+
+### T2.2 + T2.3 验收（2026-09-22）—— 通过，但部署前需修一个回归
+
+**核心不变量逐条核验通过**（读代码，非依据总结）：
+
+| 检查项 | 位置 | 结果 |
+|---|---|---|
+| offset 与 inbox 原子同写 | `TelegramInbox.accept()` | ✅ 快照 old → 改副本 → **一次** `save({force:true})` → 失败回滚；两者同在一个 store 对象，共用同一次 `atomicWriteJson` |
+| `replayCount` 递增并持久化**在 dispatch 之前** | `TelegramInbox.run()` | ✅ `item.replayCount++` + `save({force:true})` 先于 `await this.dispatch(...)`，崩溃时盘上已有递增值，上限真实生效 |
+| 重放上限语义 | `run()` | ✅ 允许 2 次重放，第 3 次放弃并出队 |
+| SIGTERM 三件事 | `installGracefulShutdown()` | ✅ `store.save({force:true})` → `telegram.close()` + `server.stopAndWait()` → exit |
+| curl 子进程追踪与终止 | `TelegramApi.children` / `terminateChild()` | ✅ `add` + `once("close")` 清理；SIGTERM 后 1 秒 SIGKILL |
+| 四条护栏 | — | ✅ 200 条 / 16384 字符 / 24 小时 / `isReplay` 全部落地 |
+| 测试 | `tests/inbox-shutdown.test.js` | ✅ 8 个用例，覆盖要求的 6 项 + 2 项额外（原子写失败回滚、callback 路由元数据）。**116/116** |
+
+**三处实现优于规格，记录备查**：
+1. 容量超限时 `break` 在 `state.offset = update.update_id + 1` **之前** —— 存不下的 update 不予确认，交由 Telegram 重投。规格未要求
+2. 放弃通知**先 `remove` 再 `notify`** —— 否则 notify 抛异常会导致永久重放。规格未要求
+3. `this.closing = true` 且 `callOnce` 在 closing 时直接抛错 —— 关闭期间不再发起新请求。规格未要求
+
+**发现一个回归 → 立 T2.3a，部署前必修**：
+
+启动尾部为 `await inbox.replay();` 然后 `await pollingLoop();`。`replay()` 内部串行 `await run()` →
+`dispatch()` → `handleMessage()` → 完整 Codex turn（可能数分钟）。
+一条卡住的重放 turn 会让 `pollingLoop` **永不启动** → bot 对新消息完全无反应。
+`findings.md` F5 已证明 turn 确会卡死（6 次 `stream disconnected`、24 个孤儿 turn），
+且与 08-30 重启风暴叠加会更严重。**这是本计划要消灭的症状被本次修复自身引入。**
+
+改法：`void inbox.replay().catch(...)` + 立即 `await pollingLoop()`。
+`replay()` 内部串行顺序不变；`active` Set 已防同一 `update_id` 重复 dispatch，与新轮询并发安全。
+
+**两项非阻塞后续，已并入 T2.4 规格**：
+1. 放弃通知目前直发 `notify`，失败即零输出 → 改走 outbox
+2. inbox 满 200 时 offset 冻结、新消息全不处理，但群里无任何提示 → 应发中文说明并设最小间隔
+
+### T2.3a 实现与本地验收（2026-09-22）
+
+- 修复前：新增测试直接执行 index.js 的真实启动尾部，注入永不 resolve 的 replay dispatch，100ms 内 pollingLoop 未启动，断言 blocked != done 失败，复现启动失联。
+- 修复：仅将启动尾部 await inbox.replay() 改为后台启动并捕获异常，pollingLoop 随即启动；保留内部串行 replay 和 active Set。
+- 修复后：同测试验证新 update 被处理、旧 pending update 仍持久化；npm test 117/117 pass，node 与四项 zsh 语法全部通过。
+- 文件：index.js、tests/inbox-shutdown.test.js；本轮维护者更新的 handoff/task_plan/progress 一起入库，避免部署脏树。
+- T2.3a 本地 complete，首次灰度与 kill/restart smoke 接下来执行。只从 rv-prediction 开始，未通过真实应答不推第二批。
+
+
+### T2.3a 首次部署 + rv-prediction kill/restart smoke（2026-09-22）
+
+- 部署目标：仅 `rv-prediction`，通过 `npm run install:rv-prediction`；工作区与服务 index.js SHA-256 均为 `f3226f5555d4...`，DEPLOYED_REF commit `746aab7`。
+- 启动日志确认 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=f3226f55`；启动后 store inbox 为空，随后轮询状态持续更新。
+- 对旧 bridge PID 发送 SIGTERM；supervisor 记录 stop/start 并拉起新 PID，新的启动日志完整出现。旧 rv bridge 的 curl 未残留；观测到的 curl 为三个当前实例各自新的长轮询子进程。
+- 这批 smoke 通过。日志同时有既存 Codex 上游 401 refresh/auth 错误和 Telegram proxy SSL 重试，属于上游/环境现象，不归因 T2.3a，未改范围。
+- T2.3a 已可标记 complete；其他实例尚未部署本分支。
+
+
+### T2.3a Phase 2 first deployment closeout
+
+- Default and strategy-observation deployed after rv smoke; all three installed copies match workspace SHA-256 `f3226f5555d4...`.
+- All three LaunchAgents are running; logs show `Telegram Codex Bridge started`, `codeVersion=f3226f55`, and deployed refs. Named role files remain instance-specific.
+- Current runtime curl list contains one active long-poll child per bot; no stale duplicate from the rv restart was observed.
+- Phase 2 first deployment is complete for T2.2/T2.3/T2.3a. Next task is T2.4 outbox; no T2.4 code has started.
+
+### T2.3a + Phase 2 首批部署验收（2026-09-22 22:08）
+
+**逐项核实通过**（读代码与线上状态，非依据总结）：
+
+| 检查项 | 结果 |
+|---|---|
+| T2.3a 改动在代码里 | ✅ `void inbox.replay().catch(...)` + 立即 `await pollingLoop()` |
+| 回归测试存在 | ✅ `tests/inbox-shutdown.test.js:129` —— `a pending replay must not block polling startup` |
+| 测试 | ✅ **117 / 117 / fail 0** |
+| 分支与工作树 | ✅ `feat/phase-2-no-silent-failure`，工作树干净 |
+| 四份 index.js 哈希一致 | ✅ workspace 与三实例均 `f3226f55` |
+| `DEPLOYED_REF` | ✅ rv-prediction `746aab77`（T2.3a commit）；default / strategy-observation `d2658888`（两者 index.js 同为 f3226f55） |
+| 启动日志三标记 | ✅ `Deployed ref: commit=… ref=v0.1.1-N-g…` / `Telegram Codex Bridge started.` / `codeVersion=f3226f55` |
+| inbox 状态 | ✅ 三实例均 `inbox=0`（无积压残留） |
+| 灰度顺序 | ✅ rv-prediction → default → strategy-observation |
+| curl 孤儿 | ✅ 仅 3 个正在进行的 getUpdates 长轮询，每实例 1 个，无残留 |
+
+**尚缺：§4.4 真实应答证据。** 部署于 21:56，至今（22:08）三实例**均无任何 rollout 活动**，
+说明没有任何真实对话发生过。Codex 报告的「重启后正常恢复」来自日志与轮询恢复，不等于真实应答。
+T2.3a 修复的恰是「日志正常但 bot 是聋的」这一类故障，因此本次真实应答验证比平时更关键。
+→ 需人工在三个 bot 各发一次 `/status`，确认 `codeVersion=f3226f55`。
+
+### ⚠️ 事故记录：验收过程中 bot token 被带入会话记录（2026-09-22）
+
+**经过**：核对 curl 孤儿进程时执行了未脱敏的 `pgrep -fl curl`，输出包含三个实例完整的
+`https://api.telegram.org/bot<id>:<token>/getUpdates` 命令行，三个 bot token 因此进入本次会话记录。
+
+**责任在规划方（Claude），不在 Codex。** `handoff_codex.md` §3.3 明确禁止把 token 写进日志/文档/提交，
+但该约束未覆盖「诊断命令的输出」，且执行时未先脱敏。
+
+**根因（既有设计，非本次改动引入）**：Telegram Bot API 把 token 放在 URL 路径里，
+`TelegramApi.callOnce()` 用 `execFile("curl", [... url ...])`，于是完整 token 出现在进程 argv 中。
+经 `ps -Ao args` 核实：本机有 3 个进程含完整 token，均以 `wukong` 身份运行。
+macOS 通常不允许非 root 的其它用户读取他人进程 argv，故**机器层面的暴露面有限**；
+真正的暴露是**任何以 `wukong` 身份运行的进程（含各类 agent）都能直接读到**，本次即属此类。
+
+**处置**：
+1. → 新增 **T4.8**：改用 `curl --config -` 从 stdin 传含 token 的 URL，使 argv 不再出现 token
+2. 仓库内所有诊断类命令一律先脱敏再输出（例：`sed -E 's|bot[0-9]+:[A-Za-z0-9_-]+|bot<REDACTED>|g'`）
+3. **是否轮换这三个 token 由维护者决定** —— 凭据已进入一份会话记录，按惯例建议轮换；
+   轮换需同步更新三份 service `.env` 并重启。不轮换亦可，但应知悉该记录含凭据
+
+
+### T2.4 complete
+
+- Added persistent Telegram outbox inside `store.data.telegram.outbox`, using the same atomic store boundary as inbox.
+- Failed sends remain queued with replay count and next-attempt time; startup and successful polls trigger non-blocking flush. Successful sends are removed only after the API result is received.
+- Replay-abandon notices now enqueue before removing the inbox item, so failed notification delivery remains durable. Full inbox emits a Chinese notice through outbox with a 60-second per-chat minimum interval.
+- Added six isolated outbox tests: failure persistence/reload, result preservation and de-duplication, durable abandon notice, capacity notice throttling, disk failure/retry deadline, and fresh-process replay.
+- Validation: **123/123 tests pass**, `node -c index.js`, all four zsh syntax checks, and `git diff --check` pass.
+- Files: `index.js`, `tests/outbox.test.js`.
+- Deployment of T2.4 is pending; current installed services remain the T2.3a build until this task is reviewed for deployment.
+
+### T2.4 验收（2026-09-22）—— 通过，但部署前需补两个缺口
+
+**核实通过**（读代码，非依据总结）：
+
+| 检查项 | 结果 |
+|---|---|
+| outbox 与 inbox 共用 store 原子保存 | ✅ 同在 `store.data.telegram`，`enqueue` / 成功出队 / 失败退避均 `save({force:true})` 且带回滚 |
+| 失败保留 + 启动与轮询补发 | ✅ `deliver()` 失败时持久化 `replayCount` 与 `nextAttemptAt`；`flush()` 在启动（`:4473`）与轮询（`:8927`）各调一次 |
+| **flush 不阻塞轮询** | ✅ 两处均为 `void outbox.flush().catch(...)`，并注明 `without allowing a stalled send to block polling` —— **T2.3a 的教训已被主动应用** |
+| 放弃通知与 inbox 满提示经 outbox | ✅ 两者都走 `outbox.enqueue` + `void deliver`，不再直发 |
+| inbox 满提示 60 秒/chat 间隔 | ✅ `capacityNotices` Map，`now - last >= 60000`；且仍 `break`，不确认存不下的 update |
+| 并发去重 | ✅ `active` Map 按 id 去重；`flushing` 保证同时只有一次 flush |
+| 底层串行未被破坏 | ✅ `send` 仍走 `telegram.call("sendMessage", …, { serialize: true })` |
+| 测试 | ✅ 新增 6 组，选题到位（并发 flush 不重复发、入队磁盘失败绝不发送、被杀进程重启自动补发）。**123 / 123 / fail 0** |
+
+**发现两个缺口 → 立 T2.4a，部署前必修**：
+
+1. **outbox 无任何容量与年龄上限。** inbox 有 200 条 / 16384 字符 / 24 小时三道闸，outbox 一道都没有。
+   Telegram 长时间不可用时（08-30 那种 13h44m）队列无界增长，而 `save({force:true})` 是全量重写
+   `store.json`，越长越慢，最终拖垮 bridge。**inbox 有闸、outbox 没有，这个不对称本身就是信号。**
+2. **永久错误无限重试。** `deliver()` 的 catch 不区分错误类型：403 `bot was blocked by the user`、
+   400 `chat not found` 这类永久拒绝会每 30 秒重试一次、永远留在队列里，与第 1 点叠加后队列永不排空。
+   inbox 有 `replayCount >= 2` 放弃机制，outbox 没有任何放弃条件。
+
+**一处已知取舍，记录备查（不修）**：失败重试会造成 per-chat 乱序 —— 第 1 条失败排到 30 秒后、
+第 2 条立即成功，用户先看到第 2 条。**不做** head-of-line blocking：若为保序而阻塞该 chat 后续回复，
+一条卡住的消息会让整个会话静默，那比乱序更糟且正是本计划要消灭的症状。
+改为靠 T2.4a 的放弃条件把「一条能卡多久」限定在有界范围内。
+
+**一处次要问题（可并入 T2.4a）**：`deliver()` 失败分支里的 `this.store.save({ force: true })` 无 try/catch。
+磁盘满时（findings F3 记录过 157 次 `no space left`）该异常会覆盖原始发送错误，导致错误归因错乱。
+
+### `f3226f55` 的 §4.4 真实应答验收（2026-09-22，账已清）
+
+人工在三个 bot 各发一次 `/status`，三者均返回 `codeVersion=f3226f55`。
+T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）＋ 启动标记（日志）＋ **真实应答（人工）** 三项齐备。
+
+意义不只是走完流程：T2.3a 修的正是「日志一切正常但 bot 是聋的」，
+这类故障只有真实应答能证伪，哈希与启动日志都证明不了。
+
+**下一次部署（outbox）必须重复同样三项**，且不要与本次叠在一起 —— 否则出问题无法定位到具体哪一批。
+
+
+### T2.4a complete
+
+- Added outbox capacity 500 with `priority`; overflow removes oldest non-notice first, preserves notice items, increments `bridge_outbox_overflow` and cumulative discard count.
+- Added 24-hour expiry with `bridge_outbox_expired`.
+- Added permanent Telegram rejection classification for 400/403 chat/member/block/kick forms; removes immediately with `telegram_permanent_reject`.
+- Added retryable failure ceiling of 10 attempts; exhausted items are removed with `bridge_outbox_giveup`.
+- Added `/status` fields `outboxQueued` and `outboxDiscarded`.
+- Guarded failure-state persistence so a disk-save error is logged separately and cannot replace the original send error.
+- Added six T2.4a tests. Validation: `node -c index.js`, **129/129 tests pass**, all four zsh syntax checks, and diff check pass.
+- Files: `index.js`, `tests/outbox.test.js`.
+- T2.4a is complete; deployment can proceed in the mandated order. No `findings.md` changes made.
+
+
+### T2.4a deployment closeout (2026-09-22)
+
+- Gray order completed: rv-prediction → default → strategy-observation.
+- All four `index.js` copies match SHA-256 `ec5dd00482c0...`; all three LaunchAgents and bridge processes are running.
+- Each startup log contains `Deployed ref`, `Telegram Codex Bridge started`, and `codeVersion=ec5dd004`; both named AGENTS.md role headers remain intact.
+- rv-prediction SIGTERM/restart smoke passed before the other two deployments. After restart, store showed inbox 0, outbox 0, discarded 0. No stale curl was observed; final process inspection shows exactly one redacted getUpdates curl per bot.
+- T2.4a deployed. No source or runtime directories were manually edited.
+- Manual `/status` evidence is still required for this outbox build. Expected values for each bot: `codeVersion: ec5dd004`, `outboxQueued: 0`, `outboxDiscarded: 0`; verify `truthProfile` remains the instance baseline. Do not use Bot API/getUpdates for this check.
+
+### T2.4a 验收（2026-09-23）—— 五项全部落地，但发现一个已上线的丢消息缺陷
+
+**核实通过**（读代码 + 实跑验证，非依据总结）：
+
+| 检查项 | 结果 |
+|---|---|
+| 三项上限常量 | ✅ `MAX_ITEMS=500` / `MAX_AGE_MS=24h` / `MAX_RETRIES=10` |
+| 溢出优先丢非通知类 | ✅ `_trimOverflow()` 用 `findIndex(e => e.priority !== "notice")`，全为通知时才退回 index 0 |
+| 通知类正确标记 | ✅ inbox 满提示与重放放弃通知均以 `{ priority: "notice" }` 入队 |
+| 丢弃计数跨重启持久化 | ✅ `_stats()` 落在 `store.data.telegram.outboxStats`，`_remove` 失败时回滚计数 |
+| `/status` 新字段 | ✅ `outboxQueued` / `outboxDiscarded` |
+| 失败分支 save 不覆盖原始错误 | ✅ 独立 try/catch，记 `bridge_outbox_state_save_failed` 后仍 `throw error`（原始错误）—— 上轮要求的修复已正确落地 |
+| 测试 | ✅ **129 / 129 / fail 0** |
+| 四份哈希一致 | ✅ workspace 与三实例均 `ec5dd004`，三份 `DEPLOYED_REF` 同为 `c4d4ef4` |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot |
+
+**缺陷（已上线）→ 立 T2.4b 热修**：
+
+`_isPermanentReject()` 除结构化的 `error_code === 403` 外，还对**整条错误消息**做
+自由文本 `/(?:^|\D)403(?:\D|$)/` 匹配。把该函数抽出实跑验证：
+
+| 输入 | 实测判定 |
+|---|---|
+| 429 限流，description `Too Many Requests: retry after 403` | ❌ 判为永久 → **回复被永久丢弃** |
+| 传输层 `curl: (28) Operation timed out after 403 milliseconds` | ❌ 判为永久 → **丢弃** |
+| 真实 `403 Forbidden: bot was blocked by the user` | ✅ 正确 |
+
+**该分支只会制造假阳性、不可能带来真阳性**：`callOnce` 对所有 API 层错误都设了
+`err.body = parsed`，真实拒绝必然走得通结构化判断；`body` 缺失只发生在传输层错误，
+而传输层错误永远不是永久拒绝。所以自由文本匹配零收益、纯风险。
+
+**与前几轮的区别**：T2.3a / T2.4a 都是部署前拦下的，**这次已经在线上三个实例跑着**。
+单次触发概率低（需错误文本中恰好出现被非数字包围的 403），但后果是静默永久丢一条回复。
+
+**不回滚**：回滚会一并失去 T2.4a 的 outbox 有界化，而无界增长拖垮 bridge 的后果更重。
+按热修处理，排在 T2.5 之前。
+
+**一个仍未被真实验证的点**：`/status` 显示 `outboxQueued: 0 / outboxDiscarded: 0`，
+说明线上**尚未发生过真实的失败投递**，T2.4/T2.4a 的核心路径（失败 → 持久化 → 补发）
+目前只有单测覆盖。真正的验证要等一次真实网络抖动，或在 Phase 3 完成后主动制造一次。
+
+
+### T2.4b hotfix implementation and pre-deployment validation (2026-09-23)
+
+- Committed planning updates unchanged first as `8dda00e` so the installer dirty-tree guard remains meaningful.
+- Added four regression tests before the fix; old code failed 3/4 as expected (429 text, transport text, and body-only blocked description).
+- Changed `TelegramOutbox._isPermanentReject` to require a structured `error.body`, recognize `error_code === 403`, and inspect only permanent-rejection descriptions; the compatibility path preserves the existing chat-not-found test when a structured body omits `description` without restoring numeric `403` text matching.
+- Validation: `node -c index.js`, **133/133 tests pass**, all four required `zsh -n` checks, and `git diff --check`.
+- Code commit: `af00a9b` (`Fix Telegram outbox permanent reject classification`), workspace `index.js` SHA-256 prefix `3562402dbada`.
+- Files: `index.js`, `tests/outbox.test.js`; `findings.md` unchanged.
+- Deployment pending; next step is gray deployment rv-prediction → default → strategy-observation, then manual `/status` confirmation by the maintainer.
+
+
+### T2.4b 灰度部署收口（2026-09-23）
+
+- 灰度顺序严格为 rv-prediction → 观察一轮 → default → strategy-observation；三批安装脚本均成功。
+- 最终四份 `index.js`（工作区 + 三服务目录）哈希一致：`3562402dbada`；三份 `DEPLOYED_REF` 均为 commit `364e0f3`。
+- 三个 LaunchAgent/bridge 进程存活；三份启动日志均有 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=3562402d`；两个命名实例角色文件未被覆盖。
+- 脱敏 curl 检查显示每个 bot 一个活动的 `getUpdates` 长轮询，无残留旧进程。
+- 人工 `/status` 仍需维护者执行：预期 `codeVersion=3562402d`、`outboxQueued=0`、`outboxDiscarded=0`，且各实例 `truthProfile` 与既有基线不变；不要调用 Bot API `getUpdates` 验收。
+
+### T2.4b 验收（2026-09-23）—— 通过，线上已确认
+
+| 检查项 | 结果 |
+|---|---|
+| 误判用例实跑 | ✅ 429「retry after 403」→ 可重试；传输层「after 403 ms」→ 可重试；真 403 → 永久；chat not found → 永久 |
+| 测试先失败后通过 | ✅ 旧代码上 4 个新测试失败 3 个，符合预期 |
+| 测试 | ✅ **133 / 133 / fail 0** |
+| 四份哈希 | ✅ `3562402dbada`，三份 `DEPLOYED_REF` 均 `364e0f3` |
+| 清单 | ✅ T2.4a 行保留，T2.4b 已勾，未删行 |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认：`codeVersion=3562402d`、`outboxQueued=0`、`outboxDiscarded=0`、truthProfile 不变 |
+
+与规格的一处出入（可接受）：`body` 存在但无 `description` 时回退到整条消息做描述匹配。
+只在 `body` 存在时可达，传输层错误碰不到；为保留既有 chat-not-found 测试而加，无需返工。
+
+
+### T2.5 未完成：生命周期前提冲突（2026-09-23）
+
+- 维护者三份规划文件已原样单独提交为 `2d60d73`（Record T2.4b acceptance and refine T2.5 spec）。
+- 草稿文件：`index.js`、新增 `tests/ack.test.js`；均未提交、未部署。`findings.md` 保持只读；task_plan 的 T2.5 保持未勾选，Next Step 仍为 T2.5。
+- 现象：`TelegramInbox.run()` 调用 `dispatch({ ...item, isReplay })`，dispatch 收到副本；完成 dispatch 后直接 `remove(item)`。实际 `handleMessage` 等待的是 `startOrSteerTurn`，它在 `turn/start` RPC 返回或入内存队列时结束，不等待 `turn/completed`。所以 ack ID 写副本不会持久化，改写原条目也会很快被删除，无法实现处理中重启后编辑原 ack。
+- 需要明确的最小规格补充：Codex 消息是否必须保留 inbox 到 turn 终态；明确排队、private steer、多次内部恢复重试的 inbox/ack 归属与出队条件。T2.5 规格当前没有定义这些，既有文档将 dispatch 完成当成 turn 完成；本轮不擅自改出队架构。
+- 已尝试：6 项新增测试先在旧代码失败（缺少 TelegramAckManager），草稿实现后 6/6 通过；全套 **139/139 pass / fail 0**，`node -c index.js`、指定四项 `zsh -n`、`git diff --check` 通过。测试只覆盖管理器，不证明生产接入正确，因此 T2.5 不算完成。
+- 草稿复核还需修正：`/continue` 与 `/review` 未接 ack；排队旧提示仍单独发；首发 outbox 延迟补发结果尚未关联 ack；失败更新使用 force 可绕过 3 秒间隔；requestId 未持久化且无正常状态日志；首次创建 thread 会清空 pendingInputMeta；这些都不能以管理器单测全绿替代验收。
+- 影响面：本轮未调用安装脚本、未重启服务、未读取真实 env 或使用生产 token 发请求。线上保持上轮已验收部署，本轮未另作运行健康检查。没有本轮部署台账行。
+- 建议：维护者明确上述最小生命周期修正属于 T2.5 后，继续在当前草稿补集成测试和修复，再跑全套检查及灰度；不要部署当前草稿。
+- 部署成功后仍需人工验收（新 codeVersion 待实际构建产生）：三个 bot 各 `/status` 核对新版本、outboxQueued=0、outboxDiscarded=0、truthProfile 不变；一个群 @ bot 发真实消息，确认只有一条状态消息从已收到变化到已完成，正文另发。当前尚未到此步骤。
+
+### T2.5 阻塞裁决（2026-09-23）
+
+**Codex 判断正确，规格遗漏**（这是第三次在规格矛盾处正确停下）。inbox 在 dispatch 返回时出队，
+而 dispatch 返回于 turn 启动或入队、非终态；dispatch 还收到副本 —— `ackMessageId` 无处持久化。
+
+**由此推出的更大缺口**：T2.3 的重放只覆盖「已收到、未开始」窗口。turn 执行中被杀时 inbox 已空，
+不重放也不提示。findings F5 的 24 个孤儿 turn，T2.3 并未修掉。
+
+**裁决**：
+- **不**把 inbox 保留到终态 —— 会重跑执行到一半的 turn，而本 bot 以 danger-full-access 执行有副作用的命令
+- inbox 保持现状；新增持久化「进行中任务台账」，终态才出队
+- 重启：`queued` 重新入队（安全，未执行过）；`running` 不重跑，原 ack 改为中断提示后出台账
+- steer 跟随所属 turn；内部重试沿用同一 requestId 与 ack
+- Codex 草稿复核列出的 6 项问题一并在 T2.5 内修掉
+- 必须有接入层集成测试；管理器单测全绿不算完成
+
+规格见 `handoff_codex.md`「T2.5 补充：任务生命周期」。当前草稿（`index.js`、`tests/ack.test.js`）在此基础上续做，未提交、未部署。
+
+### T2.5 验收（2026-09-23）—— 通过，线上三项人工验收全部正常
+
+| 检查项 | 结果 |
+|---|---|
+| running 重启不重跑 | ✅ `recoverActiveRequests()` 对 running 只 `interrupt` + 出台账，不调 `startOrSteerTurn` |
+| queued 重启重放 | ✅ 沿用 replayCount ≤ 2，超限发「服务重启次数过多，请重发」 |
+| 3 秒节流未被绕过 | ✅ `minEditIntervalMs = 3000`；全仓库无 ack 更新带 `force: true` |
+| 接入层集成测试 | ✅ 6 个 integration 测试（生命周期 / running 恢复 / queued 恢复 / 内部重试 / steer / outbox 延迟回填 ackMessageId） |
+| 测试 | ✅ **145 / 145 / fail 0** |
+| 四份哈希 | ✅ `e5d5ac5285ff`，三份 `DEPLOYED_REF` 均 `04a3c13` |
+| 三实例 store | ✅ inbox / outbox / activeRequests 均为 0 |
+| 人工①：三 bot `/status` | ✅ `codeVersion=e5d5ac52`、`outboxQueued=0`、`outboxDiscarded=0`、truthProfile 不变 |
+| 人工②：群内真实消息 | ✅ 只有一条状态消息，已收到 → 已完成，正文另发 |
+| 人工③：rv-prediction 执行中重启 | ✅ 同一条 ack 变为「⚠️ 服务重启，这条任务已中断，请确认后重发」，turn 未被自动重跑 |
+
+**第③项的意义**：这是 findings F5 那 24 个孤儿 turn（执行中被杀、零输出）第一次在线上被真实兜住。
+此前只有集成测试覆盖。
+
+### T2.6 验收（2026-09-23）—— 通过
+
+| 检查项 | 结果 |
+|---|---|
+| 结构化优先 | ✅ 有结构化状态码时只认 500–599；否则才走文本 |
+| 文本兜底无裸数字 | ✅ 502/503 须紧跟 `http` / `status` / `error` 等词 |
+| 工具调用判定 | ✅ 排除法：只有 agentMessage / reasoning / plan / userMessage 算无副作用，其余（含未知类型）一律视为执行过操作 → 出错偏向「不重试」，安全方向 |
+| 重试上限 | ✅ `MAX_UPSTREAM_RETRIES = 2`，退避 3s / 6s |
+| 不触发切号 | ✅ `ACCOUNT_FAILOVER_PATTERNS` 未改；上游重试处理排在切号之前 |
+| 测试 | ✅ **151 / 151** |
+| 四份哈希 | ✅ `fdae9bcf5cfa`，三份 `DEPLOYED_REF` 均 `c7fc195` |
+| 自查修正 | ✅ `c7fc195` 为 Codex 部署后自己发现工具调用记录不全、修正并重新部署 |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot 均 `codeVersion=fdae9bcf` |
+
+上游 5xx 的重试路径仅有测试覆盖，线上效果待真实故障发生时验证。
+
+### T2.7 验收（2026-09-23）—— 代码检查与灰度部署通过
+
+| 检查项 | 结果 |
+|---|---|
+| 满载分类 | ✅ 结构化 `codexErrorInfo=server_overloaded` 优先；无结构化字段时仅以 `Selected model is at capacity` 兜底 |
+| 切号边界 | ✅ `ACCOUNT_FAILOVER_PATTERNS` 已移除 `/capacity/i`、`/overloaded/i`；`usageLimitExceeded`、429、quota、usage limit、billing 仍保留 |
+| 重试安全 | ✅ 复用 T2.6 的 `turnHasToolActivity`；无工具调用同号最多重试 2 次，有工具调用不重试并提示可能已部分执行 |
+| 重试用尽 | ✅ ack 改为建议稍后重发或使用 `/model`，不自动换模型、不修改 session model |
+| 测试 | ✅ **158 / 158 / fail 0**；新增 `tests/model-overloaded.test.js`，旧代码先失败后通过 |
+| 指定检查 | ✅ `node -c`、四项 `zsh -n`、`git diff --check` 全部通过 |
+| 四份哈希 | ✅ 工作区与三实例均为 `84ba00725886` |
+| 三实例进程 | ✅ LaunchAgent 存活；启动日志均有 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=84ba0072` |
+| 角色文件 | ✅ rv-prediction 与 strategy-observation 的实例角色文件未被覆盖 |
+| curl | ✅ 仅每个 bridge 进程各自一个 `getUpdates` 长轮询子进程，无孤儿残留（输出已脱敏） |
+
+模型满载无法安全人为制造，线上重试与建议换模型的真实路径待维护者遇到实际 `server_overloaded` 故障时观察。
+
+### T2.7 灰度部署台账（2026-09-23）
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-23 | rv-prediction | `feat/phase-2-no-silent-failure` | `7b5045d9db0edda38bd6c8c2ef21e33f9a31e9c3` | `84ba00725886` | ✅ 安装成功，观察一轮通过 |
+| 2026-09-23 | default | `feat/phase-2-no-silent-failure` | `7b5045d9db0edda38bd6c8c2ef21e33f9a31e9c3` | `84ba00725886` | ✅ 安装成功，进程与三标记通过 |
+| 2026-09-23 | strategy-observation | `feat/phase-2-no-silent-failure` | `7b5045d9db0edda38bd6c8c2ef21e33f9a31e9c3` | `84ba00725886` | ✅ 安装成功，进程与三标记通过 |
+
+维护者部署后人工验收：
+
+1. 三个 bot 各发一次 `/status`，确认 `codeVersion=84ba0072`、`outboxQueued=0`、`outboxDiscarded=0`，且 `truthProfile` 不变。
+2. 模型满载无法人为制造；发生真实 `server_overloaded` 时确认同账号最多重试 2 次、不会切号，最终 ack 给出 `/model` 建议。
+
+### T2.7 验收（2026-09-23）—— 通过
+
+| 检查项 | 结果 |
+|---|---|
+| 切号表 | ✅ 已移除 `/capacity/i`、`/overloaded/i`；429 / quota / usage limit / billing 保留并补 `usageLimitExceeded` |
+| 满载判定 | ✅ `classifyServerOverloadedError`：有结构化字段只认 `server_overloaded`，无则看文本 |
+| 处理顺序 | ✅ 满载 → 上游 → 认证 → 切号 → 上下文；R5 原问题修复 |
+| 复用工具调用判定 | ✅ 复用 T2.6 的 `turnHasToolActivity` |
+| 测试 | ✅ **158 / 158** |
+| 四份哈希 | ✅ `84ba00725886`，三份 `DEPLOYED_REF` 均 `7b5045d` |
+| 清单 | ✅ T2.1–T2.7 全部打勾，无删行 |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot 均 `codeVersion=84ba0072` |
+
+### T2.8 验收（2026-09-23）—— 锁迁移与灰度部署通过，等待人工 `/status`
+
+| 检查项 | 结果 |
+|---|---|
+| 持久锁目录 | ✅ `~/Library/Application Support/telegram-codex-bridge-locks/`，权限 700；旧 `os.tmpdir()` 锁未触碰 |
+| 锁身份 | ✅ 锁记录 pid、startedAt、随机 nonce、serviceRoot、indexPath；持有判断校验实际进程命令行，PID 复用不会误占 |
+| 陈旧锁测试 | ✅ 无关存活进程视为陈旧并接管；持有者退出后可接管；同实例存活时拒绝并报告 pid/serviceRoot |
+| 测试 | ✅ **162 / 162 / fail 0**；新增 `tests/instance-lock.test.js`，旧代码先失败后通过 |
+| 指定检查 | ✅ `node -c`、四项 `zsh -n`、`git diff --check` 全部通过 |
+| 四份哈希 | ✅ 工作区与三实例均为 `8c9687dfc1d5` |
+| 三实例进程 | ✅ LaunchAgent 与 node bridge 进程均存活；启动日志有 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=8c9687df` |
+| 角色文件 | ✅ rv-prediction 与 strategy-observation 角色文件未覆盖 |
+| 锁数量 | ✅ 灰度完成后持久目录正好 3 把锁，分别对应三个 serviceRoot |
+| rv 重启 smoke | ✅ rv-prediction 重装/重启后仍成功获取同一锁名，目录无重复锁 |
+| curl | ✅ 仅三个 bridge 各自一个 `getUpdates` 长轮询子进程，无孤儿残留（输出已脱敏） |
+
+### T2.8 灰度部署台账（2026-09-23）
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-23 | rv-prediction | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 安装、锁创建与重启 smoke 通过 |
+| 2026-09-23 | rv-prediction（重启） | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 同一锁名重新获取，单锁保持 |
+| 2026-09-23 | default | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 安装成功，进程与三标记通过 |
+| 2026-09-23 | strategy-observation | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 安装成功，进程与三标记通过 |
+
+维护者确认后再做 Phase 2 收口。人工验收预期：三个 bot 各发一次 `/status`，确认 `codeVersion=8c9687df`、`outboxQueued=0`、`outboxDiscarded=0`，且 `truthProfile` 与既有基线不变。
+
+### T2.8 验收（2026-09-23）—— 迁移与 PID 复用防护落地，但发现已上线的抢锁缺陷
+
+**核实通过**：锁目录 `~/Library/Application Support/telegram-codex-bridge-locks/` 权限 `drwx------`；
+3 把锁，字段含 `pid / nonce / serviceRoot / indexPath / startedAt`，三个 pid 均对应各自 service 的 `index.js` 进程；
+**162 / 162**；四份哈希 `8c9687dfc1d5`，三份 `DEPLOYED_REF` 均 `75cbedc`。
+
+**缺陷（已上线）→ T2.8a**：`lockBelongsToThisInstance` 先比较 `existing.serviceRoot === 自己的 serviceRoot`。
+抽出函数实跑：同一 service 重复启动 → 正确拒绝；**工作区用同一 token 启动 → 判为陈旧，删掉线上锁并接管**。
+工作区 `.env` 与默认实例共用 token（R7），因此在工作区跑一次 `npm start` 即会触发两进程抢轮询。
+改动前的 tmpdir 锁反而能拦住此场景 —— T2.8 让 R7 更糟。
+
+**成因主要在规格措辞**：「确认那个进程确实是同一个 bridge 实例」被理解为「与我是同一实例」，
+本意是「确实是一个 bridge 进程，而非 PID 被复用」。
+
+**Phase 2 收口推迟**到 T2.8a 部署并经人工 `/status` 确认之后。本轮 `8c9687df` 的 `/status` 不再单独验收。
+
+### T2.8a 热修与灰度部署（2026-09-23）—— 等待人工 `/status`
+
+- 维护者更新的 `handoff_codex.md`、`task_plan.md`、`progress.md` 已先原样单独提交为 `1dd3633`。只改 `index.js` 锁持有判断及新增 `tests/instance-lock.test.js` 回归；`findings.md` 未改。
+- 新增跨 serviceRoot 竞争测试先在旧代码失败：工作区竞争者会接管存活服务的锁。修复后只用锁里记录的 `indexPath` 校验持有者命令行，不再比较竞争者的 serviceRoot；无关 PID 与退出持有者仍可接管，同目录重复启动仍拒绝。
+- 代码提交 `666dd972513b2d18860375c3c1e6ee0455c1a2d2`；`node -c index.js`、**163/163 tests pass / fail 0**、四项 `zsh -n`、`git diff --check` 通过。
+- 灰度严格按 rv-prediction → 观察一轮 → default → strategy-observation。rv-prediction 额外经安装脚本重启一次后成功重新取得锁。四份 `index.js` SHA-256 相同，前 12 位 `be7cce0b8ad6`；三个 `DEPLOYED_REF` 均为代码提交 `666dd97`，启动日志均有 Deployed ref、Bridge started、`codeVersion=be7cce0b`。
+- 三个 LaunchAgent 与 node bridge 进程存活；持久锁目录权限 700、正好 3 把锁，锁内 pid 均对应各自 serviceRoot 的 index.js 进程。两个命名角色文件未覆盖；curl 仅三个正常轮询子进程，无孤儿（诊断输出只打印 pid/ppid，未暴露 token）。
+- **待维护者人工验收**：三个 bot 各发 `/status`，确认 `codeVersion=be7cce0b`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。Bot API 不能代用户发送，也不能用生产 token 抢 `getUpdates`。确认前保持 Phase 2 `in_progress`，不合并 main、不打 tag、不从 main 重装。
+
+### T2.8a 人工验收与 Phase 2 收口准入（2026-09-23）
+
+- 维护者已在三个 bot 各发 `/status` 并确认：`codeVersion=be7cce0b`、`outboxQueued=0`、`outboxDiscarded=0`，`truthProfile` 均不变。
+- Phase 2 清单全部打勾，含 T2.3a、T2.4a、T2.4b、T2.8a；允许按 handoff 执行 main 的 `--no-ff` 合并、`v0.2.0` tag 与 main 灰度重装。

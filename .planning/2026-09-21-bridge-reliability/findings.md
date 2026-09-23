@@ -338,3 +338,30 @@ zsh -n ./scripts/codex-launch-supervisor.sh
 ### 收口更正
 
 Phase 1 仍 in_progress，Phase 2 pending。已部署三实例且哈希一致，但未取得逐实例实际应答及 /status 绑定比对证据，前述 complete/灰度通过表述过早；v0.1.1 不能视为完整验收发布。详见 progress.md 收口更正。
+
+
+### Phase 2 执行追加发现（2026-09-22）
+
+- T2.1 已实现 sendMessage transient/429 重试；108/108 测试通过，尚未部署。
+- T2.3 原规格存在恢复语义矛盾：仅先写递增 offset 不保存 update 内容，崩溃后从新 offset 继续会跳过未完成项，不能推出“最多重复一次”。当前 handler 为异步 fire-and-forget，单纯 SIGTERM flush 也不足以解决。建议先明确持久化入站 inbox 及重放/完成边界，再联动执行 T2.2/T2.3；已按契约停止扩大实现范围。
+
+
+### T2.2/T2.3 implementation finding (2026-09-22)
+
+The corrected inbox contract is implemented in the same change as graceful shutdown. `store.json` now provides the atomic boundary for offset plus minimal pending update data; no separate inbox file is used. Tests prove pending data is present before dispatch and survives a fresh Store reload. Production kill/restart smoke is intentionally deferred until the Phase 2 deployment gate.
+
+### T2.3a 回归验证（2026-09-22）
+
+串行等待启动重放导致 pollingLoop 不启动已通过真实启动尾部的隔离测试复现。仅将启动重放改为后台 Promise 后，新消息在旧 dispatch 永不完成时仍能处理，未完成项保留在 inbox；117/117 与完整语法检查通过，尚待灰度运行验证。
+
+### T2.3a 部署 smoke 追加
+
+rv-prediction 首批部署与 SIGTERM/restart smoke 通过；新 PID 启动日志含 Deployed ref/codeVersion/started，inbox 为空。现有 Codex auth 401 与 Telegram proxy SSL 重试仅作残留风险记录，不属于本任务修复。
+
+### Phase 2 first deployment finding
+
+T2.3a 首批灰度按 rv-prediction → default → strategy-observation 完成，四份 index.js 哈希一致为 f3226f55 前缀；rv 经过 SIGTERM/restart smoke，三实例启动日志与进程正常。现有上游 401/代理 SSL 现象保持为残留风险。
+
+### T2.4 implementation finding（2026-09-22）
+
+Outbox 与 inbox 共用 store.json 原子边界，避免额外文件被部署 rsync 覆盖。失败发送和放弃/积压提示均保留可补发记录；123/123 测试通过，尚未部署 T2.4。
