@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 
-const { execFile, spawn } = require("node:child_process");
+const { execFile, execFileSync, spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
@@ -1117,9 +1117,19 @@ function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
 
-function buildTelegramInstanceLockPath(token) {
+function defaultTelegramInstanceLockDirectory() {
+  return path.join(os.homedir(), "Library", "Application Support", "telegram-codex-bridge-locks");
+}
+
+function ensureInstanceLockDirectory(lockDir) {
+  ensureDir(lockDir);
+  fs.chmodSync(lockDir, 0o700);
+  return lockDir;
+}
+
+function buildTelegramInstanceLockPath(token, { lockDir = defaultTelegramInstanceLockDirectory() } = {}) {
   const hash = crypto.createHash("sha256").update(String(token || "")).digest("hex").slice(0, 12);
-  return path.join(os.tmpdir(), `telegram-codex-bridge.${hash}.lock`);
+  return path.join(lockDir, `telegram-codex-bridge.${hash}.lock`);
 }
 
 function isPidRunning(pid) {
@@ -1132,10 +1142,38 @@ function isPidRunning(pid) {
   }
 }
 
-function acquireInstanceLock(lockPath, { label = "instance" } = {}) {
+function inspectProcessIdentity(pid) {
+  try {
+    const command = execFileSync("ps", ["-o", "command=", "-p", String(pid)], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return command ? { command } : null;
+  } catch {
+    return null;
+  }
+}
+
+function lockBelongsToThisInstance(existing, { serviceRoot, inspectProcess = inspectProcessIdentity } = {}) {
+  if (!existing || !serviceRoot || existing.serviceRoot !== serviceRoot) return false;
+  const indexPath = path.join(serviceRoot, "index.js");
+  if (existing.indexPath && path.resolve(existing.indexPath) !== path.resolve(indexPath)) return false;
+  const identity = inspectProcess(Number(existing.pid));
+  return Boolean(identity?.command && identity.command.includes(indexPath));
+}
+
+function acquireInstanceLock(lockPath, {
+  label = "instance",
+  serviceRoot = __dirname,
+  inspectProcess = inspectProcessIdentity,
+} = {}) {
+  ensureInstanceLockDirectory(path.dirname(lockPath));
   const payload = JSON.stringify({
     pid: process.pid,
     startedAt: new Date().toISOString(),
+    nonce: crypto.randomBytes(16).toString("hex"),
+    serviceRoot,
+    indexPath: path.join(serviceRoot, "index.js"),
     label,
   }, null, 2);
 
@@ -1148,11 +1186,11 @@ function acquireInstanceLock(lockPath, { label = "instance" } = {}) {
     const existing = existingText ? safeJsonParse(existingText) : null;
     const existingPid = Number(existing?.pid || 0);
 
-    if (existingPid && isPidRunning(existingPid)) {
+    if (existingPid && isPidRunning(existingPid) && lockBelongsToThisInstance(existing, { serviceRoot, inspectProcess })) {
       const startedAt = typeof existing?.startedAt === "string" ? existing.startedAt : null;
       const details = startedAt ? ` (started ${startedAt})` : "";
       const lockErr = new Error(
-        `Another ${label} is already running (pid ${existingPid}${details}). Stop it before starting a second instance.\nLock: ${lockPath}`,
+        `另一个实例正在用同一个 bot token（pid ${existingPid}、serviceRoot ${existing?.serviceRoot || serviceRoot}）${details}。\nLock: ${lockPath}`,
       );
       lockErr.code = "INSTANCE_LOCKED";
       throw lockErr;
@@ -4862,7 +4900,10 @@ async function main() {
 
   try {
     const lockPath = resolveUserPath(process.env.TELEGRAM_INSTANCE_LOCK_PATH || "") || buildTelegramInstanceLockPath(BOT_TOKEN);
-    acquireInstanceLock(lockPath, { label: "telegram-codex-bridge instance" });
+    acquireInstanceLock(lockPath, {
+      label: "telegram-codex-bridge instance",
+      serviceRoot: __dirname,
+    });
   } catch (err) {
     console.error(err?.message || err);
     process.exitCode = 1;
@@ -9695,6 +9736,12 @@ module.exports = {
     retryUpstreamTurn,
     formatUpstreamFailureForChat,
     formatModelBusyForChat,
+    defaultTelegramInstanceLockDirectory,
+    ensureInstanceLockDirectory,
+    buildTelegramInstanceLockPath,
+    isPidRunning,
+    lockBelongsToThisInstance,
+    acquireInstanceLock,
     shouldUseBridgeAccountFailover,
     isAccessExpiryExpired,
     isAccountProfileAccessExpired,
