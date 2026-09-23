@@ -158,7 +158,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 - 新增 `upstream_transient` 分类：优先读取结构化 HTTP 状态 / `codexErrorInfo`，文本只匹配明确上下文，不使用裸数字；未加入 `ACCOUNT_FAILOVER_PATTERNS`。
 - 仅对尚未产生工具调用的 turn 做同账号指数退避，最多两次重试；工具调用后不重跑，ack 显示「上游中断：本次任务可能已部分执行，请确认后重发」。重试耗尽显示「上游服务暂时不可用，请稍后重发」。
 - 重试沿用同一 requestId 与同一 ack；群聊失败文案为中文短句，不带上游英文或 URL。
-- 测试先在旧代码上失败，修复后全套 **151/151 pass / fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- 测试先在旧代码上失败（新增测试 5 项失败、1 项既有边界行为通过），修复后全套 **151/151 pass / fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
 - 提交：`859235637e374c41d3cb106a7908b5025a91ce8b`（`index.js` SHA-256 前 12 位 `97e54a1c6b2f`）。
 - 灰度顺序 rv-prediction → 观察一轮 → default → strategy-observation 完成；三实例哈希、ref、进程、启动三标记与角色文件检查通过，未发现残留 curl。
 - 人工验收待维护者执行：三个 bot 各发 `/status`，确认新 `codeVersion=97e54a1c`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。上游 5xx 无法人工制造，重试路径需等待真实上游故障验证。
