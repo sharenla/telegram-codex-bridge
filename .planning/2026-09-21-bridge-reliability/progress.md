@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.4b / T3.4a（2026-09-23）：维护者三份规划更新原样提交 `4eef88f`。认证 turn / stderr 看门狗 / 重跑请求失败统一终态、一次重跑上限、工具调用安全门、auth_failing 与私聊汇总去重已实现；重叠失联原因和本地秒级时间已修。新增 12 项测试，全套 200/200；准备灰度部署。
   - T3.4 灰度完成（2026-09-23）：提交 `8043a59` 按 rv → 观察 → default → strategy 安装；四份 index.js `8fea81fe48e7`，supervisor `2257af0ad696`；启动 1000/1704/1078 ms。三实例均已成功轮询且没有生成失联汇总；T3.4 已勾选，Next Step 为 T3.5。人工验收见末尾。
   - T3.4（2026-09-23）：维护者三份规划文件原样单独提交 `4279e79`。新增恢复汇总、延迟消息 ack 注记、正常关闭记录；网络恢复复用 T3.3 lastOutage，进程恢复使用启动前 lastPollSuccessAt。新增 12 项测试（先复现缺失与接入失败），全套 188/188；准备灰度部署。
   - T3.3 灰度完成（2026-09-23）：代码提交 `32d1202` 按 rv → 观察 → default → strategy 安装；四份 index.js `5334599a2dad`，supervisor 保持 `2257af0ad696`；appServerSpawnedMs 为 1175/1955/1011。检查与人工验收见末尾 T3.3 记录；Next Step 指向 T3.4。
@@ -135,6 +136,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
+| T3.4b auth terminal + T3.4a recovery | 生产认证函数的隔离 VM、真实临时 Store/ack/outbox、假账号切换；本地 Date | 耗尽终态、最多一次重跑、工具安全门、持续 auth_failing / turn 成功复位、私聊一次汇总、原因优先和本地时间 | 12 项新增先红后绿；200/200 pass / fail 0；node、四项 zsh、diff check 通过；旧断言未改 | complete |
 | T3.4 recovery notices | 假 Telegram/假时钟，真实临时 Store/outbox/inbox/ack，生产 pollingLoop VM | ≥120s 私聊汇总、中文原因、同一 ack 注记、graceful/异常停机、重启去重 | 新功能测试先红；接入三项先失败再通过；新增 12 项，全套 188/188 pass / fail 0；node、四项 zsh、diff check 通过 | complete |
 | T3.3 polling health | 实际 pollingLoop/状态函数在隔离 VM 中使用假时钟、假 Telegram；真实临时 Store | >180s/6次失败不退出；30/90s迁移去重；恢复时长；指数退避复位；重载持久化；status字段 | 旧退出路径测试先失败；新增 6 项通过；176/176 pass、fail 0，node、四项 zsh 与 diff check 通过 | complete |
 | T3.2 supervisor | 假 bridge、短宽限期与轮询间隔；真实假 app-server 子进程 | 宽限期不杀、连续 miss 才重启、三级封顶、健康即复位；清理测试进程 | 四项新增测试逐项先失败再通过；170/170 pass、fail 0；node 与四项 zsh 语法、diff check 通过 | complete |
@@ -1072,3 +1074,15 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sharenla.telegram-co
 4. **消息太吵 / 上下文丢失** —— 一条请求额外刷出 6 条：认证恢复提示 ×2、`Started new thread: <id>` ×3（英文、暴露内部 id）、
    thread 失效提示 ×1。均为 Phase 1 前既有通知，绕过 T2.5 ack 直发。连续新建 3 个 thread 意味着对话上下文丢失 → **T4.4 扩展**（见 task_plan）
 5. **Clash 节点自动切换失效** —— `connect ENOENT .../verge-mihomo.sock`，控制 socket 不在代码探测的路径上，本次断网自动换节点未生效 → **T3.7**
+
+
+### T3.4b / T3.4a 实现与检查（2026-09-23）
+
+- 三份维护者规划文件先原样单独提交为 `4eef88f`。仅修改 index.js，新增 tests/auth-terminal.test.js 与 tests/recovery-local-time.test.js，更新进度/计划；findings.md、supervisor、真实 env 与凭证文件未改，未在工作区启动 bridge。
+- T3.4b：turn/completed 认证失败、stderr 看门狗捕获任务、恢复后同步 turn/start 失败共用终态收尾，清理该请求的自动重跑/排队任务、更新原 ack 并移除 activeRequests；认证已重跑一次或 turnHasToolActivity 为真时不再自动重跑。保留 ack/acks 穿过认证恢复任务及新 turn（含同一 turn 的追加请求），成功恢复后再次认证失败也逐条收尾；持续 stderr 认证错误独立更新健康状态，不受一次性看门狗限制。
+- 近 5 分钟未被成功 turn 解除的认证错误及未解决的认证故障显示 auth_failing；初始化/切号健康检查不会覆盖，有成功 turn 才解除并开始新故障周期。codex-lb 既有“忽略本地登录刷新噪声”规则保留。失败汇总仅给 allowlist 正数私聊，notice outbox 与收件人去重记录原子保存，跨重启不重复入队，同故障不重复通知。
+- 测试进一步复现并修复两个同源边界：无 401 前缀的 refresh token was revoked 未匹配；认证重跑在 turn/start 再失败会进入自己的恢复 promise（有自等待风险）。既有生命周期通知文字不做中文化/合并，留给 T4.4。
+- T3.4a：启动前已持久化 offlineSince 早于 lastShutdown.at（或没有关闭记录）时保留网络原因为主，并补“期间服务进程也曾重启”；否则按进程停机。汇总显示系统本地 HH:MM:SS，跨本地日增加 MM-DD，保留秒，不再输出 ISO/UTC 时间串。
+- 12 项新增测试先复现失败再实现，覆盖实际认证函数与假 stderr 入口；全套 **200/200 pass、fail 0**。node -c、四项 zsh -n、git diff --check 通过。已有测试文件/断言未改；没有真实账号切换/凭证探测。
+- 部署前只读核实：rv 的 activeRequests 为 #023b89 / running / ackMessageId=27；rv 与 strategy 后台都仍标记 ok，但 stderr 最近 400 行分别有 176 / 118 行认证失败，default 为 0。符合本轮修复前的现象。部署后应由 T2.5 自然中断和清台账，不手改 store。
+- 代码检查完成，部署与人工验收台账待下方补齐。

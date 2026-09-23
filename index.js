@@ -287,6 +287,7 @@ const CONTEXT_FAILURE_PATTERNS = [
 ];
 const ACCOUNT_AUTH_FAILURE_PATTERNS = [
   /refresh_token_reused/i,
+  /refresh[ _]token (?:was |has been )?revoked/i,
   /token_expired/i,
   /401\s+Unauthorized/i,
   /could not be refreshed/i,
@@ -2005,6 +2006,14 @@ function recoveryNetworkReason(error) {
   return "网络异常";
 }
 
+function formatRecoveryTimeRange(startedAt, endedAt) {
+  const start = new Date(startedAt), end = new Date(endedAt);
+  const crossDay = start.toDateString() !== end.toDateString();
+  const pad = value => String(value).padStart(2, "0");
+  const format = date => `${crossDay ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` : ""}${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return `${format(start)} – ${format(end)}`;
+}
+
 function recoveryAckNote(messageDate, outage, now) {
   const sentAt = Number(messageDate) * 1000;
   if (!outage || outage.durationMs < 120000 || !(sentAt > outage.startedAt && sentAt < outage.endedAt)) return "";
@@ -2030,6 +2039,7 @@ class TelegramRecoveryNotices {
     const health = store.data.telegram.health ||= {};
     this.startupLastSuccess = Number(health.lastPollSuccessAt || 0);
     this.shutdown = health.lastShutdown;
+    this.startupOfflineSince = Number(health.offlineSince || 0);
     this.firstSuccess = true;
   }
 
@@ -2041,7 +2051,11 @@ class TelegramRecoveryNotices {
   onPollSuccess(updates, previousPoll = this.capturePollState()) {
     const health = this.store.data.telegram.health;
     const now = this.now();
-    const startedAt = this.firstSuccess ? this.startupLastSuccess : Number(previousPoll.offlineSince || 0);
+    const networkBeforeShutdown = this.firstSuccess && this.startupOfflineSince
+      && (!this.shutdown?.at || this.startupOfflineSince < this.shutdown.at);
+    const startedAt = this.firstSuccess
+      ? (networkBeforeShutdown ? this.startupOfflineSince : this.startupLastSuccess)
+      : Number(previousPoll.offlineSince || 0);
     if (startedAt && now - startedAt >= 120000) {
       const previous = health.lastRecoveryNotice;
       // The outbox and this receipt survive a crash between queueing and poll-success persistence.
@@ -2051,13 +2065,13 @@ class TelegramRecoveryNotices {
           : { startedAt, endedAt: now, durationMs: Math.max(0, now - startedAt) };
         health.lastOutage = outage;
         const graceful = this.shutdown?.graceful && this.shutdown.at >= startedAt;
-        const reason = this.firstSuccess
+        const reason = this.firstSuccess && !networkBeforeShutdown
           ? `服务进程停止运行（${graceful ? "正常关闭" : "异常退出或被强杀"}）`
-          : recoveryNetworkReason(previousPoll.lastPollError);
+          : recoveryNetworkReason(previousPoll.lastPollError) + (networkBeforeShutdown ? "；期间服务进程也曾重启" : "");
         const count = updates.filter(update => this.allowlist.has(update.message?.chat?.id)
           && recoveryAckNote(update.message?.date, outage, now)).length;
         const seconds = Math.floor(outage.durationMs / 1000);
-        const text = `⚠️ ${this.getBotName()} 刚才与 Telegram 失联 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒（${reason}），${new Date(startedAt).toISOString()} – ${new Date(now).toISOString()}。期间收到的 ${count} 条消息已在处理。`;
+        const text = `⚠️ ${this.getBotName()} 刚才与 Telegram 失联 ${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒（${reason}），${formatRecoveryTimeRange(startedAt, now)}。期间收到的 ${count} 条消息已在处理。`;
         health.pendingRecoveryNotice = { ...outage, text,
           recipients: [...this.allowlist].filter(id => Number(id) > 0), delivered: [] };
         health.lastRecoveryNotice = outage;
@@ -2781,6 +2795,7 @@ class CodexAppServer {
     this._onNotification = () => {};
     this._onServerRequest = async () => ({ ok: false, error: { code: -32601, message: "Method not found" } });
     this._onAuthWatchdog = async () => {};
+    this._onAuthFailure = () => {};
     this._onProcessExit = async () => {};
     this._expectedStop = false;
     this._latestAuthFailure = null;
@@ -2793,6 +2808,10 @@ class CodexAppServer {
 
   onServerRequest(handler) {
     this._onServerRequest = handler;
+  }
+
+  onAuthFailure(handler) {
+    this._onAuthFailure = handler;
   }
 
   onAuthWatchdog(handler) {
@@ -2915,6 +2934,7 @@ class CodexAppServer {
     if (!text) return;
     console.error(`[codex app-server stderr] ${text}`);
     if (!shouldEmitAuthWatchdogFromStderr(text, { codexLbEnabled: this.codexLbEnabled })) return;
+    this._onAuthFailure({ reason: text });
     this._latestAuthFailure = {
       reason: text,
       matchedText: text,
@@ -3983,6 +4003,8 @@ function buildAuthRecoveryReplayTask(inputMeta, source = "auth_failure", created
     source,
     createdAt,
   };
+  if (inputMeta.ack) task.ack = inputMeta.ack;
+  if (inputMeta.acks?.length) { task.acks = inputMeta.acks; task.ack ||= inputMeta.acks[0]; }
   const threadRetryCount = Number(inputMeta.threadRetryCount || 0);
   if (threadRetryCount) task.threadRetryCount = threadRetryCount;
   return task;
@@ -5257,9 +5279,16 @@ async function main() {
     return store.data.bridge.codexBackend;
   }
 
-  function recordCodexBackendHealthy({ recoveredProfileId = null } = {}) {
+  function recordCodexBackendHealthy({ recoveredProfileId = null, successfulTurn = false } = {}) {
     const health = ensureCodexBackendHealthState();
-    health.state = "ok";
+    if (successfulTurn) {
+      health.authFailureUnresolved = false;
+      health.lastAuthResolvedAt = Date.now();
+      health.authFailureNoticeRecipients = [];
+    }
+    const recentAuthFailure = health.lastAuthFailureAt > (health.lastAuthResolvedAt || 0)
+      && Date.now() - health.lastAuthFailureAt < 5 * 60 * 1000;
+    health.state = health.authFailureUnresolved || recentAuthFailure ? "auth_failing" : "ok";
     health.lastOkAt = Date.now();
     health.recoveryInProgress = false;
     health.recoveryReason = null;
@@ -5281,10 +5310,12 @@ async function main() {
   } = {}) {
     const health = ensureCodexBackendHealthState();
     const normalizedReason = truncateMiddle(String(reason || "unknown backend error"), 400);
-    health.state = state || (health.recoveryInProgress ? "recovering" : "unhealthy");
+    health.state = health.authFailureUnresolved ? "auth_failing" : state || (health.recoveryInProgress ? "recovering" : "unhealthy");
     health.lastErrorAt = Date.now();
     health.lastError = normalizedReason;
     if (auth) {
+      health.state = "auth_failing";
+      health.authFailureUnresolved = true;
       health.lastAuthFailureAt = Date.now();
       health.lastAuthFailure = normalizedReason;
     }
@@ -5300,7 +5331,7 @@ async function main() {
 
   function markCodexBackendRecovering(reason) {
     const health = ensureCodexBackendHealthState();
-    health.state = "recovering";
+    health.state = health.authFailureUnresolved ? "auth_failing" : "recovering";
     health.recoveryInProgress = true;
     health.recoveryReason = truncateMiddle(String(reason || "backend recovery"), 220);
     health.lastRecoveryStartedAt = Date.now();
@@ -5312,7 +5343,7 @@ async function main() {
 
   function markCodexBackendRecoveryFailed(reason) {
     const health = ensureCodexBackendHealthState();
-    health.state = "unhealthy";
+    health.state = health.authFailureUnresolved ? "auth_failing" : "unhealthy";
     health.recoveryInProgress = false;
     health.recoveryReason = truncateMiddle(String(reason || "backend recovery failed"), 220);
     health.lastRecoveryFailedAt = Date.now();
@@ -5892,6 +5923,14 @@ async function main() {
       return await run();
     } catch (err) {
       if (isAccountAuthFailure(err)) {
+        const rt = chatId == null ? null : getRuntime(chatId);
+        const meta = rt?.pendingInputMeta || rt?.turnInputMetaByTurnId?.[rt?.activeTurnId];
+        const partial = turnHasToolActivity({ id: rt?.activeTurnId }, rt);
+        if (rt && (Number(meta?.authReplayCount || 0) >= 1 || partial)) {
+          recordCodexBackendFailure(extractCodexErrorText(err), { auth: true });
+          await finishAuthRecoveryRequest(chatId, rt, meta, partial);
+          throw err;
+        }
         if (authRecoveryAttempted) throw err;
         const replayHandoff = allowAuthReplayHandoff && shouldHandoffAuthRecoveryToReplay(chatId);
         const recovered = await ensureCodexBackendRecovered({
@@ -6132,11 +6171,55 @@ async function main() {
     });
   }
 
+  function notifyAuthRecoveryFailure() {
+    const health = ensureCodexBackendHealthState();
+    health.authFailureNoticeRecipients ||= [];
+    for (const chatId of allowlist) {
+      if (chatId <= 0 || health.authFailureNoticeRecipients.includes(chatId)) continue;
+      // Save the receipt atomically with the outbox item, so restart cannot enqueue it twice.
+      health.authFailureNoticeRecipients.push(chatId);
+      try {
+        outbox.enqueue({ chat_id: chatId,
+          text: `⚠️ ${botIdentity.current.username} 的 Codex 账号登录已失效，所有备用账号也无法恢复。需要重新登录后才能继续处理消息。`,
+        }, { priority: "notice" });
+      } catch (error) {
+        health.authFailureNoticeRecipients = health.authFailureNoticeRecipients.filter(id => id !== chatId);
+        console.error("Auth failure notice persistence failed");
+      }
+    }
+    void outbox.flush().catch(() => console.error("Auth failure notice delivery failed"));
+  }
+
+  async function finishAuthRecoveryRequest(chatId, rt, meta, partial = false) {
+    const acks = meta?.acks || (meta?.ack ? [meta.ack] : []);
+    const ids = new Set(acks.map(ack => ack?.requestId).filter(Boolean));
+    rt.authRecoveryReplayTask = null;
+    rt.pendingTasks = (rt.pendingTasks || []).filter(task => !ids.has(task.ack?.requestId));
+    if (ids.has(rt.pendingInputMeta?.ack?.requestId)) rt.pendingInputMeta = null;
+    if (ids.has(rt.postCompactionRetryTask?.ack?.requestId)) rt.postCompactionRetryTask = null;
+    if (isCompactionTurnKind(meta?.kind)) rt.compactionInProgress = false;
+    for (const ack of acks) {
+      if (!ack.authTerminal) {
+        await ackManager.update(ack, "failed", { reason: partial
+          ? "Codex 账号登录已失效，本次任务可能已部分执行，请确认后重发"
+          : "Codex 账号登录已失效，需要维护者重新登录" });
+        ack.authTerminal = true;
+      }
+      if (ack?.requestId) activeRequests.remove(ack.requestId);
+    }
+    notifyAuthRecoveryFailure();
+  }
+
   async function retryTurnAfterAuthFailure({ chatId, rt, turn }) {
-    if (rt.failoverInProgress) return false;
     if (!isAccountAuthFailureTurn(turn)) return false;
 
     const turnMeta = getTurnInputMeta(rt, turn?.id);
+    recordCodexBackendFailure(extractTurnErrorText(turn), { auth: true });
+    const partial = turnHasToolActivity(turn, rt);
+    if (partial || Number(turnMeta?.authReplayCount || 0) >= 1) {
+      await finishAuthRecoveryRequest(chatId, rt, turnMeta, partial);
+      return true;
+    }
     const replayTask = buildAuthRecoveryReplayTask(
       turnMeta,
       isCompactionTurnKind(turnMeta?.kind) ? "compaction_auth_failure" : "turn_auth_failure",
@@ -6152,6 +6235,7 @@ async function main() {
       reason: extractTurnErrorText(turn) || "Codex backend auth failure",
       turnId: turn?.id || null,
     });
+    if (!recovered) await finishAuthRecoveryRequest(chatId, rt, turnMeta);
     if (!recovered && !replayTask && chatId) {
       await telegram.sendMessage({
         chat_id: chatId,
@@ -6476,6 +6560,7 @@ async function main() {
         }
       },
     });
+    server.onAuthFailure(event => recordCodexBackendFailure(event.reason, { auth: true }));
     server.onAuthWatchdog((event) => {
       queueCodexBackendRecovery(event);
     });
@@ -6530,7 +6615,7 @@ async function main() {
         if (turn?.id) rt.turnToolActivityByTurnId[turn.id] = false;
         if (turn?.id && rt.pendingInputMeta) {
           const existingMeta = rt.turnInputMetaByTurnId[turn.id] || {};
-          const acks = [...(existingMeta.acks || [])];
+          const acks = [...new Set([...(existingMeta.acks || []), ...(rt.pendingInputMeta.acks || [])])];
           if (rt.pendingInputMeta.ack && !acks.includes(rt.pendingInputMeta.ack)) acks.push(rt.pendingInputMeta.ack);
           rt.turnInputMetaByTurnId[turn.id] = { ...existingMeta, ...rt.pendingInputMeta, acks };
           rt.pendingInputMeta = null;
@@ -6548,6 +6633,7 @@ async function main() {
         const silentTurn = Boolean(turnMeta?.silent);
         const compactionTurnKind = isCompactionTurnKind(turnMeta?.kind) ? turnMeta.kind : null;
         const status = turn?.status || "completed";
+        if (status === "completed") recordCodexBackendHealthy({ successfulTurn: true });
         rt.activeTurnId = null;
         stopTyping(chatId);
         await flushBufferedAgentMessages(chatId, rt);
@@ -7880,25 +7966,34 @@ async function main() {
     stopTyping(chatId);
   }
 
-  function captureInterruptedTurnsForRecovery() {
+  async function captureInterruptedTurnsForRecovery() {
     const captured = [];
     for (const [chatId, rt] of runtimeByChat.entries()) {
+      const meta = rt.turnInputMetaByTurnId?.[rt.activeTurnId] || rt.pendingInputMeta;
+      const partial = turnHasToolActivity({ id: rt.activeTurnId }, rt);
+      if (partial || Number(meta?.authReplayCount || 0) >= 1) {
+        await finishAuthRecoveryRequest(chatId, rt, meta, partial);
+        clearInterruptedTurnState(chatId, rt);
+        continue;
+      }
       const replayTask = getReplayableAuthRecoveryTask(rt);
       if (!replayTask && !rt.activeTurnId && !rt.pendingInputMeta) continue;
       if (replayTask) queueAuthRecoveryReplayTask(rt, replayTask);
+      rt.authRecoveryTerminalMeta = rt.turnInputMetaByTurnId?.[rt.activeTurnId] || rt.pendingInputMeta || rt.authRecoveryReplayTask;
       captured.push({ chatId, task: rt.authRecoveryReplayTask || replayTask || null });
       clearInterruptedTurnState(chatId, rt);
     }
     return captured;
   }
 
-  function clearAllQueuedAuthRecoveryTasks() {
-    for (const rt of runtimeByChat.values()) {
-      if (isCompactionTurnKind(rt.authRecoveryReplayTask?.kind)) {
-        rt.compactionInProgress = false;
-      }
+  async function clearAllQueuedAuthRecoveryTasks() {
+    for (const [chatId, rt] of runtimeByChat.entries()) {
+      if (isCompactionTurnKind(rt.authRecoveryReplayTask?.kind)) rt.compactionInProgress = false;
+      await finishAuthRecoveryRequest(chatId, rt, rt.authRecoveryTerminalMeta || rt.authRecoveryReplayTask);
+      rt.authRecoveryTerminalMeta = null;
       rt.authRecoveryReplayTask = null;
     }
+    notifyAuthRecoveryFailure();
   }
 
   async function notifyInterruptedTurns(captured, textBuilder) {
@@ -7920,13 +8015,14 @@ async function main() {
         const replayNotice = isCompactionTurnKind(replayTask.kind)
           ? "认证恢复完成，继续刚才被中断的上下文压缩。"
           : "认证恢复完成，正在自动重试刚才被中断的输入。";
-        await telegram.sendMessage({ chat_id: chatId, text: replayNotice });
         try {
+          await telegram.sendMessage({ chat_id: chatId, text: replayNotice });
           await startOrSteerTurn({
             chatId,
             session,
             text: replayTask.text,
             ack: replayTask.ack || null,
+            acks: replayTask.acks || null,
             attemptedProfileIds: replayTask.attemptedProfileIds || null,
             kind: replayTask.kind || "user",
             silent: Boolean(replayTask.silent),
@@ -7936,7 +8032,10 @@ async function main() {
             upstreamRetryCount: Number(replayTask.upstreamRetryCount || 0),
             skipBackendRecoveryWait: true,
           });
+          rt.authRecoveryTerminalMeta = null;
         } catch (err) {
+          await finishAuthRecoveryRequest(chatId, rt, replayTask);
+          rt.authRecoveryTerminalMeta = null;
           await telegram.sendMessage({
             chat_id: chatId,
             text: `自动续跑失败：${truncateMiddle(err.message || String(err), 1200)}`,
@@ -7957,7 +8056,7 @@ async function main() {
       markProfileForRecoveryError(currentProfile, { message: reason });
     }
     markCodexBackendRecovering(reason);
-    const captured = captureInterruptedTurnsForRecovery();
+    const captured = await captureInterruptedTurnsForRecovery();
     const attempted = new Set(currentProfile?.profileId ? [currentProfile.profileId] : []);
     const fallbackProfiles = autoAccountFailover && accountProfiles.length >= 2
       ? listFallbackProfiles(currentProfile?.profileId, attempted)
@@ -7984,7 +8083,7 @@ async function main() {
 
     if (!autoAccountFailover || accountProfiles.length < 2) {
       markCodexBackendRecoveryFailed("Auth watchdog fired, but no spare Codex account is configured.");
-      clearAllQueuedAuthRecoveryTasks();
+      await clearAllQueuedAuthRecoveryTasks();
       await notifyInterruptedTurns(
         captured,
         () => "当前 Codex 账号认证已失效，但没有可切换的备用账号；刚才中断的输入没有自动续跑。",
@@ -7994,7 +8093,7 @@ async function main() {
 
     if (!fallbackProfiles.length) {
       markCodexBackendRecoveryFailed("Auth watchdog fired, but every spare account is expired or temporarily blocked.");
-      clearAllQueuedAuthRecoveryTasks();
+      await clearAllQueuedAuthRecoveryTasks();
       await notifyInterruptedTurns(
         captured,
         () => "当前 Codex 账号认证已失效，且暂时没有可用的备用账号；刚才中断的输入没有自动续跑。",
@@ -8034,7 +8133,7 @@ async function main() {
     }
 
     markCodexBackendRecoveryFailed("Every spare Codex account failed its recovery health check.");
-    clearAllQueuedAuthRecoveryTasks();
+    await clearAllQueuedAuthRecoveryTasks();
     await notifyInterruptedTurns(
       captured,
       () => "当前 Codex 账号认证已失效，备用账号也没能通过恢复健康检查；刚才中断的输入没有自动续跑。",
@@ -8053,7 +8152,8 @@ async function main() {
     if (codexBackendTransitionDepth > 0) return codexBackendRecoveryPromise;
     if (codexBackendRecoveryPromise) return codexBackendRecoveryPromise;
     codexBackendRecoveryPromise = recoverCodexBackendFromAuthFailure(event)
-      .catch((err) => {
+      .catch(async (err) => {
+        await clearAllQueuedAuthRecoveryTasks();
         markCodexBackendRecoveryFailed(err.message || String(err));
         console.error("Codex backend auth recovery failed:", err);
         return false;
@@ -8339,6 +8439,7 @@ async function main() {
     skipBackendRecoveryWait = false,
     ignoreWorkspaceLock = false,
     ack = null,
+    acks = null,
   }) {
     if (!skipBackendRecoveryWait) {
       await waitForCodexBackendRecovery();
@@ -8362,6 +8463,7 @@ async function main() {
       upstreamRetryCount,
       modelRetryCount,
       ack,
+      ...(acks ? { acks } : {}),
     };
 
     try {
@@ -8578,6 +8680,13 @@ async function main() {
         return;
       }
     } catch (err) {
+      if (ack?.authTerminal) return;
+      if (isAccountAuthFailure(err)) {
+        recordCodexBackendFailure(extractCodexErrorText(err), { auth: true });
+        await finishAuthRecoveryRequest(chatId, rt, rt.pendingInputMeta || { ack },
+          turnHasToolActivity({ id: rt.activeTurnId }, rt));
+        return;
+      }
       const pendingMeta = rt.pendingInputMeta?.text === text ? rt.pendingInputMeta : null;
       if (
         kind === "user"
@@ -9971,6 +10080,7 @@ module.exports = {
     TelegramRecoveryNotices,
     recordRecoveryNoticeDelivered,
     recoveryNetworkReason,
+    CodexAppServer,
     TelegramApi,
     resolveClashControllerConfig,
     createClashController,
