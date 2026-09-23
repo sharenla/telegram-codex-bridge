@@ -71,6 +71,27 @@ test("a live bridge with the same service root keeps the lock", async (t) => {
   );
 });
 
+test("a live bridge in another service root keeps the lock from a workspace contender", async (t) => {
+  const root = fixture(t);
+  const holderRoot = path.join(root, "installed-service");
+  const contenderRoot = path.join(root, "workspace");
+  const indexPath = path.join(holderRoot, "index.js");
+  const child = spawn(process.execPath, ["-e", `setInterval(() => {}, 1000); console.log(${JSON.stringify(indexPath)})`]);
+  t.after(() => child.kill("SIGKILL"));
+  await once(child, "spawn");
+  const lockPath = path.join(root, "locks", "token.lock");
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  const payload = JSON.stringify(lockPayload({ pid: child.pid, serviceRoot: holderRoot, indexPath }));
+  fs.writeFileSync(lockPath, payload);
+  assert.throws(
+    () => _test.acquireInstanceLock(lockPath, { serviceRoot: contenderRoot }),
+    (error) => error.code === "INSTANCE_LOCKED"
+      && error.message.includes(String(child.pid))
+      && error.message.includes(holderRoot),
+  );
+  assert.equal(fs.readFileSync(lockPath, "utf8"), payload);
+});
+
 test("a lock whose holder exited is taken over", (t) => {
   const root = fixture(t);
   const serviceRoot = path.join(root, "service");

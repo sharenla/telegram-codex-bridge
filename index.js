@@ -1154,12 +1154,10 @@ function inspectProcessIdentity(pid) {
   }
 }
 
-function lockBelongsToThisInstance(existing, { serviceRoot, inspectProcess = inspectProcessIdentity } = {}) {
-  if (!existing || !serviceRoot || existing.serviceRoot !== serviceRoot) return false;
-  const indexPath = path.join(serviceRoot, "index.js");
-  if (existing.indexPath && path.resolve(existing.indexPath) !== path.resolve(indexPath)) return false;
+function lockHolderIsLiveBridge(existing, inspectProcess = inspectProcessIdentity) {
+  if (!existing?.pid || !existing?.indexPath) return false;
   const identity = inspectProcess(Number(existing.pid));
-  return Boolean(identity?.command && identity.command.includes(indexPath));
+  return Boolean(identity?.command && identity.command.includes(existing.indexPath));
 }
 
 function acquireInstanceLock(lockPath, {
@@ -1186,7 +1184,7 @@ function acquireInstanceLock(lockPath, {
     const existing = existingText ? safeJsonParse(existingText) : null;
     const existingPid = Number(existing?.pid || 0);
 
-    if (existingPid && isPidRunning(existingPid) && lockBelongsToThisInstance(existing, { serviceRoot, inspectProcess })) {
+    if (existingPid && isPidRunning(existingPid) && lockHolderIsLiveBridge(existing, inspectProcess)) {
       const startedAt = typeof existing?.startedAt === "string" ? existing.startedAt : null;
       const details = startedAt ? ` (started ${startedAt})` : "";
       const lockErr = new Error(
@@ -9740,7 +9738,7 @@ module.exports = {
     ensureInstanceLockDirectory,
     buildTelegramInstanceLockPath,
     isPidRunning,
-    lockBelongsToThisInstance,
+    lockHolderIsLiveBridge,
     acquireInstanceLock,
     shouldUseBridgeAccountFailover,
     isAccessExpiryExpired,
