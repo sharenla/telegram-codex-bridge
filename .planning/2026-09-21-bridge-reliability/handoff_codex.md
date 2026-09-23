@@ -604,6 +604,27 @@ npm run install:<instance>
 - **不要**塞进 `ACCOUNT_FAILOVER_PATTERNS`
 - 验收：单测覆盖上述每个错误串被归入 `upstream_transient` 且触发同号重试而非切号
 
+**T2.6 补充：只重试「确定没执行过任何操作」的失败（2026-09-23）**
+
+> 与 T2.5 裁决同一原则：自动重试不得重复执行有副作用的操作。
+
+- 上游失败分两种，**只有第一种可以自动重试**：
+  | 情况 | 例子 | 处理 |
+  |---|---|---|
+  | turn 里**还没有**任何工具调用（无 commandExecution / fileChange / MCP 调用等 item） | `Upstream did not acknowledge response.create`、刚开始就 503 / 502 | 同号指数退避重试 2–3 次 |
+  | turn 里**已经有**工具调用 | `websocket closed before response.completed` 发生在执行了命令之后 | **不重试**。ack 改为 `❌ 上游中断（#id）：本次任务可能已部分执行，请确认后重发` |
+- 判断依据是**这一个 turn 实际产生过的 item**，不是错误文本。T2.5 已经在跟踪 turn 生命周期，可在同一处记录「本 turn 是否出现过工具调用」
+- 重试期间 ack 显示 `🔁 上游暂时不可用，正在重试（第 N 次）（#id）`，沿用同一 requestId 与同一条 ack，受 3 秒节流约束
+- 重试次数用尽后，ack 改为 `❌ 上游服务暂时不可用（#id），请稍后重发`
+- 群聊里只显示中文短句，不带原始英文报错与 URL（如 `http://127.0.0.1:2455`）
+- `upstream_transient` 的匹配**优先用结构化字段**（`codexErrorInfo` / HTTP 状态码），文本匹配只作补充，且不得用裸数字匹配（T2.4b 的教训）
+- **补充验收**：
+  - 测试「无工具调用的 503 → 同号重试，最终成功时只有一条 ack」
+  - 测试「已有 commandExecution 后流中断 → 不重试，ack 为部分执行提示」
+  - 测试「重试用尽 → ack 为不可用提示，且没有第 4 次 turn」
+  - 测试「重试不触发切号」（与 T2.7 边界）
+  - 测试「群聊失败文案不含英文原文与 URL」
+
 **T2.7 `server_overloaded` 从切号逻辑拆出**（R5）
 - `index.js:104` 移除 `/capacity/i`、`/overloaded/i`，另建 `MODEL_CAPACITY_PATTERNS`；命中后同号退避重试，仍失败则提示换模型。仅 429 / quota / usage_limit / billing 触发切号
 - 验收：单测覆盖「`Selected model is at capacity` 不触发切号」与「usage_limit 仍触发切号」

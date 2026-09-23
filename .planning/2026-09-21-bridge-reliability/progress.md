@@ -170,6 +170,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 09-22 21:56 | default / strategy-observation | `feat/phase-2-no-silent-failure` | `d265888` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
 | 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `c4d4ef4` | `ec5dd004` | ✅ 2026-09-23 `/status` 验收通过；**含 T2.4b 待修缺陷** |
 | 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3` | `3562402d` | ✅ 2026-09-23 `/status` 验收通过（T2.4b 热修） |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `04a3c13` | `e5d5ac52` | ✅ 2026-09-23 三项人工验收通过（T2.5） |
 
 | 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
 | 2026-09-22 | T2.4a rv-prediction | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy + SIGTERM/restart smoke passed |
@@ -718,3 +719,21 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 - 必须有接入层集成测试；管理器单测全绿不算完成
 
 规格见 `handoff_codex.md`「T2.5 补充：任务生命周期」。当前草稿（`index.js`、`tests/ack.test.js`）在此基础上续做，未提交、未部署。
+
+### T2.5 验收（2026-09-23）—— 通过，线上三项人工验收全部正常
+
+| 检查项 | 结果 |
+|---|---|
+| running 重启不重跑 | ✅ `recoverActiveRequests()` 对 running 只 `interrupt` + 出台账，不调 `startOrSteerTurn` |
+| queued 重启重放 | ✅ 沿用 replayCount ≤ 2，超限发「服务重启次数过多，请重发」 |
+| 3 秒节流未被绕过 | ✅ `minEditIntervalMs = 3000`；全仓库无 ack 更新带 `force: true` |
+| 接入层集成测试 | ✅ 6 个 integration 测试（生命周期 / running 恢复 / queued 恢复 / 内部重试 / steer / outbox 延迟回填 ackMessageId） |
+| 测试 | ✅ **145 / 145 / fail 0** |
+| 四份哈希 | ✅ `e5d5ac5285ff`，三份 `DEPLOYED_REF` 均 `04a3c13` |
+| 三实例 store | ✅ inbox / outbox / activeRequests 均为 0 |
+| 人工①：三 bot `/status` | ✅ `codeVersion=e5d5ac52`、`outboxQueued=0`、`outboxDiscarded=0`、truthProfile 不变 |
+| 人工②：群内真实消息 | ✅ 只有一条状态消息，已收到 → 已完成，正文另发 |
+| 人工③：rv-prediction 执行中重启 | ✅ 同一条 ack 变为「⚠️ 服务重启，这条任务已中断，请确认后重发」，turn 未被自动重跑 |
+
+**第③项的意义**：这是 findings F5 那 24 个孤儿 turn（执行中被杀、零输出）第一次在线上被真实兜住。
+此前只有集成测试覆盖。
