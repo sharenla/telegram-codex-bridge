@@ -881,6 +881,10 @@ npm run install:<instance>
 - **测试**：用一个假的 `curl`（放在测试专用 PATH 前面，把 stdin 和参数记到文件）跑 supervisor，断言：
   连续强杀 3 次时恰好发一次；30 分钟内不重复；恢复时发「已恢复」并清标记；只发给正数 chat id；
   **假 curl 记录到的命令行参数里不含 token**；token 不出现在 supervisor 日志中；告警文案中的错误行已脱敏
+- **部署门禁的范围（2026-09-23 更正）**：token 检查**只针对 supervisor 发起的 curl**（父进程为该实例 supervisor 的 curl）。
+  bridge 自身的 getUpdates 等 curl 目前仍把 token 放在命令行里，这是既有问题，归 **T4.8**，不作为 T3.5 的门禁。
+  原门禁「任何 curl 都不含 token」为规划方写错范围。验证方式：只统计父进程是 supervisor 的 curl，报告其数量及是否含 token；
+  bridge 的 curl 只报告数量，不打印命令行
 - **不做**：不改宽限期序列与强杀条件（T3.2 已完成）；不发群；不改 bridge 内的汇总逻辑
 
 **T3.6 409 Conflict 单独归类**（R6 / R7）— 归入 `telegram_poll_conflict`；检测到即查实例锁、退出重复实例并播报。验收：单测覆盖该分类

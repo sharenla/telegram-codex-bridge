@@ -1416,3 +1416,8 @@ OpenClaw 自身配置 `~/.openclaw/openclaw.json` 当前有 9 项无法识别的
 - T3.5 supervisor 逻辑：读取本实例 `.env` 的 token/allowlist（只读），只向正数 chat id 发送；告警文件保存 alertedAt/failureCount/active，30 分钟内跨 supervisor 重启不重复；恢复通知成功后 active=false 但保留最后发送时间；最新 stderr 行先去 token 与 URL 查询串再截断 120 字；curl URL 通过 stdin config，参数不含 token，发送失败只记录一行。
 - rv-prediction 已安装提交 `657df607`（index.js 哈希待完整日志核对）；新 Supervisor ready/Bridge startup 已出现。安装后脱敏计数显示 3 个现有 bridge getUpdates curl 的 argv 含 token；这些是 bridge 既有 T4.8 缺陷，不是 supervisor 新 curl。按硬约束暂停 default/strategy，未伪造“任何 curl argv 无 token”通过。
 - **阻塞**：T3.5 部署门禁要求任何 curl argv 无 token；handoff 又明确 T4.8 才改 `TelegramApi.callOnce()` 为 stdin config，并要求本轮范围不改 bridge 汇总/发送逻辑。已写入 Error Log，等待维护者裁决后再继续灰度或单独开 T4.8。
+
+### T3.5 部署门禁裁决（2026-09-23）
+
+门禁「任何 curl 命令行都不含 token」范围写错：bridge 自身的 getUpdates curl 本就含 token（既有问题，归 T4.8）。
+**裁决：门禁只针对 supervisor 发起的 curl；T4.8 保持原位，不提前。** Codex 按 §6 停下合规。rv-prediction 已先行部署新版本，继续 default、strategy-observation。
