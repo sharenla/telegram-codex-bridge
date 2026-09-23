@@ -1429,6 +1429,14 @@ OpenClaw 自身配置 `~/.openclaw/openclaw.json` 当前有 9 项无法识别的
 - 本轮 Supervisor ready 时间（UTC+8）：rv-prediction **2026-09-23 23:42:17**，default **2026-09-24 00:02:07**，strategy-observation **2026-09-24 00:03:23**。父进程为各自 supervisor 的 curl 数量分别为 **0 / 0 / 0**，token 匹配均为 **0**；bridge curl 数量分别为 **1 / 1 / 1**，仅计数不打印命令行。3 把锁均存在，pid 与各自 `index.js` 命令行匹配；无残留测试进程。
 - 三个实例的 `DEPLOYED_REF` 已指向本轮代码（rv 保留先行部署的 `657df60`，default/strategy 指向仅含规划文档提交的 `0695eba`；运行代码哈希一致）。未修改真实 `.env`、凭证、service/store 文件，未 push。
 
+**部署台账追加：**
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-23 23:42 (UTC+8) | rv-prediction | `feat/phase-3-restart-loop` | `657df6003caa5ae920dea81980d0c8c3160b8457` | `29cd2ee8711a` | ✅ 修正门禁复核通过，Supervisor ready / 进程 / 锁正常 |
+| 2026-09-24 00:02 (UTC+8) | default | `feat/phase-3-restart-loop` | `0695eba5071d5640db4a1383145480dc1b04c5c6` | `29cd2ee8711a` | ✅ 灰度部署与观察通过 |
+| 2026-09-24 00:03 (UTC+8) | strategy-observation | `feat/phase-3-restart-loop` | `0695eba5071d5640db4a1383145480dc1b04c5c6` | `29cd2ee8711a` | ✅ 灰度部署与观察通过 |
+
 **人工验收：请维护者对三个 bot 各发一次 `/status`，逐项记录：**
 
 | 实例 | 预期核对项 | codexBackend |
