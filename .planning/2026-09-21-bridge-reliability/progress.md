@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.3（2026-09-23）：规划更新原样提交 `d36b4d8`。移除 pollingLoop 的卡死时长重启分支；`requestSupervisorRestart` 全仓只有该调用，移除后无其他调用方，故删除函数、私有标志与两项旧阈值。新增 30/90 秒状态迁移、失联起点/恢复时长持久化、2/4/8/16/30 秒退避与 `/status` 三字段；176/176 通过，准备灰度部署。Clash 调用条件、supervisor、现有 restartReason 清理逻辑未改。
   - T3.2 完成（2026-09-23）：代码提交 `6f7c701`；按 rv-prediction → 观察一轮 → default → strategy-observation 灰度部署。三实例新 Supervisor ready 分别为本次 17:20:41 / 17:21:42 / 17:22:18（UTC+8），均带 start_grace=60；脚本哈希 `2257af0ad696`，index.js 仍为 `1eacb1e58346`。详细证据与人工验收见末尾 T3.2 完成记录。
   - T3.2 续做（2026-09-23）：按已裁决的数值执行固定三级 60/120/300，原“翻倍”为规划方笔误；阻塞已解除。新增假 bridge / 假 app-server 的四项进程测试逐项先红后绿，170/170 通过；实现与检查完成，准备按 rv → default → strategy 灰度部署。新参数 START_GRACE_SECONDS 已在 `.env.example` 说明，supervisor 从进程环境读取，不读取 dotenv；测试用短基数按 1/2/5 比例缩短三级时间。
   - T3.2（2026-09-23）：维护者三份规划文件已在 `feat/phase-3-restart-loop` 原样单独提交为 `4838e81`。读取 supervisor 后停在实现前：规格同时要求每轮翻倍和 `60 → 120 → 300`，需要明确是否包含 240 秒这一轮，详见 Error Log。未改脚本、未运行新测试、未部署；T3.2 保持未勾选。
@@ -131,6 +132,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
+| T3.3 polling health | 实际 pollingLoop/状态函数在隔离 VM 中使用假时钟、假 Telegram；真实临时 Store | >180s/6次失败不退出；30/90s迁移去重；恢复时长；指数退避复位；重载持久化；status字段 | 旧退出路径测试先失败；新增 6 项通过；176/176 pass、fail 0，node、四项 zsh 与 diff check 通过 | complete |
 | T3.2 supervisor | 假 bridge、短宽限期与轮询间隔；真实假 app-server 子进程 | 宽限期不杀、连续 miss 才重启、三级封顶、健康即复位；清理测试进程 | 四项新增测试逐项先失败再通过；170/170 pass、fail 0；node 与四项 zsh 语法、diff check 通过 | complete |
 | T2.5 草稿检查 | ack 管理器、接入层生命周期集成测试 + 全套检查 | 通过后灰度部署 | 旧代码新增测试先失败；实现后 **145/145 pass / fail 0**；node、四项 zsh 语法与 diff check 通过 | complete |
 | T2.3a replay 不阻塞 polling | 真实启动尾部 + 永不完成 dispatch | polling 处理新消息 | 修复前失败；修复后 117/117 全部通过 | complete |

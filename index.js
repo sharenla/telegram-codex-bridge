@@ -298,8 +298,6 @@ const ACCOUNT_AUTH_FAILURE_PATTERNS = [
 const ACCOUNT_HEALTH_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const ACCOUNT_LIMIT_COOLDOWN_MS = 60 * 60 * 1000;
 const ACCOUNT_ACCESS_EXPIRY_SKEW_MS = 5 * 60 * 1000;
-const TELEGRAM_POLLING_STALL_THRESHOLD_MS = 3 * 60 * 1000;
-const TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD = 6;
 const TELEGRAM_POLL_TIMEOUT_SECONDS = 5;
 const TELEGRAM_TRANSPORT_FAILOVER_ERROR_THRESHOLD = 3;
 const TELEGRAM_TRANSPORT_FAILOVER_MAX_CANDIDATES = 4;
@@ -5043,12 +5041,28 @@ async function main() {
         restartReason: null,
       };
     }
-    return store.data.telegram.health;
+    const health = store.data.telegram.health;
+    health.state ||= health.offlineSince ? "degraded" : "ok";
+    health.offlineSince ??= 0;
+    health.lastOutage ??= null;
+    return health;
   }
 
   function recordTelegramPollSuccess() {
     const health = ensureTelegramHealthState();
     health.lastPollSuccessAt = Date.now();
+    const recovered = Boolean(health.offlineSince);
+    if (recovered) {
+      health.lastOutage = {
+        startedAt: health.offlineSince,
+        endedAt: health.lastPollSuccessAt,
+        durationMs: Math.max(0, health.lastPollSuccessAt - health.offlineSince),
+      };
+      console.log(JSON.stringify({ ts: new Date(health.lastPollSuccessAt).toISOString(),
+        errorClass: "telegram_recovered", telegramState: "ok", ...health.lastOutage }));
+      health.offlineSince = 0;
+    }
+    health.state = "ok";
     health.lastPollErrorAt = 0;
     health.consecutivePollErrors = 0;
     health.lastPollError = null;
@@ -5057,7 +5071,8 @@ async function main() {
     reconcileTelegramTransportRecoveryHealth(health);
     telegramTransportRecovery?.markHealthy();
     store.markDirty();
-    store.saveThrottled();
+    if (recovered) store.save({ force: true });
+    else store.saveThrottled();
   }
 
   function recordTelegramPollError(error) {
@@ -5065,14 +5080,25 @@ async function main() {
     health.lastPollErrorAt = Date.now();
     health.consecutivePollErrors = Number(health.consecutivePollErrors || 0) + 1;
     health.lastPollError = truncateMiddle(error?.message || String(error), 220);
+    const baseline = health.offlineSince || health.lastPollSuccessAt || health.lastPollErrorAt;
+    const offlineMs = Math.max(0, health.lastPollErrorAt - baseline);
+    const state = offlineMs >= 90_000 ? "unreachable" : offlineMs >= 30_000 ? "degraded" : "ok";
+    const changed = state !== health.state;
+    if (changed) {
+      health.state = state;
+      if (state !== "ok" && !health.offlineSince) health.offlineSince = baseline;
+      console.log(JSON.stringify({ ts: new Date(health.lastPollErrorAt).toISOString(),
+        errorClass: `telegram_${state}`, telegramState: state, offlineSince: health.offlineSince }));
+    }
     store.markDirty();
-    store.saveThrottled();
+    if (changed) store.save({ force: true });
+    else store.saveThrottled();
     return health;
   }
 
   function buildPollingStatusLine() {
     const health = ensureTelegramHealthState();
-    const state = health.consecutivePollErrors > 0 ? "degraded" : "ok";
+    const state = health.state;
     const parts = [state, `last ok ${formatRelativeAge(health.lastPollSuccessAt)}`];
     if (health.consecutivePollErrors) {
       parts.push(`${health.consecutivePollErrors} consecutive errors`);
@@ -5846,7 +5872,6 @@ async function main() {
   }
 
 
-  let restartRequested = false;
   let codexBackendRecoveryPromise = null;
   let codexBackendRecoveryBypassDepth = 0;
   let codexBackendTransitionDepth = 0;
@@ -5854,23 +5879,6 @@ async function main() {
 
   const codexBin = resolveCodexBin();
   console.log(`Codex CLI: ${codexBin}`);
-
-  async function requestSupervisorRestart(reason) {
-    if (restartRequested) return;
-    restartRequested = true;
-
-    const health = ensureTelegramHealthState();
-    health.restartRequestedAt = Date.now();
-    health.restartReason = truncateMiddle(reason, 220);
-    store.markDirty();
-    store.save({ force: true });
-
-    console.error(`Bridge self-recovery restart requested: ${reason}`);
-    stopTypingForAllChats();
-    if (codex) codex.stop({ expected: true });
-    await sleep(100);
-    process.exit(1);
-  }
 
   async function retryTurnAfterUsageLimit({ chatId, session, rt, turn }) {
     if (!isUsageLimitTurn(turn) || rt.failoverInProgress) return false;
@@ -9376,6 +9384,9 @@ async function main() {
           `outboxDiscarded: ${getOutboxStatus(store).discarded}`,
           `autoCompact: ${autoCompact ? "on" : "off"} (soft ${formatPercent(contextThresholds.soft)}, hard ${formatPercent(contextThresholds.hard)}, emergency ${formatPercent(contextThresholds.emergency)})`,
           `telegramPolling: ${buildPollingStatusLine()}`,
+          `telegramState: ${ensureTelegramHealthState().state}`,
+          `offlineSince: ${ensureTelegramHealthState().offlineSince || "(none)"}`,
+          `lastOutage: ${ensureTelegramHealthState().lastOutage ? JSON.stringify(ensureTelegramHealthState().lastOutage) : "(none)"}`,
           `codexBackend: ${buildCodexBackendStatusLine()}`,
           `codeVersion: ${INDEX_CODE_VERSION}`,
           `codeSha256: ${INDEX_CODE_SHA256}`,
@@ -9689,21 +9700,7 @@ async function main() {
             continue;
           }
         }
-        const stallBaselineMs = Math.max(
-          Number(health.lastPollSuccessAt || 0),
-          processStartedAt,
-        );
-        const stalledMs = Math.max(0, Date.now() - stallBaselineMs);
-        if (
-          health.consecutivePollErrors >= TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD
-          && stalledMs >= TELEGRAM_POLLING_STALL_THRESHOLD_MS
-        ) {
-          await requestSupervisorRestart(
-            `Telegram polling stalled for ${Math.round(stalledMs / 1000)}s after ${health.consecutivePollErrors} consecutive errors`,
-          );
-          return;
-        }
-        await sleep(2000);
+        await sleep(Math.min(30_000, 2000 * 2 ** Math.min(health.consecutivePollErrors - 1, 4)));
       }
     }
   }
