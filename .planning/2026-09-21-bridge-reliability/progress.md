@@ -133,6 +133,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployed and smoke-checked | complete |
 | T2.4b permanent-reject hotfix | structured 429/403/blocked and transport-error regressions | 133/133 pass; all syntax checks pass | complete |
 | T2.5 ack + lifecycle | manager + integration lifecycle/restart/steer tests and required checks | **145/145 pass / fail 0**; node/zsh/diff check pass | complete |
+| T2.6 upstream transient retry | structured 5xx/stream classification, no-tool same-account retry, tool-aware partial-execution guard, group-safe ack | **151/151 pass / fail 0**; node/zsh/diff check pass | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -151,6 +152,16 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 - 人工验收待维护者执行：
   1. 三个 bot 各发一次 `/status`，确认 `codeVersion=e5d5ac52`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。
   2. 一个群里 @ bot 发真实消息，确认只有一条状态消息从「已收到」变化到「已完成」，正文另发。
+
+### T2.6 完成与灰度部署（2026-09-23）
+
+- 新增 `upstream_transient` 分类：优先读取结构化 HTTP 状态 / `codexErrorInfo`，文本只匹配明确上下文，不使用裸数字；未加入 `ACCOUNT_FAILOVER_PATTERNS`。
+- 仅对尚未产生工具调用的 turn 做同账号指数退避，最多两次重试；工具调用后不重跑，ack 显示「上游中断：本次任务可能已部分执行，请确认后重发」。重试耗尽显示「上游服务暂时不可用，请稍后重发」。
+- 重试沿用同一 requestId 与同一 ack；群聊失败文案为中文短句，不带上游英文或 URL。
+- 测试先在旧代码上失败，修复后全套 **151/151 pass / fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- 提交：`859235637e374c41d3cb106a7908b5025a91ce8b`（`index.js` SHA-256 前 12 位 `97e54a1c6b2f`）。
+- 灰度顺序 rv-prediction → 观察一轮 → default → strategy-observation 完成；三实例哈希、ref、进程、启动三标记与角色文件检查通过，未发现残留 curl。
+- 人工验收待维护者执行：三个 bot 各发 `/status`，确认新 `codeVersion=97e54a1c`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。上游 5xx 无法人工制造，重试路径需等待真实上游故障验证。
 
 ## 版本与部署台账
 
@@ -182,6 +193,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T2.5 rv-prediction | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | gray deploy + SIGTERM/restart smoke passed |
 | 2026-09-23 | T2.5 default | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | observe-one-round then deploy passed |
 | 2026-09-23 | T2.5 strategy-observation | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | deploy passed |
+| 2026-09-23 | T2.6 rv-prediction | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | gray deploy passed |
+| 2026-09-23 | T2.6 default | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | observe-one-round then deploy passed |
+| 2026-09-23 | T2.6 strategy-observation | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | deploy passed |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
