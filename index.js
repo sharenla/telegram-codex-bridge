@@ -6420,7 +6420,7 @@ async function main() {
         const effectiveTurnId = resolveAgentMessageTurnId({ explicitTurnId: turnId, rt });
         const silentTurn = isSilentTurn(rt, effectiveTurnId);
 
-        if (effectiveTurnId && ["mcpToolCall", "mcp_call", "toolCall", "toolUse"].includes(item.type)) {
+        if (effectiveTurnId && isToolActivityItem(item)) {
           rt.turnToolActivityByTurnId[effectiveTurnId] = true;
         }
 
