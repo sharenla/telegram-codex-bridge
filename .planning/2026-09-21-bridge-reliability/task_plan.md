@@ -9,9 +9,8 @@
 
 ## Next Step
 
-执行 **T3.3**：轮询卡死不再退出进程；内部 ok / degraded(30s) / unreachable(90s) 状态；重试间隔指数退避（2s 起、30s 封顶）；
-持久化失联起点 `offlineSince` 与 `lastOutage`（供 T3.4 播报，本任务只记录不播报）。规格见 `handoff_codex.md`「T3.3 补充」。
-T3.2 §4.4 验收已于 2026-09-23 完成。
+执行 **T3.4**：恢复播报与读回 restartReason，规格见 `handoff_codex.md`。
+T3.3 已实现并灰度部署；新 codeVersion 为 `5334599a`，部署后人工 `/status` 验收待维护者执行。
 
 ## Current Phase
 
@@ -56,7 +55,7 @@ Phase 3
 
 - [x] T3.1 调整启动顺序：先起 app-server，或用缓存 botIdentity 起步
 - [x] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
-- [ ] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
+- [x] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
 - [ ] T3.4 恢复后播报失联时长与积压数；`restartReason` 先消费再清空
 - [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
 - [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报

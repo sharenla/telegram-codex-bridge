@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.3 灰度完成（2026-09-23）：代码提交 `32d1202` 按 rv → 观察 → default → strategy 安装；四份 index.js `5334599a2dad`，supervisor 保持 `2257af0ad696`；appServerSpawnedMs 为 1175/1955/1011。检查与人工验收见末尾 T3.3 记录；Next Step 指向 T3.4。
   - T3.3（2026-09-23）：规划更新原样提交 `d36b4d8`。移除 pollingLoop 的卡死时长重启分支；`requestSupervisorRestart` 全仓只有该调用，移除后无其他调用方，故删除函数、私有标志与两项旧阈值。新增 30/90 秒状态迁移、失联起点/恢复时长持久化、2/4/8/16/30 秒退避与 `/status` 三字段；176/176 通过，准备灰度部署。Clash 调用条件、supervisor、现有 restartReason 清理逻辑未改。
   - T3.2 完成（2026-09-23）：代码提交 `6f7c701`；按 rv-prediction → 观察一轮 → default → strategy-observation 灰度部署。三实例新 Supervisor ready 分别为本次 17:20:41 / 17:21:42 / 17:22:18（UTC+8），均带 start_grace=60；脚本哈希 `2257af0ad696`，index.js 仍为 `1eacb1e58346`。详细证据与人工验收见末尾 T3.2 完成记录。
   - T3.2 续做（2026-09-23）：按已裁决的数值执行固定三级 60/120/300，原“翻倍”为规划方笔误；阻塞已解除。新增假 bridge / 假 app-server 的四项进程测试逐项先红后绿，170/170 通过；实现与检查完成，准备按 rv → default → strategy 灰度部署。新参数 START_GRACE_SECONDS 已在 `.env.example` 说明，supervisor 从进程环境读取，不读取 dotenv；测试用短基数按 1/2/5 比例缩短三级时间。
@@ -239,6 +240,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T3.2 rv-prediction | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度与观察通过；supervisor `2257af0ad696`，ready 17:20:41 +0800，start_grace=60 |
 | 2026-09-23 | T3.2 default | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度通过；supervisor `2257af0ad696`，ready 17:21:42 +0800，start_grace=60 |
 | 2026-09-23 | T3.2 strategy-observation | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度通过；supervisor `2257af0ad696`，ready 17:22:18 +0800，start_grace=60 |
+| 2026-09-23 | T3.3 rv-prediction | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度与观察通过；supervisor `2257af0ad696`，ready 17:37:54 +0800，spawn 1175 ms |
+| 2026-09-23 | T3.3 default | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度通过；supervisor `2257af0ad696`，ready 17:38:28 +0800，spawn 1955 ms |
+| 2026-09-23 | T3.3 strategy-observation | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度通过；supervisor `2257af0ad696`，ready 17:39:10 +0800，spawn 1011 ms |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -972,3 +976,14 @@ Codex 照 §6 停下是合规的。同时在 handoff §6.1.1 增补：文字与�
 | §4.4 真实应答 | ✅ 2026-09-23 人工确认，`codeVersion=1eacb1e5`（本轮未改 index.js） |
 
 R3 死循环至此两端均已处理：bridge 侧启动不再被 getMe 阻塞（T3.1），supervisor 侧给出 60/120/300 秒宽限（T3.2）。
+
+### T3.3 完成与灰度部署（2026-09-23）
+
+- 维护者三份规划文件先原样提交为 `d36b4d8`；实现提交为 `32d12021739efd67539697a8b0a8bdadd53e1030`。改动文件：`index.js`、新增 `tests/polling-health.test.js`、`progress.md`、`task_plan.md`；findings.md 与 supervisor 未改。
+- pollingLoop 不再按 180 秒/6 次错误请求进程退出。`requestSupervisorRestart` 的唯一调用方就是该分支，移除后其他调用方为 **0**，因此函数、restartRequested 私有标志和两个旧阈值一并删除。现有 restartReason 的清理代码保留原样，供 T3.4 后续处理。
+- 按最近成功轮询计算失联时长，30 秒进入 degraded，90 秒进入 unreachable；只在状态变化时打印含 ts/errorClass/telegramState 的日志。进入失联状态时强制保存 offlineSince，恢复时强制保存 lastOutage（startedAt/endedAt/durationMs）、清空 offlineSince 并记一条恢复日志。重试间隔为 2/4/8/16/30/30 秒，成功清零错误计数后复位；Clash maybeRecover 的调用与原条件均未改。尚未实现恢复播报。
+- 新增 6 项测试：直接执行生产 pollingLoop/健康函数的隔离 VM，使用假时钟和假 Telegram，真实临时 Store 验证落盘与重载。旧代码的 >180 秒、>6 次失败测试先触发重启而失败；修复后持续到成功。覆盖 30/90 秒边界与日志去重、恢复时长与单次恢复日志、退避复位、跨重启失联起点保留、实际 /status 字段表达式。
+- 检查全部通过：`node -c index.js`，**176/176 pass / fail 0**，四项 `zsh -n`，`git diff --check`。既有测试断言未改。
+- 灰度按 rv-prediction → 观察一轮 → default → strategy-observation 完成。各批安装后新 Supervisor ready 均带 start_grace=60，Deployed ref/Bridge started/codeVersion 三标记齐全；appServerSpawnedMs 为 **1175 / 1955 / 1011**。工作区与三实例 index.js 全部 `5334599a2dad`，supervisor 全部 `2257af0ad696`；DEPLOYED_REF 全部指向 `32d1202`。三个 bridge 与其 supervisor/app-server 父子关系正确，3 把锁对应各自 PID/indexPath，两个命名角色哈希与源文件匹配；最终只有三个正常 getUpdates curl 子进程，无孤儿。诊断输出先脱敏。
+- 三实例本地 store 已见部署后的成功轮询时间，telegramState=ok、offlineSince=0，outboxQueued/outboxDiscarded 均为 0；这不是人工 /status 应答验收的替代。**请维护者对三个 bot 各发一次 /status**，确认 `codeVersion=5334599a`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变，并且 `telegramState=ok`。
+- 真实断网验证留待下一次网络故障，未主动中断生产网络。T3.3 已勾选，Next Step 指向 T3.4，所有任务行保留；未 push。
