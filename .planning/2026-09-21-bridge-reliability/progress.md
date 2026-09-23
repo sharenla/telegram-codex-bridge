@@ -127,6 +127,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.3a deployment | rv → default → strategy install; hash/log/process checks | no replay startup blockage | all 3 running, hash f3226f55, startup logs present | complete |
 | T2.4 outbox | isolated store/process tests | failed sends survive restart and notices are durable | 123/123 pass; deployment pending | complete |
 | T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployed and smoke-checked | complete |
+| T2.4b permanent-reject hotfix | structured 429/403/blocked and transport-error regressions | 133/133 pass; all syntax checks pass | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -628,3 +629,14 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 **一个仍未被真实验证的点**：`/status` 显示 `outboxQueued: 0 / outboxDiscarded: 0`，
 说明线上**尚未发生过真实的失败投递**，T2.4/T2.4a 的核心路径（失败 → 持久化 → 补发）
 目前只有单测覆盖。真正的验证要等一次真实网络抖动，或在 Phase 3 完成后主动制造一次。
+
+
+### T2.4b hotfix implementation and pre-deployment validation (2026-09-23)
+
+- Committed planning updates unchanged first as `8dda00e` so the installer dirty-tree guard remains meaningful.
+- Added four regression tests before the fix; old code failed 3/4 as expected (429 text, transport text, and body-only blocked description).
+- Changed `TelegramOutbox._isPermanentReject` to require a structured `error.body`, recognize `error_code === 403`, and inspect only permanent-rejection descriptions; the compatibility path preserves the existing chat-not-found test when a structured body omits `description` without restoring numeric `403` text matching.
+- Validation: `node -c index.js`, **133/133 tests pass**, all four required `zsh -n` checks, and `git diff --check`.
+- Code commit: `af00a9b` (`Fix Telegram outbox permanent reject classification`), workspace `index.js` SHA-256 prefix `3562402dbada`.
+- Files: `index.js`, `tests/outbox.test.js`; `findings.md` unchanged.
+- Deployment pending; next step is gray deployment rv-prediction → default → strategy-observation, then manual `/status` confirmation by the maintainer.

@@ -9,7 +9,7 @@
 
 ## Next Step
 
-执行 **T2.4b**（热修，已在线上）：`TelegramOutbox._isPermanentReject` 对整条错误消息做
+执行 **T2.5**：`TelegramOutbox._isPermanentReject` 对整条错误消息做
 自由文本 `403` 匹配，实测会把「429 且 retry_after=403」与「传输层 timed out after 403 ms」
 误判为永久拒绝，导致回复被**静默永久丢弃**。
 改为只在 `error.body` 存在时判定（传输层失败永不算永久），并只对 `body.description` 做描述匹配。
