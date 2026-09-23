@@ -1447,6 +1447,27 @@ OpenClaw 自身配置 `~/.openclaw/openclaw.json` 当前有 9 项无法识别的
 
 T3.5 告警路径未在线上主动制造，已由新增 supervisor 假 curl 测试覆盖；T4.8 的 bridge 自身 curl token 命令行问题保持原位。
 
+### T3.6 / T3.7 实现、检查与灰度部署（2026-09-24）
+
+- 维护者规划文件原样提交为 `81278ce`。T3.6 分开提交：`e961e52`（结构化 409 归类、冲突窗口/限频/私聊通知）与 `42743f0`（健康轮询后按 10 分钟无新 409 恢复）；T3.7 分开提交：`69d7ac6`（运行时 Clash 配置优先、后台 `/version` 可达性探测、状态展示与不可用时单次跳过日志）。findings.md、真实 `.env`、凭证和 Clash 配置未改。
+- 新增测试均先在旧代码上失败后修复；全套 **211 / 211 pass、fail 0**。`node -c index.js`、四项 `zsh -n`、`git diff --check` 全部通过。
+- T3.6：只认结构化 `error.body.error_code === 409`，记录 `telegram_poll_conflict`；5 分钟内达到 3 次进入 `conflict`，通知只发 allowlist 正数私聊且 30 分钟限频；10 分钟无新 409 后恢复，不退出进程。
+- T3.7：控制器候选优先读取运行时 `config.yaml`，支持 TCP / unix socket；后台 `/version` 使用 Node HTTP、3 秒超时；secret 不进入日志、状态文本或进程命令行；不可用时自动换节点跳过并只记录一次。
+
+**T3.6 / T3.7 灰度部署台账：**
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|
+| 2026-09-24 01:09 (UTC+8) | rv-prediction | `feat/phase-3-restart-loop` | `69d7ac68b82ba65affae0c6d4523a6a7841f6c52` | `15f553e60ccb` | `7a7878924997` | ✅ 观察通过；`appServerSpawnedMs=1296` |
+| 2026-09-24 01:10 (UTC+8) | default | `feat/phase-3-restart-loop` | `69d7ac68b82ba65affae0c6d4523a6a7841f6c52` | `15f553e60ccb` | `7a7878924997` | ✅ 观察通过；`appServerSpawnedMs=1857` |
+| 2026-09-24 01:11 (UTC+8) | strategy-observation | `feat/phase-3-restart-loop` | `69d7ac68b82ba65affae0c6d4523a6a7841f6c52` | `15f553e60ccb` | `7a7878924997` | ✅ 观察通过；`appServerSpawnedMs=1168` |
+
+三实例本地 store 当前均为 `telegramState=ok`、`clashFailover: unavailable（找不到 Clash 控制器）`，`outboxQueued=0`、`outboxDiscarded=0`；Supervisor ready 均含 `start_grace=60`，3 把锁的 pid 与对应 service 的 `index.js` 命令行匹配。supervisor 发起 curl 数量为 **0 / 0 / 0** 且 token 匹配为 **0 / 0 / 0**；bridge curl 只报告数量，未打印命令行。
+
+**人工验收待维护者确认：**
+
+请对三个 bot 各发一次 `/status`，记录 `codeVersion=15f553e6`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变，并核对 `clashFailover: unavailable（找不到 Clash 控制器）`。维护者确认前，T3.6/T3.7 任务行保持未勾选，不进入 Phase 3 收口。
+
 ### T3.4c / T3.5 验收（2026-09-23）—— 通过
 
 - 四份哈希一致：`index.js` `29cd2ee871`、supervisor `7a78789249`；**204 / 204**
