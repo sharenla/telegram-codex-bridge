@@ -95,6 +95,281 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.4c 实现提交 `5598e40`：切号验证成功立即清除 `authFailureUnresolved` 并复位 `codexBackend=ok`；失败切号保持 `auth_failing`。
+  - T3.5 实现提交 `657df60`：supervisor 连续 3 次 unhealthy restart 后给 allowlist 正数私聊发一次脱敏告警；30 分钟持久限频；健康恢复发送一次恢复通知并保留发送时间；curl URL 从 stdin config 传入，token 不进 supervisor argv/日志；发送失败不影响重启循环。新增 supervisor 假 curl 测试 3 项。
+  - T3.5 rv-prediction 已开始灰度并启动成功；因现网 bridge getUpdates curl 仍有 token argv（后续 T4.8 范围），部署门禁冲突，default/strategy 未安装本轮代码。
+  - T3.4b / T3.4a 已灰度部署（2026-09-23）：代码 `adbcca8`、四份 index.js `4e0985bd0bb3`，200/200 通过；rv #023b89 已自然清台账。strategy 为 auth_failing；rv 启动后无新认证错误、仍为 ok，该额外验收未证实，不能当成账号恢复。详见末尾台账与人工验收；Next Step 为 T3.5。
+  - T3.4b / T3.4a（2026-09-23）：维护者三份规划更新原样提交 `4eef88f`。认证 turn / stderr 看门狗 / 重跑请求失败统一终态、一次重跑上限、工具调用安全门、auth_failing 与私聊汇总去重已实现；重叠失联原因和本地秒级时间已修。新增 12 项测试，全套 200/200；准备灰度部署。
+  - T3.4 灰度完成（2026-09-23）：提交 `8043a59` 按 rv → 观察 → default → strategy 安装；四份 index.js `8fea81fe48e7`，supervisor `2257af0ad696`；启动 1000/1704/1078 ms。三实例均已成功轮询且没有生成失联汇总；T3.4 已勾选，Next Step 为 T3.5。人工验收见末尾。
+  - T3.4（2026-09-23）：维护者三份规划文件原样单独提交 `4279e79`。新增恢复汇总、延迟消息 ack 注记、正常关闭记录；网络恢复复用 T3.3 lastOutage，进程恢复使用启动前 lastPollSuccessAt。新增 12 项测试（先复现缺失与接入失败），全套 188/188；准备灰度部署。
+  - T3.3 灰度完成（2026-09-23）：代码提交 `32d1202` 按 rv → 观察 → default → strategy 安装；四份 index.js `5334599a2dad`，supervisor 保持 `2257af0ad696`；appServerSpawnedMs 为 1175/1955/1011。检查与人工验收见末尾 T3.3 记录；Next Step 指向 T3.4。
+  - T3.3（2026-09-23）：规划更新原样提交 `d36b4d8`。移除 pollingLoop 的卡死时长重启分支；`requestSupervisorRestart` 全仓只有该调用，移除后无其他调用方，故删除函数、私有标志与两项旧阈值。新增 30/90 秒状态迁移、失联起点/恢复时长持久化、2/4/8/16/30 秒退避与 `/status` 三字段；176/176 通过，准备灰度部署。Clash 调用条件、supervisor、现有 restartReason 清理逻辑未改。
+  - T3.2 完成（2026-09-23）：代码提交 `6f7c701`；按 rv-prediction → 观察一轮 → default → strategy-observation 灰度部署。三实例新 Supervisor ready 分别为本次 17:20:41 / 17:21:42 / 17:22:18（UTC+8），均带 start_grace=60；脚本哈希 `2257af0ad696`，index.js 仍为 `1eacb1e58346`。详细证据与人工验收见末尾 T3.2 完成记录。
+  - T3.2 续做（2026-09-23）：按已裁决的数值执行固定三级 60/120/300，原“翻倍”为规划方笔误；阻塞已解除。新增假 bridge / 假 app-server 的四项进程测试逐项先红后绿，170/170 通过；实现与检查完成，准备按 rv → default → strategy 灰度部署。新参数 START_GRACE_SECONDS 已在 `.env.example` 说明，supervisor 从进程环境读取，不读取 dotenv；测试用短基数按 1/2/5 比例缩短三级时间。
+  - T3.2（2026-09-23）：维护者三份规划文件已在 `feat/phase-3-restart-loop` 原样单独提交为 `4838e81`。读取 supervisor 后停在实现前：规格同时要求每轮翻倍和 `60 → 120 → 300`，需要明确是否包含 240 秒这一轮，详见 Error Log。未改脚本、未运行新测试、未部署；T3.2 保持未勾选。
+  - T3.1：main 上原样提交维护者的三份规划文件（`ddec91b`），建立 `feat/phase-3-restart-loop`；新增测试先在旧代码上失败，再实现缓存身份优先、后台 getMe 校验、身份变化持久化与实时方向判断。
+  - 不移动 `startCodexServer()`；在实际 app-server 子进程创建后打印 `appServerSpawnedMs`。代码提交 `bfb8c79f4785fe848dfca32b41ad50faffb7c73f`，`index.js` SHA-256 前 12 位 `1eacb1e58346`。
+  - 按 rv-prediction → 观察一轮 → default → strategy-observation 灰度安装。三实例启动计时分别为 **1854 / 2275 / 1414 ms**，均远小于 15000 ms；部署后三者轮询成功、错误计数 0。四份 `index.js` 哈希一致，三个 bridge 进程与各自锁 PID 对应，命名角色文件哈希与源文件一致；仅有三条由各自 bridge 持有的正常 getUpdates curl，没有残留孤儿进程。
+- Files created/modified:
+  - `index.js`、新增 `tests/startup-bot-identity.test.js`、本 `progress.md`、`task_plan.md`；`findings.md` 未改。
+
+#### T3.1 启动前 await 审计（至 app-server 子进程创建）
+
+| 等待点 | 可能访问网络 | 处理与边界 |
+|--------|--------------|------------|
+| `await discoverChatIds(telegram)` | 是，Telegram getMe/getUpdates | 仅显式 `--discover-chat-id` 诊断模式执行，随即退出；正常 LaunchAgent 启动路径不会进入。 |
+| `await resolveStartupBotIdentity(...)` | 有缓存时 getMe 在后台访问 Telegram；无缓存时等待 Telegram getMe | 有完整缓存立即返回并并行校验，getMe 永不返回也不挡 app-server；首次安装无缓存仍等待，由 T3.2 启动宽限期兜底。 |
+| `await startCodexServer()` 内 `await server.start()` | 否 | 仅本地 spawn；`appServerSpawnedMs` 在子进程创建后立即记录。 |
+| `await startCodexServer()` 内 `await server.initialize()` | 可能等待 app-server 的 IPC 响应；此时子进程已创建 | 位于 spawn 之后，不影响 supervisor 的 15 秒子进程检测；未改 Codex 初始化协议。 |
+
+此外，启动前的 `outbox.flush()` 可能访问 Telegram，但以 `void` 后台运行、未被 await；桌面上下文同步、账号资料读取和初始 profile 写入均为本地同步操作。`ensureHealthyStartupAccount()` 在 `startCodexServer()` 返回后后台执行，可能访问 chatgpt.com/codex-lb，不在创建子进程前的等待链上。函数定义内部的其余 `await` 仅在后续消息/恢复事件触发时执行。
+
+维护者人工验收待执行：三个 bot 各发一次 `/status`，应看到 `codeVersion=1eacb1e5`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 与部署前一致。未调用生产 token 的 getUpdates 或模拟用户消息验证真实应答。
+
+### Phase 4: 错误分类与可观测指标
+
+- **Status:** pending
+- Actions taken:
+  -
+- Files created/modified:
+  -
+
+---
+
+## Test Results
+
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| T3.4c account switch recovery | 隔离 VM backend health helpers | verified switch clears auth_failing; failed switch remains auth_failing | 新增测试先失败后通过；全套 204/204（含 supervisor tests） | complete |
+| T3.5 supervisor fallback alert | 假 bridge、假 curl、临时 .env/store/log；短轮询 | 3 次强杀告警一次、恢复通知、正数 allowlist、30 分钟持久限频、脱敏/token argv | 新增 3 项先失败后通过；全套 204/204；node、四项 zsh、diff check 通过；灰度门禁阻塞 | blocked by scope conflict |
+| T3.4b auth terminal + T3.4a recovery | 生产认证函数的隔离 VM、真实临时 Store/ack/outbox、假账号切换；本地 Date | 耗尽终态、最多一次重跑、工具安全门、持续 auth_failing / turn 成功复位、私聊一次汇总、原因优先和本地时间 | 12 项新增先红后绿；200/200 pass / fail 0；node、四项 zsh、diff check 通过；旧断言未改 | complete |
+| T3.4 recovery notices | 假 Telegram/假时钟，真实临时 Store/outbox/inbox/ack，生产 pollingLoop VM | ≥120s 私聊汇总、中文原因、同一 ack 注记、graceful/异常停机、重启去重 | 新功能测试先红；接入三项先失败再通过；新增 12 项，全套 188/188 pass / fail 0；node、四项 zsh、diff check 通过 | complete |
+| T3.3 polling health | 实际 pollingLoop/状态函数在隔离 VM 中使用假时钟、假 Telegram；真实临时 Store | >180s/6次失败不退出；30/90s迁移去重；恢复时长；指数退避复位；重载持久化；status字段 | 旧退出路径测试先失败；新增 6 项通过；176/176 pass、fail 0，node、四项 zsh 与 diff check 通过 | complete |
+| T3.2 supervisor | 假 bridge、短宽限期与轮询间隔；真实假 app-server 子进程 | 宽限期不杀、连续 miss 才重启、三级封顶、健康即复位；清理测试进程 | 四项新增测试逐项先失败再通过；170/170 pass、fail 0；node 与四项 zsh 语法、diff check 通过 | complete |
+| T2.5 草稿检查 | ack 管理器、接入层生命周期集成测试 + 全套检查 | 通过后灰度部署 | 旧代码新增测试先失败；实现后 **145/145 pass / fail 0**；node、四项 zsh 语法与 diff check 通过 | complete |
+| T2.3a replay 不阻塞 polling | 真实启动尾部 + 永不完成 dispatch | polling 处理新消息 | 修复前失败；修复后 117/117 全部通过 | complete |
+| 语法检查（基线） | `node -c index.js` | 无输出即通过 | SYNTAX OK | complete |
+| 单测（基线） | `node --test ./tests/*.test.js` | 全通过 | **tests 99 / pass 99 / fail 0**（362ms） | complete |
+| 业务代码未被污染 | `git diff --shortstat` | `9 files changed, 510 insertions(+), 27 deletions(-)` | 完全一致 | complete |
+| 供应脚本语法 | `zsh -n scripts/*.sh`（4 个） | 无输出 | 2026-09-21 分别复跑指定四个脚本，均退出 0 | complete |
+| T1.1 提交完整性 | git status / show / stash | 干净、所需文件入库、stash 空 | be579fd，全部满足；脱敏已完成 | complete |
+| T1.3 脏工作树守卫 | isolated installer tests | 被拒绝；允许绕过时写 ref | 104/104 pass，guard/ref tests complete | complete |
+| T1.4 默认实例哈希一致 | shasum / DEPLOYED_REF / launchctl / pgrep / startup log | 相同且启动成功 | 相同；ref 记录 bca12d3；进程与日志正常 | complete |
+| T1.5 三实例哈希一致 | shasum 四份 index.js / launchctl / pgrep / role heads / startup logs | 四份相同、进程在跑、角色保留 | 全部满足；sha256 前 12 = 889d4bd36bfc | complete |
+| T1.5 角色文件未被覆盖 | head -5 named service AGENTS.md | 仍为各自专属角色 | 两个角色头部保持实例专属内容 | complete |
+| T1.3 脏工作树守卫 | `BRIDGE_ALLOW_DIRTY=0` + 脏树执行安装 | 被拒绝 | 测试通过，断言 `/working tree is dirty/` | complete |
+| T1.4/T1.5 三实例哈希一致 | `shasum -a256` ×3 | 三者相同且等于部署源 | 全部 `889d4bd3` | complete |
+| T1.5 角色文件未被覆盖 | `head -5 <svc>/data/codex-home/AGENTS.md` | 仍为专属角色 | 保留 | complete |
+| **§4.4 真实应答（人工）** | 三 bot 私聊 `/status` | codeVersion 一致、truthProfile 匹配 | 三者均 `889d4bd3`，truthProfile 全部匹配 | complete |
+| 单测（Phase 1 收口） | `node --test ./tests/*.test.js` | 总数只增、fail 0 | **tests 104 / pass 104 / fail 0** | complete |
+| T2.1 最终验证 | npm test；发送失败与结构化 429 模拟 | 全通过且不截短 retry_after | 108/108 pass，全部语法检查通过 | complete |
+| T2.2 SIGTERM + T2.3 inbox | isolated child/process tests + rv-prediction smoke | store flush、子进程终止、重放护栏 | 116/116 pass；rv 首批 kill/restart 通过 | complete |
+| T2.3a deployment | rv → default → strategy install; hash/log/process checks | no replay startup blockage | all 3 running, hash f3226f55, startup logs present | complete |
+| T2.4 outbox | isolated store/process tests | failed sends survive restart and notices are durable | 123/123 pass; deployment pending | complete |
+| T2.4a outbox guards | overflow/expiry/permanent/giveup/status/disk-save tests | bounded durable queue and visible counters | 129/129 pass; deployed and smoke-checked | complete |
+| T2.4b permanent-reject hotfix | structured 429/403/blocked and transport-error regressions | 133/133 pass; all syntax checks pass | complete |
+| T2.5 ack + lifecycle | manager + integration lifecycle/restart/steer tests and required checks | **145/145 pass / fail 0**; node/zsh/diff check pass | complete |
+| T2.6 upstream transient retry | structured 5xx/stream classification, no-tool same-account retry, tool-aware partial-execution guard, group-safe ack | **151/151 pass / fail 0**; node/zsh/diff check pass | complete |
+| T2.8a 跨目录实例锁热修 | 存活持有者跨 serviceRoot 拒绝、不删锁；无关 PID 与退出进程可接管；同目录重复启动拒绝 | 新增测试旧代码先失败；**163/163 pass / fail 0**，node、四项 zsh 与 diff check 通过 | complete |
+| T3.1 缓存身份优先启动 | getMe 永不返回、后台身份变化持久化并影响群消息方向、无缓存等待 | 新增 3 项测试旧代码先失败；**166/166 pass / fail 0**，`node -c`、四项 zsh 语法与 `git diff --check` 通过；三实例 app-server 创建于 1854/2275/1414 ms | complete |
+
+| T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
+| T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
+
+> 基线规则：改动后测试**总数只应增加**，`pass` 必须等于 `tests`，`fail` 必须为 0。
+
+---
+
+### T2.5 完成与灰度部署（2026-09-23）
+
+- 完成收到即确认与单条 ack 状态编辑：受理、排队、处理中、完成/失败、steer、内部重试均复用同一 requestId 与 ack；编辑至少间隔 3 秒，失败不进入 outbox。
+- 新增持久化 `telegram.activeRequests` 台账：queued 重启后安全重入队，running 重启不重跑并编辑中断提示；终态清理。outbox 延迟 ack 成功后回填 `ackMessageId`。
+- 新增接入层生命周期测试覆盖正常终态、running/queued 重启、内部重试、steer 与延迟补发回填；旧代码新增测试先失败。
+- 提交：`04a3c130714b40ce3cea584b6b212ca2544aa824`（`index.js` SHA-256 前 12 位 `e5d5ac5285ff`）。
+- 灰度顺序 rv-prediction → 观察一轮 → default → strategy-observation：三实例哈希一致、进程存活、启动日志含 `Deployed ref` / `Bridge started` / `codeVersion`；rv-prediction 完成 SIGTERM/restart smoke，重启后 `activeRequests` 为空且恢复正常轮询。
+- 人工验收待维护者执行：
+  1. 三个 bot 各发一次 `/status`，确认 `codeVersion=e5d5ac52`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。
+  2. 一个群里 @ bot 发真实消息，确认只有一条状态消息从「已收到」变化到「已完成」，正文另发。
+
+### T2.6 完成与灰度部署（2026-09-23）
+
+- 新增 `upstream_transient` 分类：优先读取结构化 HTTP 状态 / `codexErrorInfo`，文本只匹配明确上下文，不使用裸数字；未加入 `ACCOUNT_FAILOVER_PATTERNS`。
+- 仅对尚未产生工具调用的 turn 做同账号指数退避，最多两次重试；工具调用后不重跑，ack 显示「上游中断：本次任务可能已部分执行，请确认后重发」。重试耗尽显示「上游服务暂时不可用，请稍后重发」。
+- 重试沿用同一 requestId 与同一 ack；群聊失败文案为中文短句，不带上游英文或 URL。
+- 测试先在旧代码上失败（新增测试 5 项失败、1 项既有边界行为通过），修复后全套 **151/151 pass / fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- 实现提交：`859235637e374c41d3cb106a7908b5025a91ce8b`；随后补充工具 item 保守标记提交 `c7fc195b3e36b8d7a8f4376b50d92973515398dc`，最终 `index.js` SHA-256 前 12 位为 `fdae9bcf5cfa`。
+- 灰度顺序 rv-prediction → 观察一轮 → default → strategy-observation 完成；最终三实例哈希、ref、进程、启动三标记与角色文件检查通过，未发现残留 curl。
+- 人工验收待维护者执行：三个 bot 各发 `/status`，确认新 `codeVersion=fdae9bcf`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。上游 5xx 无法人工制造，重试路径需等待真实上游故障验证。
+
+## 版本与部署台账
+
+> 每次部署追加一行。**这是回滚时唯一可信的对照表** —— prod 目录里没有 `.git`，
+> 必须靠 tag + `index.js` sha256 双记录才能确认线上跑的是哪个版本（见 `task_plan.md` Decisions Made）。
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 09-02 15:30 | telegram-codex-bridge-service | 无（从工作树 rsync） | **无对应 commit** | `13fa361a50d0` | 现状基线，待 T1.4 覆盖 |
+| 09-01 13:08 | strategy-observation / rv-prediction | 无（从工作树 rsync） | **无对应 commit** | `52188e37d0ea` | 现状基线，待 T1.5 覆盖 |
+| 2026-09-21 | telegram-codex-bridge-service | main / bca12d3 | `bca12d308d23b6b40eebfd62d32de02231b3a9a8` | `889d4bd36bfc` | T1.4 灰度通过 |
+| 2026-09-21 | rv-prediction | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
+| 2026-09-21 | strategy-observation | main / 65a6f34 | `65a6f347bd2975fe2fd8b7a926f60d2a6ad3671e` | `889d4bd36bfc` | T1.5 灰度通过 |
+| 2026-09-21 | Phase 1 tag | `v0.1.1` | `8c8e8b3` | `889d4bd36bfc` | Phase 1 closeout tag |
+| — | （尚未部署） | HEAD `952675e` | `952675e` | `fff69755` | 含 T1.3 日志增补，随 Phase 2 首次部署上线 |
+| 09-22 21:56 | rv-prediction | `feat/phase-2-no-silent-failure` | `746aab7` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
+| 09-22 21:56 | default / strategy-observation | `feat/phase-2-no-silent-failure` | `d265888` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `c4d4ef4` | `ec5dd004` | ✅ 2026-09-23 `/status` 验收通过；**含 T2.4b 待修缺陷** |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3` | `3562402d` | ✅ 2026-09-23 `/status` 验收通过（T2.4b 热修） |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `04a3c13` | `e5d5ac52` | ✅ 2026-09-23 三项人工验收通过（T2.5） |
+
+| 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
+| 2026-09-22 | T2.4a rv-prediction | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy + SIGTERM/restart smoke passed |
+| 2026-09-22 | T2.4a default | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
+| 2026-09-22 | T2.4a strategy-observation | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy passed |
+| 2026-09-23 | T2.4b rv-prediction | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | gray deploy + observation passed |
+| 2026-09-23 | T2.4b default | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
+| 2026-09-23 | T2.4b strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3afdd889fd2102f3de346b0bc594c95288` | `3562402dbada` | deploy passed |
+| 2026-09-23 | T2.5 rv-prediction | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | gray deploy + SIGTERM/restart smoke passed |
+| 2026-09-23 | T2.5 default | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | observe-one-round then deploy passed |
+| 2026-09-23 | T2.5 strategy-observation | `feat/phase-2-no-silent-failure` | `04a3c130714b40ce3cea584b6b212ca2544aa824` | `e5d5ac5285ff` | deploy passed |
+| 2026-09-23 | T2.6 rv-prediction | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | gray deploy passed |
+| 2026-09-23 | T2.6 default | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | observe-one-round then deploy passed |
+| 2026-09-23 | T2.6 strategy-observation | `feat/phase-2-no-silent-failure` | `859235637e374c41d3cb106a7908b5025a91ce8b` | `97e54a1c6b2f` | deploy passed |
+| 2026-09-23 | T2.6 correction rv-prediction | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
+| 2026-09-23 | T2.6 correction default | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
+| 2026-09-23 | T2.6 correction strategy-observation | `feat/phase-2-no-silent-failure` | `c7fc195b3e36b8d7a8f4376b50d92973515398dc` | `fdae9bcf5cfa` | redeploy passed |
+| 2026-09-23 | T2.8a rv-prediction | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度与观察一轮通过 |
+| 2026-09-23 | T2.8a rv-prediction 重启 | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 成功重新取得原锁 |
+| 2026-09-23 | T2.8a default | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
+| 2026-09-23 | T2.8a strategy-observation | `feat/phase-2-no-silent-failure` | `666dd972513b2d18860375c3c1e6ee0455c1a2d2` | `be7cce0b8ad6` | 灰度通过 |
+| 2026-09-23 | Phase 2 tag | `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | 注解 tag 指向 main 的 `--no-ff` 合并提交；tag 源码哈希与线上一致 |
+| 2026-09-23 | rv-prediction | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装、观察一轮通过 |
+| 2026-09-23 | default | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装通过 |
+| 2026-09-23 | strategy-observation | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装通过 |
+| 2026-09-23 | T3.1 rv-prediction | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 1854 ms |
+| 2026-09-23 | T3.1 default | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 2275 ms |
+| 2026-09-23 | T3.1 strategy-observation | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 1414 ms |
+| 2026-09-23 | T3.2 rv-prediction | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度与观察通过；supervisor `2257af0ad696`，ready 17:20:41 +0800，start_grace=60 |
+| 2026-09-23 | T3.2 default | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度通过；supervisor `2257af0ad696`，ready 17:21:42 +0800，start_grace=60 |
+| 2026-09-23 | T3.2 strategy-observation | `feat/phase-3-restart-loop` | `6f7c70135bea2efaff833625f5fb5fbd33e41fc6` | `1eacb1e58346` | 灰度通过；supervisor `2257af0ad696`，ready 17:22:18 +0800，start_grace=60 |
+| 2026-09-23 | T3.3 rv-prediction | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度与观察通过；supervisor `2257af0ad696`，ready 17:37:54 +0800，spawn 1175 ms |
+| 2026-09-23 | T3.3 default | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度通过；supervisor `2257af0ad696`，ready 17:38:28 +0800，spawn 1955 ms |
+| 2026-09-23 | T3.3 strategy-observation | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度通过；supervisor `2257af0ad696`，ready 17:39:10 +0800，spawn 1011 ms |
+| 2026-09-23 | T3.4 rv-prediction | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:26:46 +0800、spawn 1000 ms；无恢复汇总；supervisor `2257af0ad696` |
+| 2026-09-23 | T3.4 default | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:27:48 +0800、spawn 1704 ms；无恢复汇总；supervisor `2257af0ad696` |
+| 2026-09-23 | T3.4 strategy-observation | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:28:14 +0800、spawn 1078 ms；无恢复汇总；supervisor `2257af0ad696` |
+| 2026-09-23 | T3.4b/T3.4a rv-prediction | `feat/phase-3-restart-loop` | `adbcca86c372b3b1d386acaaf1b97d2e6788be57` | `4e0985bd0bb3` | 安装与常规检查通过；ready 22:57:06 +0800，spawn 5504 ms；台账清空；auth_failing 待证实 |
+| 2026-09-23 | T3.4b/T3.4a default | `feat/phase-3-restart-loop` | `adbcca86c372b3b1d386acaaf1b97d2e6788be57` | `4e0985bd0bb3` | 安装与常规检查通过；ready 23:02:23 +0800，spawn 7707 ms；backend=ok |
+| 2026-09-23 | T3.4b/T3.4a strategy-observation | `feat/phase-3-restart-loop` | `adbcca86c372b3b1d386acaaf1b97d2e6788be57` | `4e0985bd0bb3` | 安装与常规检查通过；ready 23:03:04 +0800，spawn 2811 ms；backend=auth_failing |
+
+**回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
+
+> ⚠️ tag 核对方法：注解 tag 必须用 `git rev-list -n1 <tag>` 取所指 commit。
+> `git tag -l --format='%(objectname:short)'` 给的是 **tag 对象自身**的 sha（v0.1.1 = `72571de`），不是 commit。
+> 2026-09-22 曾因此误判 v0.1.1 为无效锚点并多打了一个 `v0.1.2`（指向 `65a6f34`，代码与 `8c8e8b3` 零差异），
+> 该冗余 tag 已删除（本地创建、从未 push）。`v0.1.0` → `3f27ff2` 为早期发布，index.js `b8d50a50`。
+
+灰度顺序不得跳步：**rv-prediction → 默认实例 → strategy-observation**。
+每批之间须确认：进程存活、`bridge.stdout.log` 出现 `Telegram Codex Bridge started.`、该实例能正常应答一次。
+
+---
+
+# Progress Log
+
+计划 `task_plan.md`，证据 `findings.md`，执行约束 `handoff_codex.md`。
+阶段状态只用 `pending` / `in_progress` / `complete`，与 `task_plan.md` 保持一致。
+**遇阻立即停止，写入下方 Error Log，不要自行扩大范围。**
+
+## Session: 2026-09-21
+
+### 调查与规划（本会话已完成，不属于 Phase 1–4）
+
+- **Status:** complete
+- **执行者：** Claude Code（longxia 机器，经 SSH `remote-mac-wukong` 读取 wukong）
+- Actions taken:
+  - 核对本机 Codex 提交的故障统计：8 项数字复算一致，3 项报偏，5 类完全漏掉（`findings.md` F2–F4）
+  - 统计 W-SVC 的 25,958 行 stderr 与 38 个 rollout，得出 turn 级失败分类与 24 个孤儿 turn（F5）
+  - 定位 9 条根因 R1–R9，全部落到具体行号（F6）
+  - 查清代码版本考古：四份副本、三个版本，双向 diff 确认工作区为严格超集（F8）
+  - 确认最高优先风险：整个多实例功能未提交且无 stash（F10）
+  - 采集改动前基线：`tests 99 / pass 99 / fail 0`（F13）
+  - 用 `init-session.sh "Bridge Reliability"` 建立本计划目录
+- Files created/modified:
+  - `.planning/2026-09-21-bridge-reliability/task_plan.md`
+  - `.planning/2026-09-21-bridge-reliability/findings.md`
+  - `.planning/2026-09-21-bridge-reliability/progress.md`
+  - `.planning/2026-09-21-bridge-reliability/handoff_codex.md`
+  - `.planning/.active_plan`（由 init 脚本写入）
+  - 删除首版 `docs/bridge-reliability/`（迁移到本目录，避免两份真相）
+- **未改动任何业务代码**：`git diff --shortstat` 保持 `9 files changed, 510 insertions(+), 27 deletions(-)`
+
+### Phase 1: 基线与版本对齐
+
+- **Status:** complete
+- **Started:** 2026-09-21
+- Actions taken:
+  - T1.1：已完成四份计划阅读；当前分支 main，原业务改动仍为 9 files / +510 / -27；未修改业务代码。
+  - 指定检查复跑：node 语法、99/99 单测、四个 zsh 语法检查均通过。
+  - 提交前快照如下（在 git add 前记录）。
+- Files created/modified:
+  - 本 progress.md、task_plan.md、findings.md（按本轮用户明确要求，只追加执行发现，保留原调查）。
+- [ ] T1.1：提交前检查遇阻，尚未 commit；T1.2–T4.7 未开始。
+- 阻塞详情：
+  - 现象：git add -A 后，对暂存新增内容做不输出具体值的扫描，发现 3 行匹配 Telegram 群 ID 格式；两份 config/instances/*.env.example 第 3 行含实际 allowlist 格式的多个标识，tests/multi-instance-launch-agent.test.js 第 43 行亦含该格式的测试值。测试值是否虚构未核实，不据此断言泄密。
+  - 已尝试：四份计划、git 状态/差异/stash/log、99 项单测及四脚本语法检查；提交前模式扫描未发现 Telegram token、sk- 格式 key 或私钥头（不代表完整凭据审计）。
+  - 卡在哪：handoff §3.3 禁止提交聊天 ID，§3.2 禁止修改任何 .env.*（T1.3 的根 .env.example 另有特定例外），§3.3 禁止改已有测试断言。需要明确允许仅把两份实例 env.example 的 allowlist 改为占位符，并确认测试第 43 行可换为显式虚构值。
+  - 影响面：未改业务代码、未提交、未部署、未重启；线上健康未另作验证。git add -A 已暂存原改动，仍含上述待处理值；不得直接提交。没有使用 reset/restore/stash 等禁用操作。
+  - 建议：批准上述最小脱敏后继续 T1.1；或由维护者完成模板脱敏并确认测试值。未自行执行任一选项。
+
+`git status --porcelain`
+```text
+ M .env.example
+ M .gitignore
+ M README.md
+ M index.js
+ M package.json
+ M scripts/install-launch-agent.sh
+ M scripts/uninstall-launch-agent.sh
+ M tests/telegram-transport-recovery.test.js
+ M tests/truth-profile.test.js
+?? .planning/
+?? AGENTS.md
+?? config/instances/
+?? docs/MULTI-INSTANCE.md
+?? docs/bridge-reliability.md
+?? tests/multi-instance-launch-agent.test.js
+```
+
+`git stash list`
+```text
+
+```
+
+`git log --oneline -3`
+```text
+884811e Harden bridge transport recovery and log rotation
+9bb7564 Harden bridge routing and turn privacy
+cb6c0b2 Auto-run Deribit strategy approval gates
+```
+
+
+### Phase 2: 消除「完全无反馈」
+
+- **Status:** complete
+- T2.1–T2.8a 清单逐项核对均已打勾，T2.3a / T2.4a / T2.4b / T2.8a 行均保留；T2.8a 三实例 `/status` 已由维护者人工确认，Phase 2 进入合并与 tag 收口。
+- Phase 2 已以 `git merge --no-ff` 并入 main；注解 tag `v0.2.0` 指向合并提交 `021139200a113d5cf1870246ed6a0c9a70abbd59`。三实例随后依序从 main 重装，`DEPLOYED_REF` 均指向该提交与 tag。
+- T2.8a（2026-09-23）：跨目录同 token 抢锁缺陷已修复并灰度部署；三实例真实 `/status` 待维护者确认，Phase 2 收口尚未执行。
+- T2.5（2026-09-23）：未完成，遇到 inbox 生命周期与重启复用 ack 的契约前提冲突，停止业务修改与部署；详见 Error Log 和末尾记录。
+- Actions taken:
+  - T2.4b completed and gray-deployed in the mandated order: rv-prediction → default → strategy-observation.
+  - All three services are running the same `index.js` SHA-256 `3562402dbada`; each `DEPLOYED_REF` points to `364e0f3` and startup logs contain `Deployed ref`, `Telegram Codex Bridge started`, and `codeVersion=3562402d`.
+  - rv-prediction observation round passed; named role files remained instance-specific and the redacted curl check showed one active long-poll child per bot with no stale duplicate.
+- Files created/modified:
+  - `index.js`, `tests/outbox.test.js`, this `progress.md`, and `task_plan.md`.
+
+### Phase 3: 修重启死循环与失联可见
+
+- **Status:** in_progress
+- Actions taken:
   - T3.4b / T3.4a 已灰度部署（2026-09-23）：代码 `adbcca8`、四份 index.js `4e0985bd0bb3`，200/200 通过；rv #023b89 已自然清台账。strategy 为 auth_failing；rv 启动后无新认证错误、仍为 ok，该额外验收未证实，不能当成账号恢复。详见末尾台账与人工验收；Next Step 为 T3.5。
   - T3.4b / T3.4a（2026-09-23）：维护者三份规划更新原样提交 `4eef88f`。认证 turn / stderr 看门狗 / 重跑请求失败统一终态、一次重跑上限、工具调用安全门、auth_failing 与私聊汇总去重已实现；重叠失联原因和本地秒级时间已修。新增 12 项测试，全套 200/200；准备灰度部署。
   - T3.4 灰度完成（2026-09-23）：提交 `8043a59` 按 rv → 观察 → default → strategy 安装；四份 index.js `8fea81fe48e7`，supervisor `2257af0ad696`；启动 1000/1704/1078 ms。三实例均已成功轮询且没有生成失联汇总；T3.4 已勾选，Next Step 为 T3.5。人工验收见末尾。
@@ -288,6 +563,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ---
 
+| 2026-09-23 T3.5 灰度门禁 | rv-prediction 安装后，脱敏计数发现 ps 中 3 个现有 bridge getUpdates curl 的 argv 仍包含 bot token；T3.5 要求部署期间任何 curl argv 不含 token，但 handoff 将 bridge TelegramApi.callOnce 改为 stdin config 明确列为 T4.8，且本轮范围不得改 bridge 汇总/发送逻辑 | 只统计数量并脱敏核对，未输出命令行/凭证；确认 supervisor 新增 curl 使用 `curl --config -`，测试覆盖其 argv 无 token；未继续安装 default/strategy | 这是 T3.5 部署门禁与“范围只到 T3.5 / T4.8 后续”之间的真实范围矛盾。停止扩范围，暂停灰度；rv 已安装本轮代码，default/strategy 保持上一版，等待维护者裁决是否单独纳入 T4.8 或放宽该门禁 |
 ## 5-Question Reboot Check
 
 | Question | Answer |
@@ -1131,3 +1407,12 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sharenla.telegram-co
 （OpenClaw 与 bridge 共用）中 `ae4ed98c…`、`28a48728…` 的 refresh token 已吊销，需在 wukong 本机终端
 `openclaw models auth login --provider openai-codex` 重新登录（OAuth 需本人在浏览器操作）；
 OpenClaw 自身配置 `~/.openclaw/openclaw.json` 当前有 9 项无法识别的配置键，登录命令可能受影响，建议单独立项。
+
+
+### T3.4c / T3.5 实现检查与灰度阻塞（2026-09-23）
+
+- T3.4c 单独提交 `5598e40`；T3.5 单独提交 `657df60`。工作树代码提交保持分开，findings.md 未改。
+- T3.4c 与 T3.5 新测试均先在旧代码失败；实现后全套 **204/204 pass、fail 0**。`node -c index.js`、四项 `zsh -n`、`git diff --check` 通过。
+- T3.5 supervisor 逻辑：读取本实例 `.env` 的 token/allowlist（只读），只向正数 chat id 发送；告警文件保存 alertedAt/failureCount/active，30 分钟内跨 supervisor 重启不重复；恢复通知成功后 active=false 但保留最后发送时间；最新 stderr 行先去 token 与 URL 查询串再截断 120 字；curl URL 通过 stdin config，参数不含 token，发送失败只记录一行。
+- rv-prediction 已安装提交 `657df607`（index.js 哈希待完整日志核对）；新 Supervisor ready/Bridge startup 已出现。安装后脱敏计数显示 3 个现有 bridge getUpdates curl 的 argv 含 token；这些是 bridge 既有 T4.8 缺陷，不是 supervisor 新 curl。按硬约束暂停 default/strategy，未伪造“任何 curl argv 无 token”通过。
+- **阻塞**：T3.5 部署门禁要求任何 curl argv 无 token；handoff 又明确 T4.8 才改 `TelegramApi.callOnce()` 为 stdin config，并要求本轮范围不改 bridge 汇总/发送逻辑。已写入 Error Log，等待维护者裁决后再继续灰度或单独开 T4.8。
