@@ -672,6 +672,35 @@ npm run install:<instance>
   - 测试「持有者已退出 → 接管」
   - 部署后：锁目录下出现 **3 个**锁文件（当前旧位置只剩 1 个）；三实例各自重启一次后仍能正常拿到锁
 
+**T2.8a 必修：跨目录启动会抢走线上的锁（已在线上）⚠️ 2026-09-23 验收发现**
+
+- 现状 `lockBelongsToThisInstance(existing, { serviceRoot })` 先要求 `existing.serviceRoot === 自己的 serviceRoot`，
+  不相等就返回 false → `acquireInstanceLock` 删掉现有锁并接管。实测（抽出函数实跑）：
+  | 场景 | 结果 |
+  |---|---|
+  | 同一 service 再启动一次 | ✅ 判为占用，拒绝 |
+  | **工作区用同一 token 启动**（findings R7：工作区 `.env` 与默认实例共用 token） | ❌ 判为陈旧，**删掉线上锁并接管** → 两个进程轮询同一 bot → 409 / 丢消息 |
+  改动前的 tmpdir 锁在这个场景下反而能拦住。T2.8 让 R7 变得更糟
+- **成因主要是规格措辞**：「T2.8 补充」写的是「确认那个进程确实是**同一个** bridge 实例」，本意是
+  「确实是一个 bridge 进程（而非 PID 被无关进程复用）」，被理解成「与我自己是同一个实例」
+- **正确判断**：锁是否仍被持有，只看**持有者本身**是否仍是一个活着的 bridge，与「我」是谁无关：
+  ```js
+  function lockHolderIsLiveBridge(existing, inspectProcess) {
+    if (!existing?.pid || !existing?.indexPath) return false;
+    const identity = inspectProcess(Number(existing.pid));
+    return Boolean(identity?.command && identity.command.includes(existing.indexPath));
+  }
+  ```
+  即：用**锁里记录的** `indexPath` 去比对持有者进程的命令行。命中 → 占用，拒绝启动（无论自己的 serviceRoot 是什么）；
+  不命中（进程已退出，或 PID 被无关进程复用）→ 陈旧，接管
+- 拒绝时的报错保留现有中文格式（含持有者 pid 与 serviceRoot）
+- **验收**：
+  - 测试「持有者是另一个 serviceRoot 下活着的 bridge，当前从工作区启动 → 拒绝，不删锁」（先在现代码上失败）
+  - 测试「持有者 PID 活着但命令行不含其 indexPath（被复用）→ 接管」
+  - 测试「持有者已退出 → 接管」
+  - 测试「同一 service 重复启动 → 拒绝」（回归）
+  - 162+ 全绿，总数只增
+
 **Phase 2 收口（T2.8 部署并经人工 `/status` 确认之后才做）**
 
 1. 确认 `task_plan.md` Phase 2 所有条目已打勾，`**Status:**` 改为 `complete`，Phase 3 改为 `pending`→ 仍 `pending`，`## Current Phase` 改为 Phase 3

@@ -840,3 +840,19 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 | 2026-09-23 | strategy-observation | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 安装成功，进程与三标记通过 |
 
 维护者确认后再做 Phase 2 收口。人工验收预期：三个 bot 各发一次 `/status`，确认 `codeVersion=8c9687df`、`outboxQueued=0`、`outboxDiscarded=0`，且 `truthProfile` 与既有基线不变。
+
+### T2.8 验收（2026-09-23）—— 迁移与 PID 复用防护落地，但发现已上线的抢锁缺陷
+
+**核实通过**：锁目录 `~/Library/Application Support/telegram-codex-bridge-locks/` 权限 `drwx------`；
+3 把锁，字段含 `pid / nonce / serviceRoot / indexPath / startedAt`，三个 pid 均对应各自 service 的 `index.js` 进程；
+**162 / 162**；四份哈希 `8c9687dfc1d5`，三份 `DEPLOYED_REF` 均 `75cbedc`。
+
+**缺陷（已上线）→ T2.8a**：`lockBelongsToThisInstance` 先比较 `existing.serviceRoot === 自己的 serviceRoot`。
+抽出函数实跑：同一 service 重复启动 → 正确拒绝；**工作区用同一 token 启动 → 判为陈旧，删掉线上锁并接管**。
+工作区 `.env` 与默认实例共用 token（R7），因此在工作区跑一次 `npm start` 即会触发两进程抢轮询。
+改动前的 tmpdir 锁反而能拦住此场景 —— T2.8 让 R7 更糟。
+
+**成因主要在规格措辞**：「确认那个进程确实是同一个 bridge 实例」被理解为「与我是同一实例」，
+本意是「确实是一个 bridge 进程，而非 PID 被复用」。
+
+**Phase 2 收口推迟**到 T2.8a 部署并经人工 `/status` 确认之后。本轮 `8c9687df` 的 `/status` 不再单独验收。
