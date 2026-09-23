@@ -79,7 +79,8 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ### Phase 2: 消除「完全无反馈」
 
-- **Status:** in_progress
+- **Status:** complete
+- T2.1–T2.8a 清单逐项核对均已打勾，T2.3a / T2.4a / T2.4b / T2.8a 行均保留；T2.8a 三实例 `/status` 已由维护者人工确认，Phase 2 进入合并与 tag 收口。
 - T2.8a（2026-09-23）：跨目录同 token 抢锁缺陷已修复并灰度部署；三实例真实 `/status` 待维护者确认，Phase 2 收口尚未执行。
 - T2.5（2026-09-23）：未完成，遇到 inbox 生命周期与重启复用 ack 的契约前提冲突，停止业务修改与部署；详见 Error Log 和末尾记录。
 - Actions taken:
@@ -871,3 +872,8 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 - 灰度严格按 rv-prediction → 观察一轮 → default → strategy-observation。rv-prediction 额外经安装脚本重启一次后成功重新取得锁。四份 `index.js` SHA-256 相同，前 12 位 `be7cce0b8ad6`；三个 `DEPLOYED_REF` 均为代码提交 `666dd97`，启动日志均有 Deployed ref、Bridge started、`codeVersion=be7cce0b`。
 - 三个 LaunchAgent 与 node bridge 进程存活；持久锁目录权限 700、正好 3 把锁，锁内 pid 均对应各自 serviceRoot 的 index.js 进程。两个命名角色文件未覆盖；curl 仅三个正常轮询子进程，无孤儿（诊断输出只打印 pid/ppid，未暴露 token）。
 - **待维护者人工验收**：三个 bot 各发 `/status`，确认 `codeVersion=be7cce0b`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 不变。Bot API 不能代用户发送，也不能用生产 token 抢 `getUpdates`。确认前保持 Phase 2 `in_progress`，不合并 main、不打 tag、不从 main 重装。
+
+### T2.8a 人工验收与 Phase 2 收口准入（2026-09-23）
+
+- 维护者已在三个 bot 各发 `/status` 并确认：`codeVersion=be7cce0b`、`outboxQueued=0`、`outboxDiscarded=0`，`truthProfile` 均不变。
+- Phase 2 清单全部打勾，含 T2.3a、T2.4a、T2.4b、T2.8a；允许按 handoff 执行 main 的 `--no-ff` 合并、`v0.2.0` tag 与 main 灰度重装。

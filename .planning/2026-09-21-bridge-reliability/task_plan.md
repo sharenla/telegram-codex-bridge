@@ -9,12 +9,11 @@
 
 ## Next Step
 
-等待维护者人工确认 T2.8a 三个 bot 的 `/status`（`codeVersion=be7cce0b`、outbox 两项为 0、truthProfile 不变）。
-确认后按 `handoff_codex.md`「Phase 2 收口」合并 main、打 `v0.2.0`，并从 main 依序重装三实例。
+Phase 2 全部任务及 T2.8a 人工 `/status` 已验收。完成 `v0.2.0` 收口后，按 Phase 3 契约从 **T3.1** 开始；本轮不实施 Phase 3 代码。
 
 ## Current Phase
 
-Phase 2
+Phase 3
 
 ## Phases
 
@@ -49,7 +48,7 @@ Phase 2
 - [x] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
 - [x] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动
 - [x] T2.8a 必修：跨目录启动会抢走线上锁（锁持有判断须看持有者自身，已在线上）
-- **Status:** in_progress
+- **Status:** complete
 
 ### Phase 3: 修重启死循环与失联可见
 
