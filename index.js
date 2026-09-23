@@ -320,6 +320,10 @@ const CLASH_CONFIG_CANDIDATES = [
   path.join(os.homedir(), ".config", "mihomo", "config.yaml"),
   path.join(os.homedir(), ".config", "clash", "config.yaml"),
 ];
+const CLASH_CONTROLLER_CONFIG_CANDIDATES = [
+  path.join(os.homedir(), "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev", "config.yaml"),
+  ...CLASH_CONFIG_CANDIDATES,
+];
 
 function isTelegramPollConflictError(error) {
   return Number(error?.body?.error_code) === 409;
@@ -542,7 +546,7 @@ function normalizeClashControllerBaseUrl(value) {
 
 function resolveClashControllerConfig({
   env = process.env,
-  configCandidates = CLASH_CONFIG_CANDIDATES,
+  configCandidates = CLASH_CONTROLLER_CONFIG_CANDIDATES,
 } = {}) {
   const groupName = String(env.TELEGRAM_CLASH_PROXY_GROUP || "Telegram").trim() || "Telegram";
   const envSocket = resolveUserPath(String(env.TELEGRAM_CLASH_CONTROLLER_SOCKET || "").trim());
@@ -632,6 +636,62 @@ function requestClashControllerJson({
     if (payload !== null) request.write(payload);
     request.end();
   });
+}
+
+function clashFailoverReason(error) {
+  const code = String(error?.code || "");
+  const message = String(error?.message || error || "");
+  if (code === "ENOENT" || /ENOENT|no such file or directory/i.test(message)) return "找不到 Clash 控制器";
+  if (/timed out|timeout|ETIMEDOUT/i.test(message)) return "Clash 控制器请求超时";
+  if (/ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|connect/i.test(`${code} ${message}`)) return "Clash 控制器不可达";
+  return "Clash 控制器不可用";
+}
+
+async function probeClashControllerAvailability(config, {
+  requestJson = requestClashControllerJson,
+  timeoutMs = 3000,
+} = {}) {
+  if (!config?.socketPath && !config?.baseUrl) {
+    return { available: false, source: config?.source || null, reason: "找不到 Clash 控制器" };
+  }
+  try {
+    await requestJson({
+      method: "GET",
+      path: "/version",
+      body: null,
+      socketPath: config.socketPath || null,
+      baseUrl: config.baseUrl || null,
+      secret: config.secret || "",
+      timeoutMs,
+    });
+    return { available: true, source: config.source || "environment" };
+  } catch (error) {
+    return {
+      available: false,
+      source: config.source || "environment",
+      reason: clashFailoverReason(error),
+    };
+  }
+}
+
+function formatClashFailoverStatus(status) {
+  if (status?.state === "available" || status?.available) {
+    return `clashFailover: available (${status.source || "unknown"})`;
+  }
+  return `clashFailover: unavailable (${status?.reason || "找不到 Clash 控制器"})`;
+}
+
+function markClashFailoverUnavailable(health, error, { logger = () => {} } = {}) {
+  if (!health || typeof health !== "object") return false;
+  if (health.clashFailover?.state === "unavailable") return false;
+  const status = {
+    state: "unavailable",
+    source: health.clashFailover?.source || null,
+    reason: clashFailoverReason(error),
+  };
+  health.clashFailover = status;
+  logger(formatClashFailoverStatus(status));
+  return true;
 }
 
 function createClashController(config, { requestJson = requestClashControllerJson } = {}) {
@@ -5192,8 +5252,6 @@ async function main() {
     console.log(
       `Telegram event-driven transport failover enabled; Clash group=${clashControllerConfig.groupName}; controller=${clashControllerConfig.socketPath ? "unix socket" : "local HTTP"}`,
     );
-  } else if (telegramTransportFailoverEnabled) {
-    console.warn("Telegram event-driven transport failover unavailable: Clash controller was not detected.");
   }
 
   const botIdentity = await resolveStartupBotIdentity({
@@ -5239,6 +5297,7 @@ async function main() {
     health.state ||= health.offlineSince ? "degraded" : "ok";
     health.offlineSince ??= 0;
     health.lastOutage ??= null;
+    health.clashFailover ||= { state: "unavailable", source: null, reason: "找不到 Clash 控制器" };
     return health;
   }
 
@@ -5340,6 +5399,41 @@ async function main() {
     initialTelegramHealth.lastPollSuccessAt = Date.now();
     store.markDirty();
     store.saveThrottled();
+  }
+
+  function updateClashFailoverStatus(status) {
+    const health = ensureTelegramHealthState();
+    const next = status?.available
+      ? { state: "available", source: status.source || "environment", reason: null }
+      : {
+        state: "unavailable",
+        source: status?.source || health.clashFailover?.source || null,
+        reason: status?.reason || "找不到 Clash 控制器",
+      };
+    const previous = health.clashFailover || {};
+    const changed = previous.state !== next.state
+      || previous.source !== next.source
+      || previous.reason !== next.reason;
+    health.clashFailover = next;
+    if (changed) {
+      console.warn(formatClashFailoverStatus(next));
+      store.markDirty();
+      store.save({ force: true });
+    }
+  }
+
+  if (typeof telegramTransportFailoverEnabled === "undefined") {
+    // Health-only test harnesses evaluate this function block without startup dependencies.
+  } else if (!telegramTransportFailoverEnabled || !clashControllerConfig) {
+    updateClashFailoverStatus({ available: false, reason: "找不到 Clash 控制器" });
+  } else {
+    void probeClashControllerAvailability(clashControllerConfig, { timeoutMs: 3000 })
+      .then(updateClashFailoverStatus)
+      .catch(error => updateClashFailoverStatus({
+        available: false,
+        source: clashControllerConfig.source,
+        reason: clashFailoverReason(error),
+      }));
   }
 
   function ensureCodexBackendHealthState() {
@@ -9699,6 +9793,7 @@ async function main() {
           `autoCompact: ${autoCompact ? "on" : "off"} (soft ${formatPercent(contextThresholds.soft)}, hard ${formatPercent(contextThresholds.hard)}, emergency ${formatPercent(contextThresholds.emergency)})`,
           `telegramPolling: ${buildPollingStatusLine()}`,
           `telegramState: ${ensureTelegramHealthState().state}`,
+          formatClashFailoverStatus(ensureTelegramHealthState().clashFailover),
           `offlineSince: ${ensureTelegramHealthState().offlineSince || "(none)"}`,
           `lastOutage: ${ensureTelegramHealthState().lastOutage ? JSON.stringify(ensureTelegramHealthState().lastOutage) : "(none)"}`,
           `codexBackend: ${buildCodexBackendStatusLine()}`,
@@ -9995,7 +10090,7 @@ async function main() {
         if (shutdown.closing) return;
         const health = recordTelegramPollError(err);
         console.error("Polling error:", err.message);
-        if (telegramTransportRecovery) {
+        if (telegramTransportRecovery && ensureTelegramHealthState().clashFailover?.state === "available") {
           const recovery = await telegramTransportRecovery.maybeRecover({
             error: err,
             consecutiveErrors: health.consecutivePollErrors,
@@ -10011,8 +10106,23 @@ async function main() {
             store.markDirty();
             store.save({ force: true });
           }
+          if (recovery.reason === "recovery-error") {
+            updateClashFailoverStatus({
+              available: false,
+              source: clashControllerConfig?.source,
+              reason: clashFailoverReason(recovery.error),
+            });
+          }
           if (recovery.recovered) {
             continue;
+          }
+        } else if (telegramTransportRecovery && ensureTelegramHealthState().clashFailover?.state === "unavailable") {
+          const clashStatus = ensureTelegramHealthState().clashFailover;
+          if (!clashStatus.skipLoggedAt) {
+            clashStatus.skipLoggedAt = Date.now();
+            console.warn(`${formatClashFailoverStatus(clashStatus)}；跳过自动换节点`);
+            store.markDirty();
+            store.save({ force: true });
           }
         }
         await sleep(Math.min(30_000, 2000 * 2 ** Math.min(health.consecutivePollErrors - 1, 4)));
@@ -10177,6 +10287,9 @@ module.exports = {
     CodexAppServer,
     TelegramApi,
     resolveClashControllerConfig,
+    probeClashControllerAvailability,
+    formatClashFailoverStatus,
+    markClashFailoverUnavailable,
     createClashController,
     isTelegramTransportRecoveryError,
     recoverTelegramTransport,
