@@ -9,9 +9,8 @@
 
 ## Next Step
 
-执行 **T2.7**：`server_overloaded` 从切号逻辑拆出。规格见 `handoff_codex.md` T2.7 与「T2.7 补充」——
-同号退避重试（沿用 T2.6 的工具调用判定），用尽后**建议**换模型，**不自动换模型、不切号**。
-T2.6（`fdae9bcf`）的 §4.4 验收已于 2026-09-23 完成，无并行待办。
+执行 **T2.8**：实例锁迁出 `os.tmpdir()`，修好防重复启动。规格见 `handoff_codex.md` T2.8。
+T2.7（`84ba0072`）的灰度部署已于 2026-09-23 完成；模型满载线上效果待真实故障发生时验证。
 
 ## Current Phase
 
@@ -47,7 +46,7 @@ Phase 2
 - [x] T2.4b 热修：`_isPermanentReject` 自由文本 403 匹配会误丢消息（2026-09-23 完成并灰度部署）
 - [x] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
 - [x] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
-- [ ] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
+- [x] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
 - [ ] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动
 - **Status:** in_progress
 

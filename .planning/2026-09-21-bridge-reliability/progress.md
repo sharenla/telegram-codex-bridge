@@ -770,3 +770,33 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 | §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot 均 `codeVersion=fdae9bcf` |
 
 上游 5xx 的重试路径仅有测试覆盖，线上效果待真实故障发生时验证。
+
+### T2.7 验收（2026-09-23）—— 代码检查与灰度部署通过
+
+| 检查项 | 结果 |
+|---|---|
+| 满载分类 | ✅ 结构化 `codexErrorInfo=server_overloaded` 优先；无结构化字段时仅以 `Selected model is at capacity` 兜底 |
+| 切号边界 | ✅ `ACCOUNT_FAILOVER_PATTERNS` 已移除 `/capacity/i`、`/overloaded/i`；`usageLimitExceeded`、429、quota、usage limit、billing 仍保留 |
+| 重试安全 | ✅ 复用 T2.6 的 `turnHasToolActivity`；无工具调用同号最多重试 2 次，有工具调用不重试并提示可能已部分执行 |
+| 重试用尽 | ✅ ack 改为建议稍后重发或使用 `/model`，不自动换模型、不修改 session model |
+| 测试 | ✅ **158 / 158 / fail 0**；新增 `tests/model-overloaded.test.js`，旧代码先失败后通过 |
+| 指定检查 | ✅ `node -c`、四项 `zsh -n`、`git diff --check` 全部通过 |
+| 四份哈希 | ✅ 工作区与三实例均为 `84ba00725886` |
+| 三实例进程 | ✅ LaunchAgent 存活；启动日志均有 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=84ba0072` |
+| 角色文件 | ✅ rv-prediction 与 strategy-observation 的实例角色文件未被覆盖 |
+| curl | ✅ 仅每个 bridge 进程各自一个 `getUpdates` 长轮询子进程，无孤儿残留（输出已脱敏） |
+
+模型满载无法安全人为制造，线上重试与建议换模型的真实路径待维护者遇到实际 `server_overloaded` 故障时观察。
+
+### T2.7 灰度部署台账（2026-09-23）
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-23 | rv-prediction | `feat/phase-2-no-silent-failure` | `7b5045d9db0edda38bd6c8c2ef21e33f9a31e9c3` | `84ba00725886` | ✅ 安装成功，观察一轮通过 |
+| 2026-09-23 | default | `feat/phase-2-no-silent-failure` | `7b5045d9db0edda38bd6c8c2ef21e33f9a31e9c3` | `84ba00725886` | ✅ 安装成功，进程与三标记通过 |
+| 2026-09-23 | strategy-observation | `feat/phase-2-no-silent-failure` | `7b5045d9db0edda38bd6c8c2ef21e33f9a31e9c3` | `84ba00725886` | ✅ 安装成功，进程与三标记通过 |
+
+维护者部署后人工验收：
+
+1. 三个 bot 各发一次 `/status`，确认 `codeVersion=84ba0072`、`outboxQueued=0`、`outboxDiscarded=0`，且 `truthProfile` 不变。
+2. 模型满载无法人为制造；发生真实 `server_overloaded` 时确认同账号最多重试 2 次、不会切号，最终 ack 给出 `/model` 建议。
