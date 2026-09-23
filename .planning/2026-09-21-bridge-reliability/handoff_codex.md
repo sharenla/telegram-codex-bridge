@@ -524,9 +524,45 @@ npm run install:<instance>
   按热修处理，**排在 T2.5 之前**，修完走完整灰度三批 + 人工 `/status`
 
 **T2.5 收到即确认 + 编辑同一条**（R2 / R6 / R9 的共同兜底）
-- 受理消息后立刻回「已收到，正在处理」，带短 `requestId`；此后状态变化**编辑这一条**
-- **不做**定时进度推送。只在状态真实变化时更新，并设最小间隔
-- 验收：单测覆盖「ack 发出 → 同一 message_id 被多次编辑」
+> 2026-09-23 细化。原规格只有三行，Codex 需要猜的地方太多。
+
+- **目标**：用户发出一条会进入 Codex 的消息后，几秒内必然看到一条「已收到」；之后所有状态变化都**编辑这一条**，不新发
+- **什么时候发 ack**：只在消息真正进入 Codex turn 的路径上发（`startOrSteerTurn` 或其排队分支）。以下**不发**：
+  - 群里未 @ bot、也不是 reply 给 bot 的消息（`group_text_not_directed`，本来就不处理）
+  - `/status`、`/help`、`/model` 这类即时命令 —— 它们自己马上就回，再加 ack 是噪音
+  - 未授权 chat（已有自己的提示）
+- **ack 文案与状态**（中文，一行，短）：
+  | 状态 | 文案示例 |
+  |---|---|
+  | 受理 | `⏳ 已收到，正在处理（#a1b2）` |
+  | 排队 | `🕒 已收到，前面还有 N 个任务，排队中（#a1b2）` |
+  | 开始执行 | `⚙️ 正在处理（#a1b2）` |
+  | 完成 | `✅ 已完成（#a1b2）` |
+  | 失败 | `❌ 处理失败（#a1b2）：<简短原因>` |
+  `#a1b2` 是短 requestId（4–6 位），同时写进日志，方便事后按 requestId 对账
+- **只在状态真实变化时编辑，并设最小间隔**：同一条 ack 两次编辑之间 ≥ 3 秒；间隔内的变化只保留最后一个状态，到点再编辑。
+  **不做定时进度推送**（现网已有 5 次 429 + 88 次 editMessageText 失败）
+- **最终回答照旧单独发**：Codex 的正文回复仍按现有逻辑发送；ack 只负责状态，完成时改成 `✅ 已完成`，不要把正文塞进 ack
+- **ack 自己也要可靠**：
+  - 首次发送 ack 走 outbox（`priority: "notice"`），发不出去也会补发
+  - 把 ack 的 `message_id` 记进对应的 inbox 条目（新字段 `ackMessageId`）
+  - editMessageText 失败**不入 outbox、不重试到天荒地老**：失败就记 errorClass 跳过，下一次状态变化再试；
+    `message is not modified` 当作成功
+- **重放（`isReplay: true`）时不重复 ack**：inbox 条目里已有 `ackMessageId` 就编辑那条，改成 `🔁 服务重启后继续处理（#a1b2）`；
+  没有（ack 当初就没发出去）才新发
+- **群聊脱敏**：失败原因在群里只给中文短句，不带路径、命令、原始英文报错（沿用现有 `sanitizeGroupAgentText` / 群聊脱敏逻辑）；
+  完整中文错误码表是 T4.4 的事，这里不展开
+- **不做**：不删除 ack 消息；不做定时推送；不改正文回复的发送逻辑；不碰 T2.6 / T2.7 的错误分类
+- **验收**：
+  - 单测「进入 turn 的消息先发 ack，且 ack 走 outbox」
+  - 单测「即时命令与未被 @ 的群消息不发 ack」
+  - 单测「状态依次变化时编辑的是同一个 message_id，且两次编辑间隔 ≥ 3 秒、间隔内只保留最后状态」
+  - 单测「完成 → ✅，失败 → ❌ + 简短原因；群聊失败原因已脱敏」
+  - 单测「重放时有 ackMessageId 则编辑原 ack，无则新发」
+  - 单测「editMessageText 失败不抛出、不入 outbox；message is not modified 视为成功」
+  - 133+ 全绿，总数只增
+  - **人工验收**（部署后由维护者执行）：在一个群里 @ bot 发一条真实消息，确认先出现「已收到」，
+    之后状态在**同一条消息**上变化，最终变成「已完成」，正文回复另外出现；全程只有一条状态消息
 
 **T2.6 上游 5xx / 流中断自动重试**（F5，27 个失败中的 13 个，目前零重试）
 - 新增 `upstream_transient` 分类，匹配 `stream disconnected`、`502`、`503`、`Hard affinity owner account is unavailable`、`No available accounts`、`proxy rejected connection`、`Codex upstream stream failed`；同账号指数退避重试 2–3 次后再报错

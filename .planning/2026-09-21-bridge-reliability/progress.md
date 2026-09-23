@@ -155,6 +155,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 09-22 21:56 | rv-prediction | `feat/phase-2-no-silent-failure` | `746aab7` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
 | 09-22 21:56 | default / strategy-observation | `feat/phase-2-no-silent-failure` | `d265888` | `f3226f55` | ✅ 2026-09-22 `/status` 验收通过 |
 | 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `c4d4ef4` | `ec5dd004` | ✅ 2026-09-23 `/status` 验收通过；**含 T2.4b 待修缺陷** |
+| 09-23 | rv-prediction → default → strategy-observation | `feat/phase-2-no-silent-failure` | `364e0f3` | `3562402d` | ✅ 2026-09-23 `/status` 验收通过（T2.4b 热修） |
 
 | 2026-09-22 | Phase 2 first deployment | rv-prediction `746aab7`; default/strategy `d265888` | `f3226f5555d4` | `f3226f5555d4` | T2.3a smoke/deploy complete |
 | 2026-09-22 | T2.4a rv-prediction | branch / c4d4ef4 | `c4d4ef42d00059e1874eb2c3805fd54797b6fabd` | `ec5dd00482c0` | deploy + SIGTERM/restart smoke passed |
@@ -654,3 +655,17 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 - 三个 LaunchAgent/bridge 进程存活；三份启动日志均有 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=3562402d`；两个命名实例角色文件未被覆盖。
 - 脱敏 curl 检查显示每个 bot 一个活动的 `getUpdates` 长轮询，无残留旧进程。
 - 人工 `/status` 仍需维护者执行：预期 `codeVersion=3562402d`、`outboxQueued=0`、`outboxDiscarded=0`，且各实例 `truthProfile` 与既有基线不变；不要调用 Bot API `getUpdates` 验收。
+
+### T2.4b 验收（2026-09-23）—— 通过，线上已确认
+
+| 检查项 | 结果 |
+|---|---|
+| 误判用例实跑 | ✅ 429「retry after 403」→ 可重试；传输层「after 403 ms」→ 可重试；真 403 → 永久；chat not found → 永久 |
+| 测试先失败后通过 | ✅ 旧代码上 4 个新测试失败 3 个，符合预期 |
+| 测试 | ✅ **133 / 133 / fail 0** |
+| 四份哈希 | ✅ `3562402dbada`，三份 `DEPLOYED_REF` 均 `364e0f3` |
+| 清单 | ✅ T2.4a 行保留，T2.4b 已勾，未删行 |
+| §4.4 真实应答 | ✅ 2026-09-23 人工确认：`codeVersion=3562402d`、`outboxQueued=0`、`outboxDiscarded=0`、truthProfile 不变 |
+
+与规格的一处出入（可接受）：`body` 存在但无 `description` 时回退到整条消息做描述匹配。
+只在 `body` 存在时可达，传输层错误碰不到；为保留既有 chat-not-found 测试而加，无需返工。
