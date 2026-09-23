@@ -95,6 +95,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 - **Status:** in_progress
 - Actions taken:
+  - T3.4 灰度完成（2026-09-23）：提交 `8043a59` 按 rv → 观察 → default → strategy 安装；四份 index.js `8fea81fe48e7`，supervisor `2257af0ad696`；启动 1000/1704/1078 ms。三实例均已成功轮询且没有生成失联汇总；T3.4 已勾选，Next Step 为 T3.5。人工验收见末尾。
   - T3.4（2026-09-23）：维护者三份规划文件原样单独提交 `4279e79`。新增恢复汇总、延迟消息 ack 注记、正常关闭记录；网络恢复复用 T3.3 lastOutage，进程恢复使用启动前 lastPollSuccessAt。新增 12 项测试（先复现缺失与接入失败），全套 188/188；准备灰度部署。
   - T3.3 灰度完成（2026-09-23）：代码提交 `32d1202` 按 rv → 观察 → default → strategy 安装；四份 index.js `5334599a2dad`，supervisor 保持 `2257af0ad696`；appServerSpawnedMs 为 1175/1955/1011。检查与人工验收见末尾 T3.3 记录；Next Step 指向 T3.4。
   - T3.3（2026-09-23）：规划更新原样提交 `d36b4d8`。移除 pollingLoop 的卡死时长重启分支；`requestSupervisorRestart` 全仓只有该调用，移除后无其他调用方，故删除函数、私有标志与两项旧阈值。新增 30/90 秒状态迁移、失联起点/恢复时长持久化、2/4/8/16/30 秒退避与 `/status` 三字段；176/176 通过，准备灰度部署。Clash 调用条件、supervisor、现有 restartReason 清理逻辑未改。
@@ -245,6 +246,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | T3.3 rv-prediction | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度与观察通过；supervisor `2257af0ad696`，ready 17:37:54 +0800，spawn 1175 ms |
 | 2026-09-23 | T3.3 default | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度通过；supervisor `2257af0ad696`，ready 17:38:28 +0800，spawn 1955 ms |
 | 2026-09-23 | T3.3 strategy-observation | `feat/phase-3-restart-loop` | `32d12021739efd67539697a8b0a8bdadd53e1030` | `5334599a2dad` | 灰度通过；supervisor `2257af0ad696`，ready 17:39:10 +0800，spawn 1011 ms |
+| 2026-09-23 | T3.4 rv-prediction | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:26:46 +0800、spawn 1000 ms；无恢复汇总；supervisor `2257af0ad696` |
+| 2026-09-23 | T3.4 default | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:27:48 +0800、spawn 1704 ms；无恢复汇总；supervisor `2257af0ad696` |
+| 2026-09-23 | T3.4 strategy-observation | `feat/phase-3-restart-loop` | `8043a591792a8127c85509893b886536f688cac5` | `8fea81fe48e7` | 灰度通过；ready 18:28:14 +0800、spawn 1078 ms；无恢复汇总；supervisor `2257af0ad696` |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 
@@ -1015,3 +1019,28 @@ T3.4 已改为基于 `offlineSince` / `lastOutage`（网络失联）与 `lastPol
 - date 与 recoveryNote 跟随 inbox、activeRequests 持久化，ack 初次发送和后续编辑均保留注记，沿用原 3 秒节流。汇总准备记录、确定性的 outbox requestId 与完成入队记录防止重启后重复排队；实际发送成功后写 lastOutageNotifiedAt 及该 outbox 条目的已送达标记；若随后在出队前退出，重启后只清理条目、不再次发送（新增测试先失败后修复）。部分私聊入队后保存失败，也可从准备记录继续，测试覆盖已送达收件人不重复。
 - 测试红阶段：首项因缺少恢复管理器失败；接入三项分别因 date 丢失、关机记录缺失、生产 pollingLoop 未调用汇总失败。之后新增边界、错误映射、部分入队恢复测试；全套 188/188，旧测试文件与断言均未修改。检查：node -c index.js；node --test ./tests/*.test.js；四项 zsh -n；git diff --check。
 - 灰度与人工验收记录待部署后补齐。网络类 A 的真实验证留待下一次网络故障；不主动断生产网络。
+
+
+### T3.4 灰度部署与待人工验收（2026-09-23）
+
+- 实现提交 `8043a591792a8127c85509893b886536f688cac5`。先 rv-prediction，观察约一轮成功轮询（PID 76735 未变，lastPollSuccessAt 从 1790159191612 推进到 1790159249564），再 default、strategy-observation。三个安装命令均成功；代码在 feat/phase-3-restart-loop，未 push。
+- 四份 index.js SHA-256：`8fea81fe48e733e6d89532ea94faed00bee617ea17f7b8dda61acc09974d21e5`，codeVersion=`8fea81fe`。四份 supervisor SHA-256：`2257af0ad696d0690572737e0875d5d326339fcb4acacb1a0c7e9959f7d41ee2`。
+- 本次 Supervisor ready 分别为 **18:26:46 / 18:27:48 / 18:28:14（UTC+8）**，均含 start_grace=60；Deployed ref 指向上述提交，Bridge started/codeVersion 齐全，appServerSpawnedMs 为 **1000 / 1704 / 1078**。三个 bridge 的 supervisor 父进程与 app-server 子进程正常；3 把锁对应各自 PID/indexPath，命名实例角色文件与源文件哈希相同。最终只有三个正常 getUpdates curl 子进程，无残留孤儿或测试进程，诊断先脱敏。
+- 最终三实例 lastPollSuccessAt 均晚于本次启动；本地 store 显示 telegramState=ok、offlineSince=0、outboxQueued=0、outboxDiscarded=0。lastShutdown 已消费清除，恢复汇总队列为空；对照部署前快照，lastOutageNotifiedAt/lastRecoveryNotice 未变化（均未设置），本次启动日志没有 telegram_recovery_notice_queued。由此确认本次短部署没有生成或发送恢复汇总。这不替代真实聊天验收。
+- 已逐项核对 Phase 1/2 完成项与 T3.1–T3.4 均勾选、T3.5/T3.6 未勾选，全部任务行和顺序保留；Next Step 指向 T3.5。
+
+**人工验收 1：三个 bot 各发 `/status`**
+
+确认 `codeVersion=8fea81fe`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`，`truthProfile` 与上次验收一致。这里只核对了本地 store/日志，未代替维护者发消息或调用 getUpdates。
+
+**人工验收 2：维护者在 wukong 演练进程停机 B 类**
+
+```sh
+launchctl bootout gui/$(id -u)/com.sharenla.telegram-codex-bridge.rv-prediction
+# 等约 3 分钟；期间可给 @Codex_RV_bot 私聊发一条消息。
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sharenla.telegram-codex-bridge.rv-prediction.plist
+```
+
+预期：allowlist 私聊收到一条 rv-prediction 的失联汇总，时长约 3 分钟，原因为「服务进程停止运行（正常关闭）」；停机期间那条消息的原 ack 带「服务刚恢复，这条消息在 X 分钟前发出」，之后编辑仍在同一条 ack 上；群聊不收到独立汇总。该演练未由 Codex 执行。A 类网络恢复等待下一次真实断网。
+
+剩余边界：Telegram 已接收发送请求、但成功响应或本地送达标记尚未落盘就崩溃时，沿用既有 outbox 的至少一次投递语义，仍可能重复；送达标记已落盘后的重启已覆盖去重测试，不扩大为全局 exactly-once 协议。汇总中的 N 仅为首个恢复批次，后续批次受影响消息仍有 ack 注记。

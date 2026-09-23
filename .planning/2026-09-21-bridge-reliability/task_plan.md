@@ -9,10 +9,10 @@
 
 ## Next Step
 
-执行 **T3.4**：恢复后告知失联时长与原因。规格已于 2026-09-23 改写（见 `handoff_codex.md`「T3.4 改写」）：
-网络失联用 T3.3 的 `lastOutage`，进程停机用启动时「现在 − 上次成功轮询」加关机记录；
-受影响消息的 ack 附「服务刚恢复」说明，维护者私聊收汇总；**不做全群广播**；阈值 2 分钟。
-T3.3 §4.4 验收已于 2026-09-23 完成。
+执行 **T3.5**：supervisor 兜底直发，按 handoff_codex.md 规格推进。
+T3.4 已完成实现、188/188 检查与 rv-prediction → 观察 → default → strategy-observation 灰度部署；
+codeVersion=`8fea81fe`。维护者仍需完成 progress.md 中的三 bot `/status` 与 rv-prediction 约 3 分钟停机演练；
+网络失联 A 类线上验证等待真实故障。
 
 ## Current Phase
 
@@ -58,7 +58,7 @@ Phase 3
 - [x] T3.1 调整启动顺序：先起 app-server，或用缓存 botIdentity 起步
 - [x] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
 - [x] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
-- [ ] T3.4 恢复后播报失联时长与原因（网络失联用 lastOutage；进程停机用上次成功轮询时间 + 关机记录；2026-09-23 因 restartReason 已不再写入而改写）
+- [x] T3.4 恢复后播报失联时长与原因（网络失联用 lastOutage；进程停机用上次成功轮询时间 + 关机记录；2026-09-23 因 restartReason 已不再写入而改写）
 - [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
 - [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
 - **Status:** in_progress
