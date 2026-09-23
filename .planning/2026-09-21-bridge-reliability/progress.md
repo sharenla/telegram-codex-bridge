@@ -93,11 +93,26 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ### Phase 3: 修重启死循环与失联可见
 
-- **Status:** pending
+- **Status:** in_progress
 - Actions taken:
-  -
+  - T3.1：main 上原样提交维护者的三份规划文件（`ddec91b`），建立 `feat/phase-3-restart-loop`；新增测试先在旧代码上失败，再实现缓存身份优先、后台 getMe 校验、身份变化持久化与实时方向判断。
+  - 不移动 `startCodexServer()`；在实际 app-server 子进程创建后打印 `appServerSpawnedMs`。代码提交 `bfb8c79f4785fe848dfca32b41ad50faffb7c73f`，`index.js` SHA-256 前 12 位 `1eacb1e58346`。
+  - 按 rv-prediction → 观察一轮 → default → strategy-observation 灰度安装。三实例启动计时分别为 **1854 / 2275 / 1414 ms**，均远小于 15000 ms；部署后三者轮询成功、错误计数 0。四份 `index.js` 哈希一致，三个 bridge 进程与各自锁 PID 对应，命名角色文件哈希与源文件一致；仅有三条由各自 bridge 持有的正常 getUpdates curl，没有残留孤儿进程。
 - Files created/modified:
-  -
+  - `index.js`、新增 `tests/startup-bot-identity.test.js`、本 `progress.md`、`task_plan.md`；`findings.md` 未改。
+
+#### T3.1 启动前 await 审计（至 app-server 子进程创建）
+
+| 等待点 | 可能访问网络 | 处理与边界 |
+|--------|--------------|------------|
+| `await discoverChatIds(telegram)` | 是，Telegram getMe/getUpdates | 仅显式 `--discover-chat-id` 诊断模式执行，随即退出；正常 LaunchAgent 启动路径不会进入。 |
+| `await resolveStartupBotIdentity(...)` | 有缓存时 getMe 在后台访问 Telegram；无缓存时等待 Telegram getMe | 有完整缓存立即返回并并行校验，getMe 永不返回也不挡 app-server；首次安装无缓存仍等待，由 T3.2 启动宽限期兜底。 |
+| `await startCodexServer()` 内 `await server.start()` | 否 | 仅本地 spawn；`appServerSpawnedMs` 在子进程创建后立即记录。 |
+| `await startCodexServer()` 内 `await server.initialize()` | 可能等待 app-server 的 IPC 响应；此时子进程已创建 | 位于 spawn 之后，不影响 supervisor 的 15 秒子进程检测；未改 Codex 初始化协议。 |
+
+此外，启动前的 `outbox.flush()` 可能访问 Telegram，但以 `void` 后台运行、未被 await；桌面上下文同步、账号资料读取和初始 profile 写入均为本地同步操作。`ensureHealthyStartupAccount()` 在 `startCodexServer()` 返回后后台执行，可能访问 chatgpt.com/codex-lb，不在创建子进程前的等待链上。函数定义内部的其余 `await` 仅在后续消息/恢复事件触发时执行。
+
+维护者人工验收待执行：三个 bot 各发一次 `/status`，应看到 `codeVersion=1eacb1e5`、`outboxQueued=0`、`outboxDiscarded=0`、`truthProfile` 与部署前一致。未调用生产 token 的 getUpdates 或模拟用户消息验证真实应答。
 
 ### Phase 4: 错误分类与可观测指标
 
@@ -138,6 +153,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | T2.5 ack + lifecycle | manager + integration lifecycle/restart/steer tests and required checks | **145/145 pass / fail 0**; node/zsh/diff check pass | complete |
 | T2.6 upstream transient retry | structured 5xx/stream classification, no-tool same-account retry, tool-aware partial-execution guard, group-safe ack | **151/151 pass / fail 0**; node/zsh/diff check pass | complete |
 | T2.8a 跨目录实例锁热修 | 存活持有者跨 serviceRoot 拒绝、不删锁；无关 PID 与退出进程可接管；同目录重复启动拒绝 | 新增测试旧代码先失败；**163/163 pass / fail 0**，node、四项 zsh 与 diff check 通过 | complete |
+| T3.1 缓存身份优先启动 | getMe 永不返回、后台身份变化持久化并影响群消息方向、无缓存等待 | 新增 3 项测试旧代码先失败；**166/166 pass / fail 0**，`node -c`、四项 zsh 语法与 `git diff --check` 通过；三实例 app-server 创建于 1854/2275/1414 ms | complete |
 
 | T1.1 执行前复验 | node -c index.js；node --test ./tests/*.test.js | 99/99，fail 0 | 语法通过；tests 99 / pass 99 / fail 0，417ms | complete |
 | T1.6 chat 绑定迁移 | node -c/index.js；node --test ./tests/*.test.js | 101/101，无真实 ID | 101/101 pass；grep 未在产品代码/跟踪测试配置中找到旧 ID | complete |
@@ -211,6 +227,9 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 | 2026-09-23 | rv-prediction | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装、观察一轮通过 |
 | 2026-09-23 | default | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装通过 |
 | 2026-09-23 | strategy-observation | `main` / `v0.2.0` | `021139200a113d5cf1870246ed6a0c9a70abbd59` | `be7cce0b8ad6` | main 重装通过 |
+| 2026-09-23 | T3.1 rv-prediction | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 1854 ms |
+| 2026-09-23 | T3.1 default | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 2275 ms |
+| 2026-09-23 | T3.1 strategy-observation | `feat/phase-3-restart-loop` | `bfb8c79f4785fe848dfca32b41ad50faffb7c73f` | `1eacb1e58346` | 灰度与轮询观察通过；spawn 1414 ms |
 
 **回滚锚点：`v0.1.1`** → commit `8c8e8b3`，index.js `889d4bd3` —— 经 2026-09-22 线上 `/status` 验收。
 

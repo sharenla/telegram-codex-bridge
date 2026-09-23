@@ -9,8 +9,7 @@
 
 ## Next Step
 
-开 Phase 3 分支 `feat/phase-3-restart-loop`，执行 **T3.1**：bot 身份改为「先用缓存、后台校验」，
-不再让 getMe 阻塞 app-server 启动；并列出启动路径上其余可能的网络阻塞点。规格见 `handoff_codex.md`「T3.1 补充」。
+在 `feat/phase-3-restart-loop` 执行 **T3.2**：supervisor 增加启动宽限期与连续强杀退避。规格见 `handoff_codex.md`。
 
 ## Current Phase
 
@@ -53,13 +52,13 @@ Phase 3
 
 ### Phase 3: 修重启死循环与失联可见
 
-- [ ] T3.1 调整启动顺序：先起 app-server，或用缓存 botIdentity 起步
+- [x] T3.1 调整启动顺序：先起 app-server，或用缓存 botIdentity 起步
 - [ ] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
 - [ ] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
 - [ ] T3.4 恢复后播报失联时长与积压数；`restartReason` 先消费再清空
 - [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
 - [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
-- **Status:** pending
+- **Status:** in_progress
 
 ### Phase 4: 错误分类与可观测指标
 
