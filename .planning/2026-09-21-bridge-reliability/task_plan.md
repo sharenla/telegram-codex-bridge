@@ -9,13 +9,7 @@
 
 ## Next Step
 
-执行 **T2.5**：`TelegramOutbox._isPermanentReject` 对整条错误消息做
-自由文本 `403` 匹配，实测会把「429 且 retry_after=403」与「传输层 timed out after 403 ms」
-误判为永久拒绝，导致回复被**静默永久丢弃**。
-改为只在 `error.body` 存在时判定（传输层失败永不算永久），并只对 `body.description` 做描述匹配。
-详见 `handoff_codex.md` T2.4b。**不回滚**，修完走完整灰度三批 + 人工 `/status`，之后再进 T2.5。
-
-`ec5dd004` 的 §4.4 真实应答验收已于 2026-09-23 完成。
+执行 **T2.5**：收到即确认（ack）+ 后续状态编辑同一条消息。T2.4b 已完成并按 rv-prediction → default → strategy-observation 灰度部署；维护者仍需人工确认三实例 `/status` 的 `codeVersion=3562402d`、`outboxQueued=0`、`outboxDiscarded=0` 与原 `truthProfile` 不变。
 
 ## Current Phase
 
