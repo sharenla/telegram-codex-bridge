@@ -110,11 +110,10 @@ const ACCOUNT_FAILOVER_PATTERNS = [
   /too many requests/i,
   /quota/i,
   /usage limit/i,
+  /usageLimitExceeded/i,
   /usage cap/i,
   /limit reached/i,
   /insufficient quota/i,
-  /capacity/i,
-  /overloaded/i,
   /billing/i,
 ];
 function shouldUseBridgeAccountFailover({ autoAccountFailover, accountProfilesLength, codexLbEnabled } = {}) {
@@ -144,6 +143,8 @@ const UPSTREAM_TRANSIENT_PATTERNS = [
 ];
 const UPSTREAM_TRANSIENT_ERROR_CLASS = "upstream_transient";
 const MAX_UPSTREAM_RETRIES = 2;
+const MODEL_OVERLOADED_ERROR_CLASS = "server_overloaded";
+const MODEL_CAPACITY_PATTERNS = [/Selected model is at capacity/i];
 
 function extractUpstreamStructuredStatus(value) {
   const candidates = [
@@ -191,6 +192,29 @@ function classifyUpstreamTransientError(value) {
   return UPSTREAM_TRANSIENT_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+function extractCodexErrorInfo(value) {
+  const candidates = [
+    value?.codexErrorInfo,
+    value?.error?.codexErrorInfo,
+    value?.rpcError?.data?.codexErrorInfo,
+  ];
+  return candidates.find((candidate) => candidate !== undefined && candidate !== null && candidate !== "");
+}
+
+function classifyServerOverloadedError(value) {
+  const info = extractCodexErrorInfo(value);
+  if (info !== undefined) {
+    if (typeof info === "string") return info === MODEL_OVERLOADED_ERROR_CLASS;
+    if (info && typeof info === "object") {
+      return [info.code, info.type, info.errorClass, info.kind, info.name]
+        .some((candidate) => String(candidate || "") === MODEL_OVERLOADED_ERROR_CLASS);
+    }
+    return false;
+  }
+  const text = extractUpstreamFailureText(value);
+  return MODEL_CAPACITY_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function isToolActivityItem(item) {
   if (!item?.type) return false;
   return !["agentMessage", "reasoning", "plan", "userMessage"].includes(item.type);
@@ -206,20 +230,42 @@ function turnHasToolActivity(turn, runtime = null) {
   return items.some(isToolActivityItem);
 }
 
-async function retryUpstreamTurn({ turn, retryCount = 0, toolActivity = false, maxRetries = 3, sleep: sleepFn = sleep, onRetry = async () => {} } = {}) {
-  if (!classifyUpstreamTransientError(turn)) return { retry: false, transient: false };
-  if (toolActivity || turnHasToolActivity(turn)) return { retry: false, transient: true, errorClass: UPSTREAM_TRANSIENT_ERROR_CLASS, partialExecution: true };
-  if (retryCount >= maxRetries) return { retry: false, transient: true, errorClass: UPSTREAM_TRANSIENT_ERROR_CLASS, exhausted: true };
+async function retryClassifiedTurn({
+  turn,
+  retryCount = 0,
+  toolActivity = false,
+  maxRetries = 3,
+  classifier = classifyUpstreamTransientError,
+  errorClass = UPSTREAM_TRANSIENT_ERROR_CLASS,
+  sleep: sleepFn = sleep,
+  onRetry = async () => {},
+} = {}) {
+  if (!classifier(turn)) return { retry: false, transient: false };
+  if (toolActivity || turnHasToolActivity(turn)) return { retry: false, transient: true, errorClass, partialExecution: true };
+  if (retryCount >= maxRetries) return { retry: false, transient: true, errorClass, exhausted: true };
   const nextRetryCount = retryCount + 1;
   await sleepFn(Math.min(30_000, 3_000 * (2 ** (nextRetryCount - 1))));
   await onRetry(nextRetryCount);
-  return { retry: true, transient: true, errorClass: UPSTREAM_TRANSIENT_ERROR_CLASS, nextRetryCount };
+  return { retry: true, transient: true, errorClass, nextRetryCount };
+}
+
+async function retryUpstreamTurn(args = {}) {
+  return retryClassifiedTurn({
+    ...args,
+    classifier: classifyUpstreamTransientError,
+    errorClass: UPSTREAM_TRANSIENT_ERROR_CLASS,
+  });
 }
 
 function formatUpstreamFailureForChat({ requestId, partialExecution = false, group = false } = {}) {
   const suffix = requestId ? `（#${requestId}）` : "";
   if (partialExecution) return `❌ 上游中断${suffix}：本次任务可能已部分执行，请确认后重发`;
   return `❌ 上游服务暂时不可用${suffix}，请稍后重发`;
+}
+
+function formatModelBusyForChat({ requestId, retryCount = 0 } = {}) {
+  const suffix = requestId ? `（#${requestId}）` : "";
+  return `❌ 当前模型繁忙${suffix}：已重试 ${Math.max(0, Number(retryCount || 0))} 次仍未成功。可以稍后重发，或用 /model 换一个模型后重发`;
 }
 
 const CONTEXT_FAILURE_PATTERNS = [
@@ -2051,6 +2097,8 @@ class TelegramAckManager {
     if (status === "upstreamRetry") return `🔁 上游暂时不可用，正在重试（第 ${Math.max(1, Number(position || 1))} 次）${suffix}`;
     if (status === "upstreamPartial") return `❌ 上游中断${suffix}：本次任务可能已部分执行，请确认后重发`;
     if (status === "upstreamUnavailable") return `❌ 上游服务暂时不可用${suffix}，请稍后重发`;
+    if (status === "modelRetry") return `🔁 当前模型繁忙，正在重试（第 ${Math.max(1, Number(position || 1))} 次）${suffix}`;
+    if (status === "modelBusy") return formatModelBusyForChat({ requestId: state.requestId, retryCount: position });
     if (status === "replay") return `🔁 服务重启后继续处理${suffix}`;
     if (status === "interrupted") return `⚠️ 服务重启，这条任务已中断，请确认后重发${suffix}`;
     return `⏳ 已收到，正在处理${suffix}`;
@@ -5870,6 +5918,45 @@ async function main() {
     });
   }
 
+  async function retryTurnAfterModelOverloaded({ chatId, session, rt, turn }) {
+    const turnMeta = getTurnInputMeta(rt, turn?.id);
+    const retryCount = Number(turnMeta?.modelRetryCount || 0);
+    const retryable = Boolean(turnMeta?.text && !turnMeta?.silent && !isCompactionTurnKind(turnMeta?.kind));
+    if (!retryable) return { retry: false, transient: false };
+    return retryClassifiedTurn({
+      turn,
+      retryCount,
+      toolActivity: turnHasToolActivity(turn, rt),
+      classifier: classifyServerOverloadedError,
+      errorClass: MODEL_OVERLOADED_ERROR_CLASS,
+      maxRetries: MAX_UPSTREAM_RETRIES,
+      sleep: async (delayMs) => {
+        const ack = turnMeta?.acks?.[0] || turnMeta?.ack || null;
+        await ackManager?.update(ack, "modelRetry", { position: retryCount + 1 });
+        await sleep(delayMs);
+      },
+      onRetry: async (nextRetryCount) => {
+        const ack = turnMeta?.acks?.[0] || turnMeta?.ack || null;
+        await startOrSteerTurn({
+          chatId,
+          session,
+          text: turnMeta?.text,
+          ack,
+          kind: turnMeta?.kind || "user",
+          silent: Boolean(turnMeta?.silent),
+          contextRetryCount: Number(turnMeta?.contextRetryCount || 0),
+          authReplayCount: Number(turnMeta?.authReplayCount || 0),
+          threadRetryCount: Number(turnMeta?.threadRetryCount || 0),
+          upstreamRetryCount: Number(turnMeta?.upstreamRetryCount || 0),
+          modelRetryCount: nextRetryCount,
+          attemptedProfileIds: turnMeta?.attemptedProfileIds || [],
+          skipBackendRecoveryWait: true,
+          skipAccountSelection: true,
+        });
+      },
+    });
+  }
+
   async function retryTurnAfterAuthFailure({ chatId, rt, turn }) {
     if (rt.failoverInProgress) return false;
     if (!isAccountAuthFailureTurn(turn)) return false;
@@ -6287,23 +6374,38 @@ async function main() {
         }
 
         if (status !== "completed") {
-          const upstreamResult = await retryTurnAfterUpstreamTransient({ chatId, session, rt, turn });
-          const authRetried = upstreamResult.transient
+          const modelBusyResult = await retryTurnAfterModelOverloaded({ chatId, session, rt, turn });
+          const upstreamResult = modelBusyResult.transient
+            ? { retry: false, transient: false }
+            : await retryTurnAfterUpstreamTransient({ chatId, session, rt, turn });
+          const specialTransient = modelBusyResult.transient || upstreamResult.transient;
+          const authRetried = specialTransient
             ? false
             : await retryTurnAfterAuthFailure({ chatId, rt, turn });
-          const retried = upstreamResult.transient || authRetried
+          const retried = specialTransient || authRetried
             ? false
             : await retryTurnAfterUsageLimit({ chatId, session, rt, turn });
-          const contextRetried = upstreamResult.transient || authRetried || retried
+          const contextRetried = specialTransient || authRetried || retried
             ? false
             : await retryTurnAfterContextFailure({ chatId, session, rt, turn });
-          if (!upstreamResult.retry && !authRetried && !retried && !contextRetried) {
+          if (!modelBusyResult.retry && !upstreamResult.retry && !authRetried && !retried && !contextRetried) {
             if (compactionTurnKind) {
               rt.compactionInProgress = false;
               rt.postCompactionRetryTask = null;
               const rawDetail = extractTurnErrorText(turn);
               const detail = rawDetail ? truncateMiddle(rawDetail, 1200) : null;
-              const text = upstreamResult.partialExecution || upstreamResult.exhausted
+              const text = modelBusyResult.partialExecution
+                ? formatUpstreamFailureForChat({
+                    requestId: turnMeta?.acks?.[0]?.requestId || turnMeta?.ack?.requestId,
+                    partialExecution: true,
+                    group: isGroupChat(chatId),
+                  })
+                : modelBusyResult.exhausted
+                ? formatModelBusyForChat({
+                    requestId: turnMeta?.acks?.[0]?.requestId || turnMeta?.ack?.requestId,
+                    retryCount: Number(turnMeta?.modelRetryCount || MAX_UPSTREAM_RETRIES),
+                  })
+                : upstreamResult.partialExecution || upstreamResult.exhausted
                 ? formatUpstreamFailureForChat({
                     requestId: turnMeta?.acks?.[0]?.requestId || turnMeta?.ack?.requestId,
                     partialExecution: Boolean(upstreamResult.partialExecution),
@@ -6316,7 +6418,12 @@ async function main() {
                   : `Context compaction ${status}. Staying on the current thread.`;
               await telegram.sendMessage({ chat_id: chatId, text });
             } else if (!silentTurn) {
-              if (!upstreamResult.transient) {
+              if (modelBusyResult.partialExecution) {
+                // The same safety rule as upstream failures: once tools ran,
+                // never replay the turn automatically.
+              } else if (modelBusyResult.exhausted) {
+                // The ack below carries the actionable change-model guidance.
+              } else if (!upstreamResult.transient) {
                 const rawDetail = extractTurnErrorText(turn);
                 const detail = shouldRedactCodexTurnOutput(chatId) ? sanitizeGroupAgentText(rawDetail) : rawDetail;
                 const hint = isRemoteCompactTransportFailureText(rawDetail)
@@ -6334,7 +6441,11 @@ async function main() {
             }
             if (!authRetried && !retried && !contextRetried) {
               for (const ack of turnMeta?.acks || (turnMeta?.ack ? [turnMeta.ack] : [])) {
-                if (upstreamResult.partialExecution) await ackManager?.update(ack, "upstreamPartial");
+                if (modelBusyResult.partialExecution) await ackManager?.update(ack, "upstreamPartial");
+                else if (modelBusyResult.exhausted) await ackManager?.update(ack, "modelBusy", {
+                  position: Number(turnMeta?.modelRetryCount || MAX_UPSTREAM_RETRIES),
+                });
+                else if (upstreamResult.partialExecution) await ackManager?.update(ack, "upstreamPartial");
                 else if (upstreamResult.exhausted) await ackManager?.update(ack, "upstreamUnavailable");
                 else await ackManager?.update(ack, "failed", {
                   reason: isGroupChat(chatId) ? "上游处理失败" : truncateMiddle(extractTurnErrorText(turn) || "执行未完成", 120),
@@ -8039,6 +8150,7 @@ async function main() {
     authReplayCount = 0,
     threadRetryCount = 0,
     upstreamRetryCount = 0,
+    modelRetryCount = 0,
     skipAccountSelection = false,
     skipBackendRecoveryWait = false,
     ignoreWorkspaceLock = false,
@@ -8064,6 +8176,7 @@ async function main() {
       authReplayCount,
       threadRetryCount,
       upstreamRetryCount,
+      modelRetryCount,
       ack,
     };
 
@@ -8311,6 +8424,7 @@ async function main() {
           authReplayCount: Number(pendingMeta?.authReplayCount || authReplayCount || 0),
           threadRetryCount: Number(pendingMeta?.threadRetryCount || threadRetryCount || 0) + 1,
           upstreamRetryCount: Number(pendingMeta?.upstreamRetryCount || upstreamRetryCount || 0),
+          modelRetryCount: Number(pendingMeta?.modelRetryCount || modelRetryCount || 0),
           skipBackendRecoveryWait: true,
           skipAccountSelection,
         });
@@ -9571,11 +9685,16 @@ module.exports = {
     shouldEmitAuthWatchdogFromStderr,
     isAccountFailoverText,
     classifyUpstreamTransientError,
+    classifyServerOverloadedError,
     UPSTREAM_TRANSIENT_ERROR_CLASS,
+    MODEL_OVERLOADED_ERROR_CLASS,
+    MODEL_CAPACITY_PATTERNS,
     MAX_UPSTREAM_RETRIES,
     turnHasToolActivity,
+    retryClassifiedTurn,
     retryUpstreamTurn,
     formatUpstreamFailureForChat,
+    formatModelBusyForChat,
     shouldUseBridgeAccountFailover,
     isAccessExpiryExpired,
     isAccountProfileAccessExpired,
