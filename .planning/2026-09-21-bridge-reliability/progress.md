@@ -813,3 +813,30 @@ T2.2 / T2.3 / T2.3a 的线上验收至此完整闭合：代码一致（哈希）
 | 四份哈希 | ✅ `84ba00725886`，三份 `DEPLOYED_REF` 均 `7b5045d` |
 | 清单 | ✅ T2.1–T2.7 全部打勾，无删行 |
 | §4.4 真实应答 | ✅ 2026-09-23 人工确认三个 bot 均 `codeVersion=84ba0072` |
+
+### T2.8 验收（2026-09-23）—— 锁迁移与灰度部署通过，等待人工 `/status`
+
+| 检查项 | 结果 |
+|---|---|
+| 持久锁目录 | ✅ `~/Library/Application Support/telegram-codex-bridge-locks/`，权限 700；旧 `os.tmpdir()` 锁未触碰 |
+| 锁身份 | ✅ 锁记录 pid、startedAt、随机 nonce、serviceRoot、indexPath；持有判断校验实际进程命令行，PID 复用不会误占 |
+| 陈旧锁测试 | ✅ 无关存活进程视为陈旧并接管；持有者退出后可接管；同实例存活时拒绝并报告 pid/serviceRoot |
+| 测试 | ✅ **162 / 162 / fail 0**；新增 `tests/instance-lock.test.js`，旧代码先失败后通过 |
+| 指定检查 | ✅ `node -c`、四项 `zsh -n`、`git diff --check` 全部通过 |
+| 四份哈希 | ✅ 工作区与三实例均为 `8c9687dfc1d5` |
+| 三实例进程 | ✅ LaunchAgent 与 node bridge 进程均存活；启动日志有 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=8c9687df` |
+| 角色文件 | ✅ rv-prediction 与 strategy-observation 角色文件未覆盖 |
+| 锁数量 | ✅ 灰度完成后持久目录正好 3 把锁，分别对应三个 serviceRoot |
+| rv 重启 smoke | ✅ rv-prediction 重装/重启后仍成功获取同一锁名，目录无重复锁 |
+| curl | ✅ 仅三个 bridge 各自一个 `getUpdates` 长轮询子进程，无孤儿残留（输出已脱敏） |
+
+### T2.8 灰度部署台账（2026-09-23）
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-23 | rv-prediction | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 安装、锁创建与重启 smoke 通过 |
+| 2026-09-23 | rv-prediction（重启） | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 同一锁名重新获取，单锁保持 |
+| 2026-09-23 | default | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 安装成功，进程与三标记通过 |
+| 2026-09-23 | strategy-observation | `feat/phase-2-no-silent-failure` | `75cbedc265ce63f8e0cfa45cb187d3b772223aa2` | `8c9687dfc1d5` | ✅ 安装成功，进程与三标记通过 |
+
+维护者确认后再做 Phase 2 收口。人工验收预期：三个 bot 各发一次 `/status`，确认 `codeVersion=8c9687df`、`outboxQueued=0`、`outboxDiscarded=0`，且 `truthProfile` 与既有基线不变。

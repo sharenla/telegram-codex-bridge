@@ -49,7 +49,7 @@ Phase 2
 - [x] T2.5 收到即确认（ack）+ 后续状态编辑同一条消息
 - [x] T2.6 上游 5xx / 流中断自动重试（新增 `upstream_transient` 分类）
 - [x] T2.7 `server_overloaded` 从切号逻辑拆出，改同号退避 + 建议换模型
-- [ ] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动
+- [x] T2.8 实例锁迁出 `os.tmpdir()`，修好防重复启动
 - **Status:** in_progress
 
 ### Phase 3: 修重启死循环与失联可见
