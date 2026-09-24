@@ -1613,3 +1613,18 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
   **重启了整个 bridge**（`Bridge app-server unhealthy for 3 checks; restarting; consecutive=1; next_grace=120`）。
   结果可用，但：① 空档期新消息可能被报错或丢到重启后；② 白白计一次强杀、下一轮宽限期升到 120 秒；
   ③ T4.9 规格前提「下一条消息到来时会重新拉起」与代码不符（该处 `waitForCodexBackendRecovery` 在 `codex` 为空时直接抛错）→ **T4.9a**
+
+### T4.9a Test Results
+
+| Test | Actual | Status |
+|---|---|---|
+| T4.9a restart/queue/ack regressions | 新增 8 项，旧代码先失败；全套 219/219 pass、fail 0 | complete |
+| Required syntax and diff checks | node -c、四个 zsh -n、git diff --check 全部通过 | complete |
+
+### T4.9a 实现与检查（2026-09-24）
+
+- 非预期 app-server 退出后，无论是否有排队任务都立即进入自拉流程；认证失败退出仍只交给 T3.4b，不重复自拉。
+- 自拉采用“初次立即 + 1 秒 / 5 秒 / 30 秒”三次退避重试；第四次启动仍失败时收尾排队请求为「❌ Codex 后端暂时无法启动，请稍后重发（#id）」并停止自拉，交 supervisor 接管。成功启动后恢复正常队列处理。
+- 拉起期间到达的新消息选择**排队等拉起**：ack 为「⚙️ 后端正在重启，稍后自动处理（#id）」；消息进入现有 pendingTasks/activeRequests，成功后继续执行，失败时统一中文收尾。选择理由：复用现有持久队列，避免丢消息和新增第二套生命周期。
+- 新增 tests/app-server-restart.test.js，旧代码先红后绿；全套 **219/219 pass / fail 0**；node -c、四项 zsh -n、git diff --check 通过。
+- 代码与测试文件：index.js、tests/app-server-restart.test.js。

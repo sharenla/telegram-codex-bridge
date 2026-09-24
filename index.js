@@ -146,6 +146,27 @@ const UPSTREAM_TRANSIENT_ERROR_CLASS = "upstream_transient";
 const MAX_UPSTREAM_RETRIES = 2;
 const MODEL_OVERLOADED_ERROR_CLASS = "server_overloaded";
 const MODEL_CAPACITY_PATTERNS = [/Selected model is at capacity/i];
+const CODEX_RESTART_BACKOFF_MS = [1000, 5000, 30000];
+
+function getCodexRestartDelayMs(retryIndex) {
+  return CODEX_RESTART_BACKOFF_MS[Math.max(0, Number(retryIndex) || 0)] || CODEX_RESTART_BACKOFF_MS.at(-1);
+}
+
+async function retryCodexServerStart(start, { wait = sleep, onExhausted = async () => {} } = {}) {
+  for (let retry = 0; retry <= CODEX_RESTART_BACKOFF_MS.length; retry += 1) {
+    if (retry > 0) await wait(getCodexRestartDelayMs(retry - 1));
+    try {
+      await start();
+      return true;
+    } catch (error) {
+      if (retry === CODEX_RESTART_BACKOFF_MS.length) {
+        await onExhausted(error);
+        return false;
+      }
+    }
+  }
+  return false;
+}
 
 function extractUpstreamStructuredStatus(value) {
   const candidates = [
@@ -2394,6 +2415,7 @@ class TelegramAckManager {
     if (status === "replay") return `🔁 服务重启后继续处理${suffix}`;
     if (status === "interrupted") return `⚠️ 服务重启，这条任务已中断，请确认后重发${suffix}`;
     if (status === "backendInterrupted") return `⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发${suffix}`;
+    if (status === "backendRestarting") return `⚙️ 后端正在重启，稍后自动处理${suffix}`;
     return `⏳ 已收到，正在处理${suffix}`;
   }
 
@@ -2560,7 +2582,7 @@ class TelegramActiveRequests {
 }
 
 async function handleAppServerExitRequests({
-  expected = false, activeRequests, ackManager, runtimeByChat = new Map(), clearTurnState = () => {}, restartQueued = async () => {}, authFailure = false,
+  expected = false, activeRequests, ackManager, runtimeByChat = new Map(), clearTurnState = () => {}, restartQueued = async () => {}, restartBackend = null, authFailure = false,
 }) {
   if (expected) return;
   for (const entry of [...activeRequests.list()]) {
@@ -2573,6 +2595,10 @@ async function handleAppServerExitRequests({
   if (authFailure) return;
   for (const [chatId, rt] of runtimeByChat) {
     if (rt.activeTurnId || rt.pendingInputMeta) clearTurnState(chatId, rt);
+  }
+  if (restartBackend) {
+    await restartBackend();
+    return;
   }
   if (!authFailure && (activeRequests.list().some(entry => entry.state === "queued")
     || [...runtimeByChat.values()].some(rt => (rt.pendingTasks || []).length > 0))) {
@@ -5177,6 +5203,7 @@ async function discoverChatIds(telegram) {
 async function main() {
   const processStartedAt = PROCESS_STARTED_AT;
   let codex = null;
+  let codexRestartPromise = null;
   const deployedRefPath = path.join(__dirname, "DEPLOYED_REF");
   if (fs.existsSync(deployedRefPath)) {
     console.log(`Deployed ref: ${fs.readFileSync(deployedRefPath, "utf8").trim().replace(/\n/g, " ")}`);
@@ -6786,31 +6813,7 @@ async function main() {
         runtimeByChat,
         authFailure: Boolean(authFailure),
         clearTurnState: (chatId, rt) => clearInterruptedTurnState(chatId, rt),
-        restartQueued: async () => {
-          await startCodexServer();
-          const startedRequestIds = new Set();
-          for (const [chatId, rt] of runtimeByChat.entries()) {
-            const session = getOrCreateSession(chatId);
-            while (await maybeStartQueuedTask({ chatId, session })) {
-              const current = activeRequests.list().find(entry => entry.state === "running" && entry.chatId === chatId);
-              if (current) startedRequestIds.add(current.requestId);
-            }
-          }
-          for (const entry of activeRequests.list().filter(item => item.state === "queued")) {
-            if (startedRequestIds.has(entry.requestId)) continue;
-            const ack = ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry);
-            const session = getOrCreateSession(entry.chatId);
-            activeRequests.update(entry.requestId, { state: "running" });
-            await startOrSteerTurn({
-              chatId: entry.chatId,
-              session,
-              text: entry.text,
-              kind: entry.kind || "user",
-              ack,
-              skipBackendRecoveryWait: true,
-            });
-          }
-        },
+        restartBackend: restartCodexAfterUnexpectedExit,
       }).catch(error => console.error("Failed handling app-server exit:", error));
     });
     server.onNotification(async (msg) => {
@@ -8663,6 +8666,62 @@ async function main() {
     return true;
   }
 
+  async function finishQueuedTasksAfterCodexRestart({ failed = false } = {}) {
+    if (failed) {
+      for (const entry of activeRequests.list().filter(item => item.state === "queued")) {
+        const ack = ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry);
+        await ackManager.update(ack, "failed", { reason: "Codex 后端暂时无法启动，请稍后重发" });
+        activeRequests.remove(entry.requestId);
+      }
+      for (const rt of runtimeByChat.values()) clearPendingTasks(rt);
+      return;
+    }
+
+    const startedRequestIds = new Set();
+    for (const [chatId, rt] of runtimeByChat.entries()) {
+      const session = getOrCreateSession(chatId);
+      while (await maybeStartQueuedTask({ chatId, session })) {
+        const current = activeRequests.list().find(entry => entry.state === "running" && entry.chatId === chatId);
+        if (current) startedRequestIds.add(current.requestId);
+      }
+    }
+    for (const entry of activeRequests.list().filter(item => item.state === "queued")) {
+      if (startedRequestIds.has(entry.requestId)) continue;
+      const ack = ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry);
+      const session = getOrCreateSession(entry.chatId);
+      activeRequests.update(entry.requestId, { state: "running" });
+      await startOrSteerTurn({
+        chatId: entry.chatId,
+        session,
+        text: entry.text,
+        kind: entry.kind || "user",
+        ack,
+        skipBackendRecoveryWait: true,
+      });
+    }
+  }
+
+  async function restartCodexAfterUnexpectedExit() {
+    if (codexRestartPromise) return codexRestartPromise;
+    codexRestartPromise = retryCodexServerStart(
+      startCodexServer,
+      {
+        wait: async delayMs => sleep(delayMs),
+        onExhausted: async error => {
+          console.error(`Codex app-server self-restart exhausted: ${error.message || error}`);
+          await finishQueuedTasksAfterCodexRestart({ failed: true });
+        },
+      },
+    ).then(async started => {
+      if (!started) return false;
+      await finishQueuedTasksAfterCodexRestart();
+      return true;
+    }).finally(() => {
+      codexRestartPromise = null;
+    });
+    return codexRestartPromise;
+  }
+
   async function startOrSteerTurn({
     chatId,
     session,
@@ -9315,16 +9374,17 @@ async function main() {
       const rt = getRuntime(chatId);
       const busy = isChatBusy(rt);
       const steering = Boolean(rt.activeTurnId && message?.chat?.type === "private");
+      const backendRestarting = Boolean(codexRestartPromise);
       const requestId = inboxItem?.requestId || makeToken().slice(0, 6);
       if (inboxItem) inboxItem.requestId = requestId;
-      const ackStatus = steering ? "steer" : busy ? "queued" : "accepted";
+      const ackStatus = steering ? "steer" : backendRestarting ? "backendRestarting" : busy ? "queued" : "accepted";
       const active = activeRequests.list().find(entry => entry.requestId === requestId)
         || activeRequests.create({
           requestId,
           chatId,
           ackMessageId: Number(inboxItem?.ackMessageId || 0) || null,
           recoveryNote: inboxItem?.recoveryNote || "",
-          state: steering ? "running" : busy ? "queued" : "running",
+          state: steering || (!backendRestarting && !busy) ? "running" : "queued",
           text: turnText,
           kind: options.kind || "user",
           replayCount: Number(inboxItem?.replayCount || 0),
@@ -9337,6 +9397,10 @@ async function main() {
         initialStatus: ackStatus,
         position: busy && !steering ? getQueuedTaskCount(rt) + 1 : null,
       });
+      if (backendRestarting && !steering) {
+        enqueuePendingTask(rt, turnText, ack);
+        return ack;
+      }
       try {
         await startOrSteerTurn({ ...options, chatId, session, text: turnText, ack });
       } catch (err) {
@@ -10231,6 +10295,8 @@ module.exports = {
     MODEL_OVERLOADED_ERROR_CLASS,
     MODEL_CAPACITY_PATTERNS,
     MAX_UPSTREAM_RETRIES,
+    getCodexRestartDelayMs,
+    retryCodexServerStart,
     turnHasToolActivity,
     retryClassifiedTurn,
     retryUpstreamTurn,
