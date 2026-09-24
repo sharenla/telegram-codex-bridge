@@ -2393,6 +2393,7 @@ class TelegramAckManager {
     if (status === "modelBusy") return formatModelBusyForChat({ requestId: state.requestId, retryCount: position });
     if (status === "replay") return `🔁 服务重启后继续处理${suffix}`;
     if (status === "interrupted") return `⚠️ 服务重启，这条任务已中断，请确认后重发${suffix}`;
+    if (status === "backendInterrupted") return `⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发${suffix}`;
     return `⏳ 已收到，正在处理${suffix}`;
   }
 
@@ -2555,6 +2556,27 @@ class TelegramActiveRequests {
     const previous = this.list().length;
     this.store.data.telegram.activeRequests = this.list().filter(item => item.requestId !== requestId);
     if (this.list().length !== previous) this.store.save({ force: true });
+  }
+}
+
+async function handleAppServerExitRequests({
+  expected = false, activeRequests, ackManager, runtimeByChat = new Map(), clearTurnState = () => {}, restartQueued = async () => {}, authFailure = false,
+}) {
+  if (expected) return;
+  for (const entry of [...activeRequests.list()]) {
+    if (entry.state !== "running") continue;
+    const ack = ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry);
+    ack.backendExitTerminal = true;
+    if (!authFailure) await ackManager.update(ack, "backendInterrupted");
+    activeRequests.remove(entry.requestId);
+  }
+  if (authFailure) return;
+  for (const [chatId, rt] of runtimeByChat) {
+    if (rt.activeTurnId || rt.pendingInputMeta) clearTurnState(chatId, rt);
+  }
+  if (!authFailure && (activeRequests.list().some(entry => entry.state === "queued")
+    || [...runtimeByChat.values()].some(rt => (rt.pendingTasks || []).length > 0))) {
+    await restartQueued();
   }
 }
 
@@ -6756,6 +6778,40 @@ async function main() {
         code,
         signal,
       });
+      if (codex === server) codex = null;
+      void handleAppServerExitRequests({
+        expected: false,
+        activeRequests,
+        ackManager,
+        runtimeByChat,
+        authFailure: Boolean(authFailure),
+        clearTurnState: (chatId, rt) => clearInterruptedTurnState(chatId, rt),
+        restartQueued: async () => {
+          await startCodexServer();
+          const startedRequestIds = new Set();
+          for (const [chatId, rt] of runtimeByChat.entries()) {
+            const session = getOrCreateSession(chatId);
+            while (await maybeStartQueuedTask({ chatId, session })) {
+              const current = activeRequests.list().find(entry => entry.state === "running" && entry.chatId === chatId);
+              if (current) startedRequestIds.add(current.requestId);
+            }
+          }
+          for (const entry of activeRequests.list().filter(item => item.state === "queued")) {
+            if (startedRequestIds.has(entry.requestId)) continue;
+            const ack = ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry);
+            const session = getOrCreateSession(entry.chatId);
+            activeRequests.update(entry.requestId, { state: "running" });
+            await startOrSteerTurn({
+              chatId: entry.chatId,
+              session,
+              text: entry.text,
+              kind: entry.kind || "user",
+              ack,
+              skipBackendRecoveryWait: true,
+            });
+          }
+        },
+      }).catch(error => console.error("Failed handling app-server exit:", error));
     });
     server.onNotification(async (msg) => {
       const { method, params } = msg;
@@ -10147,6 +10203,7 @@ module.exports = {
     TelegramOutbox,
     TelegramAckManager,
     TelegramActiveRequests,
+    handleAppServerExitRequests,
     getOutboxStatus,
     installGracefulShutdown,
     terminateChild,

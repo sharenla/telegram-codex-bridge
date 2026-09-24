@@ -136,6 +136,13 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ---
 
+### Phase 4: 中文反馈补全与收尾
+
+- **Status:** in_progress
+- **T4.9 实现：** app-server 非预期退出时，running activeRequests 的 ack 改为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」并移出台账；queued 条目保留，主动重启后端并继续队列；expected 退出不触发；认证失败退出交由 T3.4b 恢复流程，同时不遗留 running 台账。
+- **测试：** 新增 tests/app-server-exit.test.js 四项回归；旧路径先失败，修复后全套 **215/215 pass / fail 0**。
+- **部署：** 待提交后按 rv-prediction → 观察一轮 → default → strategy-observation 灰度。
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
