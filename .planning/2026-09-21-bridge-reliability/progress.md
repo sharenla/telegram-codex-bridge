@@ -1740,3 +1740,16 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - supervisor 父进程 curl 数量为 `0 / 0 / 0`，其中含 token 数量均为 0；bridge curl 仅报告数量 `1 / 1 / 1`，未打印命令行。未触碰真实 `.env`、凭证、Clash 配置、service/store 文件。
 - **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=72d6d4ed`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变。
 - **T4.4b rv 私聊演练**：维护者在 rv 私聊发送 `/stop`（无进行中任务），预期收到「当前没有进行中的任务」；若有排队任务，预期追加「已清空排队的 N 条」。不修改线上审批或其他配置。
+
+### T4.4 终态收尾修正与重装（2026-09-24，UTC+8）
+
+- 复核发现额度耗尽路径必须把现有 ack 置为 `failed` 终态，不能只追加生命周期行；追加 commit `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` 修正并清理活动台账。全套测试仍 **242/242 pass，fail 0**。
+- 按相同灰度顺序重新安装，确保三实例运行修正后的 commit：
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|
+| 2026-09-24 16:53 | rv-prediction | `feat/phase-4-feedback-completion` | `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` | `7de573603454` | `7a7878924997` | ✅ 重装通过；appServerSpawnedMs=1061 |
+| 2026-09-24 16:54 | default | `feat/phase-4-feedback-completion` | `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` | `7de573603454` | `7a7878924997` | ✅ 重装通过；appServerSpawnedMs=2059 |
+| 2026-09-24 16:54 | strategy-observation | `feat/phase-4-feedback-completion` | `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` | `7de573603454` | `7a7878924997` | ✅ 重装通过；appServerSpawnedMs=1227 |
+
+- 三实例本次日志均有 `Deployed ref`、`Supervisor ready ... start_grace=60`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=7de57360`；进程与 3 把锁正常。supervisor 父进程 curl 数量 `0 / 0 / 0`，bridge curl 仅计数 `1 / 1 / 1`。
