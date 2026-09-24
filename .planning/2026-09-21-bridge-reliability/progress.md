@@ -1784,3 +1784,16 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - `scripts/rotate-bridge-logs.sh` 将 `launchd.stdout.log` 与 `launchd.stderr.log` 纳入现有大小、压缩、保留数量、过期清理和总容量上限规则；`--needs-rotation` 也会检查这两份活动日志。
 - 新增日志轮转测试覆盖两份 launchd 日志的压缩轮转；测试先在旧脚本上失败后通过。全套 **248/248 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
 - T4.6 已完成，Next Step 为 T4.7；未修改 findings.md。
+
+### T4.4c / T4.8 / T4.6 灰度部署（2026-09-24，UTC+8）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | rotate 脚本 sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|---|
+| 2026-09-24 17:55 | rv-prediction | `feat/phase-4-feedback-completion` | `e1c6972278fd83c9a190fbd98c4d84e8880cdee8` | `354e8adab3ec` | `7a7878924997` | `3108f0a206dd` | ✅ 首批观察通过；appServerSpawnedMs=1139 |
+| 2026-09-24 17:57 | default | `feat/phase-4-feedback-completion` | `e1c6972278fd83c9a190fbd98c4d84e8880cdee8` | `354e8adab3ec` | `7a7878924997` | `3108f0a206dd` | ✅ 第二批观察通过；appServerSpawnedMs=1775 |
+| 2026-09-24 17:57 | strategy-observation | `feat/phase-4-feedback-completion` | `e1c6972278fd83c9a190fbd98c4d84e8880cdee8` | `354e8adab3ec` | `7a7878924997` | `3108f0a206dd` | ✅ 第三批观察通过；appServerSpawnedMs=1095 |
+
+- 三实例启动日志均含本次 `Deployed ref`、`Supervisor ready ... start_grace=60`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=354e8ada`；3 把锁、进程和命名角色文件均匹配，rotate 脚本安装副本哈希一致。
+- supervisor 父进程 curl 数量为 `0 / 0 / 0`，bridge curl 仅计数 `1 / 1 / 1`，未打印命令行。最终 `ps -Ao args | grep -c "api.telegram.org/bot[0-9]"` 为 **0**。rv 首批计数 2、default 批次计数 1 均由尚未重装的旧实例 curl 产生，重装后归零；未发现新代码泄露 token。
+- **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=354e8ada`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变。
+- T4.8 不需要真实消息演练；维护者可复核最终 token argv 计数为 0。T4.6 可在下一次日志超过阈值时观察 `launchd.stdout.log` / `launchd.stderr.log` 与 bridge 日志遵循同一轮转规则。
