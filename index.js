@@ -2419,8 +2419,9 @@ class TelegramAckManager {
   _text(state, status, reason = "", position = null) {
     const text = this._baseText(state, status, reason, position);
     const withRecovery = state.recoveryNote ? `${text}\n${state.recoveryNote}` : text;
-    return state.stallNotice && (status === "processing" || status === "steer")
-      ? `${withRecovery}\n${state.stallNotice}` : withRecovery;
+    if (status !== "processing" && status !== "steer") return withRecovery;
+    const withTimeout = state.waitTimeoutNote ? `${withRecovery}\n${state.waitTimeoutNote}` : withRecovery;
+    return state.stallNotice ? `${withTimeout}\n${state.stallNotice}` : withTimeout;
   }
 
   _baseText(state, status, reason = "", position = null) {
@@ -2428,6 +2429,7 @@ class TelegramAckManager {
     if (status === "queued") return `🕒 已收到，前面还有 ${Math.max(0, Number(position || 0))} 个任务，排队中${suffix}`;
     if (status === "processing") return `⚙️ 正在处理${suffix}`;
     if (status === "steer") return `➕ 已追加到当前任务${suffix}`;
+    if (status === "waitingForUser") return `❓ 等你回答：请看下方的问题，10 分钟内未回复将自动${reason || "跳过"}${suffix}`;
     if (status === "completed") return `✅ 已完成${suffix}`;
     if (status === "failed") return `❌ 处理失败${suffix}：${reason || "执行未完成"}`;
     if (status === "upstreamRetry") return `🔁 上游暂时不可用，正在重试（第 ${Math.max(1, Number(position || 1))} 次）${suffix}`;
@@ -2555,8 +2557,12 @@ class TelegramAckManager {
     if (state.pendingText) await this._flushState(state, false);
   }
 
-  async update(state, status, { reason = "", position = null, force = false } = {}) {
+  async update(state, status, { reason = "", position = null, force = false, timeoutOutcome = null } = {}) {
     if (!state || state.status === status && !reason && status !== "queued") return false;
+    if (status === "waitingForUser") state.stallNotice = "";
+    if (timeoutOutcome !== null) {
+      state.waitTimeoutNote = timeoutOutcome ? `⌛ 10 分钟未回复，已自动${timeoutOutcome}，任务继续` : "";
+    }
     state.status = status;
     this.logger({ event: "telegram_ack_state", requestId: state.requestId, chatId: state.chatId, state: status });
     state.pendingText = this._text(state, status, reason, position);
@@ -2582,6 +2588,29 @@ class TelegramAckManager {
 function resolveTelegramStallNoticeMs(env = process.env) {
   const value = Number(env.TELEGRAM_STALL_NOTICE_MS);
   return Number.isFinite(value) && value > 0 ? value : 300000;
+}
+
+function formatCommandApprovalMessage({ command, reason = "", guard = "" } = {}) {
+  return [
+    "是否允许执行这条命令？",
+    "",
+    `$ ${command || "（未知命令）"}`,
+    guard ? `保护规则：${guard}` : "",
+    reason ? `原因：${reason}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function formatFileApprovalMessage({ title, reason = "" } = {}) {
+  return ["是否允许修改文件？", "", title || "（未提供标题）", reason ? `原因：${reason}` : ""]
+    .filter(Boolean).join("\n");
+}
+
+function formatTextInputMessage({ header = "", question = "", token } = {}) {
+  return `${header}\n${question}\n\n请直接回复：/answer ${token} 你的回答`;
+}
+
+function formatMultipleInputMessage() {
+  return "暂不支持一次回答多个问题，已跳过，任务继续";
 }
 
 class TelegramStallMonitor {
@@ -2622,6 +2651,45 @@ class TelegramStallMonitor {
       await this.ackManager.setStallNotice(ack, notice);
     }
   }
+}
+
+function createTelegramActionWait({
+  kind, chatId, token, pendingActions, ackManager, ack, sendMessage,
+  timeoutMs = 10 * 60 * 1000, reminderMs = 5 * 60 * 1000,
+  setTimer = setTimeout, clearTimer = clearTimeout, logger = () => {},
+}) {
+  const outcome = kind === "approval" ? "拒绝" : "跳过";
+  let questionMessageId = null;
+  let settled = false;
+  let resolvePromise;
+  const promise = new Promise(resolve => { resolvePromise = resolve; });
+  const ready = ackManager.update(ack, "waitingForUser", { reason: outcome });
+  const finish = async (value, timedOut = false) => {
+    if (settled) return;
+    settled = true;
+    clearTimer(reminderTimer);
+    clearTimer(timeoutTimer);
+    pendingActions.delete(token);
+    await ackManager.update(ack, "processing", { timeoutOutcome: timedOut ? outcome : "" });
+    resolvePromise(value);
+  };
+  const reminderTimer = setTimer(async () => {
+    if (settled || !questionMessageId) return;
+    try {
+      await sendMessage({
+        chat_id: chatId,
+        reply_to_message_id: questionMessageId,
+        text: `⏰ 还在等你回答，5 分钟后将自动${outcome}`,
+      });
+    } catch (error) {
+      logger({ errorClass: "telegram_answer_reminder_failed", detail: String(error?.message || error) });
+    }
+  }, reminderMs);
+  const timeoutTimer = setTimer(() => finish(null, true), timeoutMs);
+  reminderTimer.unref?.();
+  timeoutTimer.unref?.();
+  pendingActions.set(token, { kind, chatId, resolve: value => finish(value) });
+  return { token, promise, ready, setQuestionMessageId: id => { questionMessageId = Number(id) || null; } };
 }
 
 
@@ -7416,25 +7484,23 @@ async function main() {
         if (!chatId) return { ok: true, result: { decision: "decline" } };
         stopTyping(chatId);
 
-        const reasonLines = [
-          restartApprovalReason ? `Guard: ${restartApprovalReason}` : "",
-          params?.reason ? `Reason: ${params.reason}` : "",
-        ].filter(Boolean);
-        const reason = reasonLines.length ? `\n${reasonLines.join("\n")}` : "";
-        const { token, promise } = waitForTelegramAction({ kind: "approval", chatId });
-        await telegram.sendMessage({
+        const reason = params?.reason || "";
+        const waiting = await waitForTelegramAction({ kind: "approval", chatId });
+        const { token, promise } = waiting;
+        const questionMessage = await telegram.sendMessage({
           chat_id: chatId,
-          text: `Approve command?\n\n$ ${cmd}${reason}`,
+          text: formatCommandApprovalMessage({ command: cmd, reason, guard: restartApprovalReason }),
           reply_markup: {
             inline_keyboard: [
               [
-                { text: "Accept", callback_data: `appr|${token}|accept` },
-                { text: "Accept (session)", callback_data: `appr|${token}|acceptForSession` },
-                { text: "Deny", callback_data: `appr|${token}|decline` },
+                { text: "允许", callback_data: `appr|${token}|accept` },
+                { text: "本会话都允许", callback_data: `appr|${token}|acceptForSession` },
+                { text: "拒绝", callback_data: `appr|${token}|decline` },
               ],
             ],
           },
         });
+        waiting.setQuestionMessageId(questionMessage?.message_id);
         const choice = await promise;
         startTyping(chatId);
         return { ok: true, result: { decision: choice || "decline" } };
@@ -7453,21 +7519,23 @@ async function main() {
         if (!chatId) return { ok: true, result: { decision: "decline" } };
         stopTyping(chatId);
 
-        const reason = params?.reason ? `\nReason: ${params.reason}` : "";
-        const { token, promise } = waitForTelegramAction({ kind: "approval", chatId });
-        await telegram.sendMessage({
+        const reason = params?.reason || "";
+        const waiting = await waitForTelegramAction({ kind: "approval", chatId });
+        const { token, promise } = waiting;
+        const questionMessage = await telegram.sendMessage({
           chat_id: chatId,
-          text: `Approve file change?\n\n${title}${reason}`,
+          text: formatFileApprovalMessage({ title, reason }),
           reply_markup: {
             inline_keyboard: [
               [
-                { text: "Accept", callback_data: `appr|${token}|accept` },
-                { text: "Accept (session)", callback_data: `appr|${token}|acceptForSession` },
-                { text: "Deny", callback_data: `appr|${token}|decline` },
+                { text: "允许", callback_data: `appr|${token}|accept` },
+                { text: "本会话都允许", callback_data: `appr|${token}|acceptForSession` },
+                { text: "拒绝", callback_data: `appr|${token}|decline` },
               ],
             ],
           },
         });
+        waiting.setQuestionMessageId(questionMessage?.message_id);
         const choice = await promise;
         startTyping(chatId);
         return { ok: true, result: { decision: choice || "decline" } };
@@ -7487,7 +7555,7 @@ async function main() {
         if (questions.length !== 1) {
           await telegram.sendMessage({
             chat_id: chatId,
-            text: "request_user_input with multiple questions is not supported yet.",
+            text: formatMultipleInputMessage(),
           });
           return { ok: true, result: { answers: {} } };
         }
@@ -7495,26 +7563,30 @@ async function main() {
         const q = questions[0];
         const questionId = q?.id || "q";
         if (Array.isArray(q.options) && q.options.length) {
-          const { token, promise } = waitForTelegramAction({ kind: "userInputOption", chatId });
+          const waiting = await waitForTelegramAction({ kind: "userInputOption", chatId });
+          const { token, promise } = waiting;
           const keyboard = q.options.slice(0, 8).map((opt, index) => ([
             { text: opt.label, callback_data: `ui|${token}|${index}` },
           ]));
-          await telegram.sendMessage({
+          const questionMessage = await telegram.sendMessage({
             chat_id: chatId,
             text: `${q.header}\n${q.question}`,
             reply_markup: { inline_keyboard: keyboard },
           });
+          waiting.setQuestionMessageId(questionMessage?.message_id);
           const selectedIdx = await promise;
           if (selectedIdx === null || selectedIdx === undefined) return { ok: true, result: { answers: {} } };
           const answer = q.options[Number(selectedIdx)]?.label || "";
           return { ok: true, result: { answers: { [questionId]: { answers: [answer] } } } };
         }
 
-        const { token, promise } = waitForTelegramAction({ kind: "userInputText", chatId });
-        await telegram.sendMessage({
+        const waiting = await waitForTelegramAction({ kind: "userInputText", chatId });
+        const { token, promise } = waiting;
+        const questionMessage = await telegram.sendMessage({
           chat_id: chatId,
-          text: `${q.header}\n${q.question}\n\nReply with:\n/answer ${token} <your answer>`,
+          text: formatTextInputMessage({ header: q.header, question: q.question, token }),
         });
+        waiting.setQuestionMessageId(questionMessage?.message_id);
         const answer = await promise;
         if (!answer) return { ok: true, result: { answers: {} } };
         return { ok: true, result: { answers: { [questionId]: { answers: [String(answer)] } } } };
@@ -7542,8 +7614,9 @@ async function main() {
         const options = Array.isArray(params?.options) ? params.options : null;
 
         if (options && options.length > 0) {
-          const { token, promise } = waitForTelegramAction({ kind: "userInputOption", chatId });
-          await telegram.sendMessage({
+          const waiting = await waitForTelegramAction({ kind: "userInputOption", chatId });
+          const { token, promise } = waiting;
+          const questionMessage = await telegram.sendMessage({
             chat_id: chatId,
             text: prompt,
             reply_markup: {
@@ -7555,16 +7628,19 @@ async function main() {
               ])),
             },
           });
+          waiting.setQuestionMessageId(questionMessage?.message_id);
           const selected = await promise;
           startTyping(chatId);
           return { ok: true, result: { text: selected || "" } };
         }
 
-        const { token, promise } = waitForTelegramAction({ kind: "userInputText", chatId });
-        await telegram.sendMessage({
+        const waiting = await waitForTelegramAction({ kind: "userInputText", chatId });
+        const { token, promise } = waiting;
+        const questionMessage = await telegram.sendMessage({
           chat_id: chatId,
-          text: `${prompt}\n\nReply with:\n/answer ${token} your text`,
+          text: `请直接回复：/answer ${token} 你的回答\n\n${prompt}`,
         });
+        waiting.setQuestionMessageId(questionMessage?.message_id);
         const typed = await promise;
         startTyping(chatId);
         return { ok: true, result: { text: typed || "" } };
@@ -9444,30 +9520,18 @@ async function main() {
     rememberGroupVisibleText(rt, rawText);
   }
 
-  function waitForTelegramAction({ kind, chatId, timeoutMs = 10 * 60 * 1000 }) {
+  async function waitForTelegramAction({ kind, chatId, timeoutMs = 10 * 60 * 1000 }) {
     const token = makeToken();
-    let resolvePromise;
-    const promise = new Promise((resolve) => {
-      resolvePromise = resolve;
+    const entry = activeRequests.list().find(item => item.state === "running" && String(item.chatId) === String(chatId));
+    const waiting = createTelegramActionWait({
+      kind, chatId, token, pendingActions,
+      ackManager, ack: entry ? ackManager.byRequestId.get(entry.requestId) : null,
+      sendMessage: params => telegram.sendMessage(params),
+      timeoutMs,
+      logger: event => console.warn(JSON.stringify(event)),
     });
-
-    const timeout = setTimeout(() => {
-      pendingActions.delete(token);
-      resolvePromise(null);
-    }, timeoutMs);
-    if (timeout.unref) timeout.unref();
-
-    pendingActions.set(token, {
-      kind,
-      chatId,
-      resolve: (value) => {
-        clearTimeout(timeout);
-        pendingActions.delete(token);
-        resolvePromise(value);
-      },
-    });
-
-    return { token, promise };
+    await waiting.ready;
+    return waiting;
   }
 
   async function handleMessage({ chatId, text, message, isReplay = false, inboxItem = null }) {
@@ -10064,7 +10128,7 @@ async function main() {
         await telegram.sendMessage({ chat_id: chatId, text: "Unknown /answer token." });
         return;
       }
-      action.resolve(answer);
+      await action.resolve(answer);
       await telegram.sendMessage({ chat_id: chatId, text: "Answer submitted." });
       return;
     }
@@ -10097,13 +10161,13 @@ async function main() {
 
     try {
       if (kind === "appr" && action && action.kind === "approval" && action.chatId === chatId) {
-        action.resolve(arg);
+        await action.resolve(arg);
         await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `Sent: ${arg}`, show_alert: false });
         return;
       }
 
       if (kind === "ui" && action && action.kind === "userInputOption" && action.chatId === chatId) {
-        action.resolve(arg);
+        await action.resolve(arg);
         await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "Answer submitted", show_alert: false });
         return;
       }
@@ -10389,6 +10453,11 @@ module.exports = {
     TelegramAckManager,
     TelegramStallMonitor,
     resolveTelegramStallNoticeMs,
+    formatCommandApprovalMessage,
+    formatFileApprovalMessage,
+    formatTextInputMessage,
+    formatMultipleInputMessage,
+    createTelegramActionWait,
     TelegramActiveRequests,
     handleAppServerExitRequests,
     getOutboxStatus,
