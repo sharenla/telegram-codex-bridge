@@ -98,3 +98,19 @@ test("retention count and total cap remove oldest archives first", (t) => {
     .sort();
   assert.deepEqual(archives, ["bridge.stderr.log.20260822-000000.1.gz"]);
 });
+
+test("launchd stdout and stderr use the same rotation rules", (t) => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "telegram-bridge-launchd-rotation-"));
+  t.after(() => fs.rmSync(logDir, { recursive: true, force: true }));
+
+  for (const name of ["launchd.stdout.log", "launchd.stderr.log"]) {
+    fs.writeFileSync(path.join(logDir, name), `${name}\n${"x".repeat(256)}`);
+  }
+  runRotation(logDir);
+
+  for (const name of ["launchd.stdout.log", "launchd.stderr.log"]) {
+    assert.equal(fs.statSync(path.join(logDir, name)).size, 0);
+    const archives = fs.readdirSync(logDir).filter(item => item.startsWith(`${name}.`) && item.endsWith(".gz"));
+    assert.equal(archives.length, 1);
+  }
+});

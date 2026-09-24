@@ -9,7 +9,7 @@
 
 ## Next Step
 
-同一轮执行 **T4.6**（T4.4c、T4.8 已完成），三个任务分开提交、一次灰度部署。
+下一项执行 **T4.7**（T4.4c、T4.8、T4.6 已完成），随后 Phase 4 收口。
 规格见 `handoff_codex.md`「T4.4c」「T4.8」「T4.6 改写」。之后 T4.7 → Phase 4 收口（v0.4.0）。
 
 ## Current Phase
@@ -83,7 +83,7 @@ Phase 4
 - [x] T4.4c T4.4 复核小修（错误分类收窄、普通 turn 失败并入 ack、压缩文案中文化、白名单提示收尾）
   - [x] T4.4c 复核小修：失败原因分类收窄（超时 / 上游 5xx 不再误报）、turn 失败不再在 ack 之外重复单发、压缩失败文案中文化、白名单提示去掉「重启 bridge」
 - [x] T4.8 bot token 不再出现在 curl 的 argv 里（改走 `--config -` 从 stdin 传参）
-- [ ] T4.6 日志保留策略：`launchd.stderr.log` 纳入轮转
+- [x] T4.6 日志保留策略：`launchd.stderr.log` 纳入轮转
 - [ ] T4.7 收口沉淀：把根因与 F16 覆盖矩阵提炼成 `docs/reliability-postmortem.md`
 - [ ] ~~T4.1 基线数字~~（2026-09-24 删除：统计非需求）
 - [ ] ~~T4.2 错误码表~~（2026-09-24 删除；「错误原因中文化」并入 T4.4）

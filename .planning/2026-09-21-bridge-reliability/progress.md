@@ -1778,3 +1778,9 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 传输错误仍经过既有 token 脱敏函数，未新增 URL/命令行日志输出。
 - 新增 `tests/telegram-curl-safety.test.js`，先在旧代码上失败后通过，覆盖 argv、config stdin 和转义；全套 **247/247 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
 - T4.8 已完成，下一项为 T4.6；未修改 findings.md。
+
+### T4.6 实现与 Test Results（2026-09-24）
+
+- `scripts/rotate-bridge-logs.sh` 将 `launchd.stdout.log` 与 `launchd.stderr.log` 纳入现有大小、压缩、保留数量、过期清理和总容量上限规则；`--needs-rotation` 也会检查这两份活动日志。
+- 新增日志轮转测试覆盖两份 launchd 日志的压缩轮转；测试先在旧脚本上失败后通过。全套 **248/248 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.6 已完成，Next Step 为 T4.7；未修改 findings.md。
