@@ -1477,6 +1477,22 @@ T3.5 告警路径未在线上主动制造，已由新增 supervisor 假 curl 测
 - T3.6/T3.7 已在 `feat/phase-3-restart-loop` 完成人工验收；task_plan 的 Phase 3 状态改为 `complete`，Current Phase 改为 Phase 4，Next Step 指向 T4.1。
 - 下一步按 handoff 执行：合并 `main`、创建 `v0.3.0`、用 tag 指向 commit 核对两份运行文件哈希，再从 main 灰度重装三实例。未 push。
 
+### Phase 3 收口完成（2026-09-24）
+
+- `feat/phase-3-restart-loop` 已以 `--no-ff` 合并到 `main`，合并 commit：`13118847b577a51fa935d4f464430fd28f21f83c`。
+- 已创建 annotated tag `v0.3.0`（`Phase 3: restart loop and outage visibility`）。`git rev-list -n1 v0.3.0` 指向上述 commit；tag 内 index.js SHA-256 为 `15f553e60ccb4d8f342058f51ffafd8ff90bf2348a608747a3c2dbcc591ed069`，supervisor SHA-256 为 `7a787892499762daf01b9d78a572bdc7ac3c65ce3273572cd44ca3e5f54843ff`。
+- 从 `main` 按 `rv-prediction → 观察一轮 → default → strategy-observation` 重装完成。三实例 `DEPLOYED_REF` 均为 `v0.3.0`，运行哈希与 tag 一致；`appServerSpawnedMs` 分别为 **1323 / 2117 / 1326**，Supervisor ready 均含 `start_grace=60`，三把锁均由对应实例持有。
+- 三实例收口后本地健康核对：`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`clashFailover=unavailable（找不到 Clash 控制器）`；supervisor 发起 curl 数量为 **0 / 0 / 0**，token 匹配为 **0 / 0 / 0**；bridge curl 只报告数量，未打印命令行。
+
+**Phase 3 收口部署台账：**
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 09:42 (UTC+8) | rv-prediction | `v0.3.0` | `13118847b577a51fa935d4f464430fd28f21f83c` | `15f553e60ccb` | ✅ main/tag 重装，进程与锁正常 |
+| 2026-09-24 09:43 (UTC+8) | default | `v0.3.0` | `13118847b577a51fa935d4f464430fd28f21f83c` | `15f553e60ccb` | ✅ main/tag 重装，进程与锁正常 |
+| 2026-09-24 09:43 (UTC+8) | strategy-observation | `v0.3.0` | `13118847b577a51fa935d4f464430fd28f21f83c` | `15f553e60ccb` | ✅ main/tag 重装，进程与锁正常 |
+| 2026-09-24 | tag | `v0.3.0` | `13118847b577a51fa935d4f464430fd28f21f83c` | `15f553e60ccb` | ✅ Phase 3 收口 tag；未 push |
+
 ### T3.4c / T3.5 验收（2026-09-23）—— 通过
 
 - 四份哈希一致：`index.js` `29cd2ee871`、supervisor `7a78789249`；**204 / 204**
