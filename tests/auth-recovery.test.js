@@ -54,6 +54,57 @@ test("codex-lb ignores local login refresh stderr without hiding real provider a
   );
 });
 
+test("codex-lb suppresses models manager and MCP 401 noise but keeps provider 401", () => {
+  const modelsFailure = "ERROR codex_models_manager::manager failed to refresh available models: unexpected status 401 Unauthorized";
+  const rmcpFailure = "ERROR rmcp::transport::worker quit with fatal: Transport channel closed HTTP 401";
+  const providerFailure = "ERROR codex_api::endpoint::responses_websocket failed to connect: HTTP error: 401 Unauthorized";
+  const modelsInvalidated = "ERROR codex_models_manager::manager refresh_token_invalidated";
+  const rmcpInvalidated = "ERROR rmcp::transport::worker refresh_token_invalidated";
+  assert.equal(_test.classifyCodexLbAuthNoise(modelsFailure, { codexLbEnabled: true }), "codex_models_manager_401");
+  assert.equal(_test.classifyCodexLbAuthNoise(rmcpFailure, { codexLbEnabled: true }), "rmcp_transport_401");
+  assert.equal(_test.shouldEmitAuthWatchdogFromStderr(modelsFailure, { codexLbEnabled: true }), false);
+  assert.equal(_test.shouldEmitAuthWatchdogFromStderr(rmcpFailure, { codexLbEnabled: true }), false);
+  assert.equal(_test.shouldEmitAuthWatchdogFromStderr(providerFailure, { codexLbEnabled: true }), true);
+  assert.equal(_test.shouldEmitAuthWatchdogFromStderr(modelsFailure, { codexLbEnabled: false }), true);
+  assert.equal(_test.classifyCodexLbAuthNoise(modelsInvalidated, { codexLbEnabled: true }), "codex_models_manager_401");
+  assert.equal(_test.classifyCodexLbAuthNoise(rmcpInvalidated, { codexLbEnabled: true }), "rmcp_transport_401");
+});
+
+test("codex-lb auth noise is logged once per class within ten minutes", () => {
+  const server = new _test.CodexAppServer({ codexLbEnabled: true });
+  let authFailures = 0;
+  server.onAuthFailure(() => { authFailures++; });
+  const warnings = [];
+  const errors = [];
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  const originalNow = Date.now;
+  let now = 0;
+  Date.now = () => now;
+  console.warn = value => warnings.push(String(value));
+  console.error = value => errors.push(String(value));
+  try {
+    const modelsFailure = "ERROR codex_models_manager::manager failed to refresh available models: unexpected status 401 Unauthorized";
+    server._handleStderrLine(modelsFailure);
+    server._handleStderrLine(modelsFailure);
+    server._handleStderrLine("ERROR rmcp::transport::worker HTTP 401 Unauthorized");
+    now = 10 * 60 * 1000;
+    server._handleStderrLine(modelsFailure);
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+    Date.now = originalNow;
+  }
+  assert.equal(authFailures, 0);
+  assert.equal(warnings.length, 3);
+  assert.equal(errors.length, 0);
+  assert.deepEqual(warnings.map(value => JSON.parse(value).errorClass), [
+    "codex_models_manager_401",
+    "rmcp_transport_401",
+    "codex_models_manager_401",
+  ]);
+});
+
 test("buildAuthRecoveryReplayTask preserves turn metadata and increments replay count once", () => {
   const task = _test.buildAuthRecoveryReplayTask({
     text: "继续修这个 bug",

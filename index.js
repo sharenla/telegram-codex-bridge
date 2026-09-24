@@ -2988,6 +2988,7 @@ class CodexAppServer {
     this._expectedStop = false;
     this._latestAuthFailure = null;
     this._watchdogNotified = false;
+    this._authNoiseLoggedAt = new Map();
   }
 
   onNotification(handler) {
@@ -3120,6 +3121,16 @@ class CodexAppServer {
   _handleStderrLine(line) {
     const text = String(line || "").trim();
     if (!text) return;
+    const noiseClass = classifyCodexLbAuthNoise(text, { codexLbEnabled: this.codexLbEnabled });
+    if (noiseClass) {
+      const now = Date.now();
+      const lastLoggedAt = this._authNoiseLoggedAt.get(noiseClass);
+      if (lastLoggedAt === undefined || now - lastLoggedAt >= 10 * 60 * 1000) {
+        this._authNoiseLoggedAt.set(noiseClass, now);
+        console.warn(JSON.stringify({ event: "codex_auth_noise_ignored", errorClass: noiseClass }));
+      }
+      return;
+    }
     console.error(`[codex app-server stderr] ${text}`);
     if (!shouldEmitAuthWatchdogFromStderr(text, { codexLbEnabled: this.codexLbEnabled })) return;
     this._onAuthFailure({ reason: text });
@@ -4147,7 +4158,17 @@ function isAccountAuthFailureText(text) {
   return ACCOUNT_AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(String(text)));
 }
 
+function classifyCodexLbAuthNoise(text, { codexLbEnabled = false } = {}) {
+  if (!codexLbEnabled) return null;
+  const value = String(text);
+  if (!/(?:\b401\b|refresh_token_invalidated)/i.test(value)) return null;
+  if (/codex_models_manager::manager/i.test(value)) return "codex_models_manager_401";
+  if (/rmcp::transport(?:::worker)?/i.test(value)) return "rmcp_transport_401";
+  return null;
+}
+
 function shouldEmitAuthWatchdogFromStderr(text, { codexLbEnabled = false } = {}) {
+  if (classifyCodexLbAuthNoise(text, { codexLbEnabled })) return false;
   if (!isAccountAuthFailureText(text)) return false;
   if (!codexLbEnabled) return true;
 
@@ -10315,6 +10336,7 @@ module.exports = {
     isMissingThreadRequestError,
     extractTelemetryThreadId,
     isAccountAuthFailureText,
+    classifyCodexLbAuthNoise,
     shouldEmitAuthWatchdogFromStderr,
     isAccountFailoverText,
     classifyUpstreamTransientError,

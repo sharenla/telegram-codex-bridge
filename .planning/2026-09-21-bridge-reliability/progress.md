@@ -1643,3 +1643,8 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - **Phase 4 / T4.9a complete（待三实例灰度）**：在 `d513440` 之上修正自拉额度；每 5 分钟固定窗口最多启动 3 次，单次崩溃立即、1 秒、5 秒尝试，窗口过后计数清零。跨崩溃共享额度，耗尽时中文收尾排队请求并交 supervisor；认证失败退出不消费额度。
 - 拉起期间的新消息沿用方案 **排队等拉起**，ack 显示「⚙️ 后端正在重启，稍后自动处理」；成功后继续队列，三次耗尽后改为中文失败终态。复用已有 pendingTasks/activeRequests，避免另一套生命周期。
 - **Test Results**：新增裁决相关测试先红后绿；全套 **225/225 pass，fail 0**（含未提交的 T4.9b 草稿测试）；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。新增测试覆盖总计 3 次与 1s/5s、跨崩溃剩余额度、5 分钟清零、额度已耗尽时不再启动，以及认证失败不走自拉。T4.9a 不单独部署，待 T4.9b/T4.10 完成后一起灰度。
+
+### T4.9b 实现与 Test Results（2026-09-24）
+
+- **Phase 4 / T4.9b complete（待三实例灰度）**：codex-lb 模式下仅将 `codex_models_manager::manager` 与 `rmcp::transport` 的 401 / `refresh_token_invalidated` 识别为旁路认证噪声；每类十分钟最多一条不含原文的结构化日志，不触发认证看门狗。provider/turn 401 与非 codex-lb 行为仍按原路径处理。未动凭证与 MCP 配置。
+- 新增 `tests/auth-recovery.test.js` 用例先红后绿，覆盖两类旁路 401、provider 401、非 codex-lb 回归及逐类日志限频；全套 **225/225 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。改动仅 `index.js` 与该测试文件，待 T4.10 完成后一起部署。
