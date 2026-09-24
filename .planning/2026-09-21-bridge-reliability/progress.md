@@ -1753,3 +1753,13 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 | 2026-09-24 16:54 | strategy-observation | `feat/phase-4-feedback-completion` | `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` | `7de573603454` | `7a7878924997` | ✅ 重装通过；appServerSpawnedMs=1227 |
 
 - 三实例本次日志均有 `Deployed ref`、`Supervisor ready ... start_grace=60`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=7de57360`；进程与 3 把锁正常。supervisor 父进程 curl 数量 `0 / 0 / 0`，bridge curl 仅计数 `1 / 1 / 1`。
+
+### T4.4 代码复核（2026-09-24，Claude）—— 主体通过，3 处小问题 → T4.4c
+
+- 通过：切号 / 额度 / 认证恢复 / 新建 thread 均经 `notifyLifecycle` 并入 ack，无 ack 时才单发中文；两条重复单发已删；
+  `/stop` 有任务时 ack 终态「⏹ 已按你的要求停止」、无任务时「当前没有进行中的任务」；私聊失败原因经脱敏（token / 链接 / 邮箱 / thread id）后附前 80 字
+- 问题 1（误导）：`classifyUserFacingFailure` 的 `/context|token limit/` 过宽——`context deadline exceeded` / `context canceled`（超时类）
+  会被报成「对话上下文过长，建议 /new」；`502/503` 在 Codex turn 失败里指上游，却被报成「Telegram 服务端暂时不可用」
+- 问题 2（重复）：普通 turn 失败时，除 ack 终态 `❌ 处理失败：<原因>` 外，还**另发一条**同样原因的消息（沿用旧的 `Turn failed:` 单发路径）；
+  上下文压缩失败的单发仍是英文（`Context compaction …`）
+- 问题 3（文案）：白名单提示「开通后请重启 bridge」是给维护者的操作，对陌生会话无意义

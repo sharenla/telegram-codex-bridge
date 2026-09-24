@@ -1090,7 +1090,31 @@ npm run install:<instance>
   分类函数对每一类给出正确中文且未知不吞掉已知形态；`grep` 检查上表英文原串已不再出现在发送路径中
 - 部署后人工验收：维护者在 rv 私聊发 `/stop`（无任务时）应看到「当前没有进行中的任务」；其余以测试为准
 
-T4.8 的规格已在上文（「T4.8 bot token 不再出现在 curl 的 argv 里」），T4.4 验收后直接执行。
+**T4.4c T4.4 复核小修（2026-09-24）**
+1. `classifyUserFacingFailure` 收窄：
+   - `context deadline exceeded` / `context canceled` / `timed out` / `timeout` → `网络连接超时`（放在上下文判断之前）
+   - 上下文超限只认 `context window` / `context length` / `maximum context` / `token limit` / `too many tokens` → 维持现中文
+   - `502` / `503` / `Bad Gateway` / `Service Unavailable` → `上游服务暂时不可用`（这里是 Codex 上游，不是 Telegram）
+2. 普通 turn 失败：**有 ack 时不再另发单独消息**，只保留 ack 终态（`remote compact` 的处置提示 hint 若有，附在 ack 终态原因之后）；
+   无 ack 的 turn（例如维护者手动 `/compact` 之外的无请求场景）才单发，文案同 ack
+3. 上下文压缩结束的单发改中文：取消 → `已取消上下文压缩，继续使用当前对话`；失败 → `上下文压缩失败，继续使用当前对话`（私聊附脱敏原文前 80 字，群聊只中文）
+4. 白名单提示删去「开通后请重启 bridge。」一行
+- 验收：分类函数新增用例（`context deadline exceeded` → 超时；`context window exceeded` → 上下文过长；`503` → 上游）；
+  测试「有 ack 的 turn 失败 → 只有 ack 编辑、无新 sendMessage」（先在现代码上失败）；压缩结束文案快照；白名单文案快照
+
+**T4.8 补充（2026-09-24，执行前必读）**
+- 覆盖 `TelegramApi` 的**所有** curl 调用（含 getUpdates、sendMessage、editMessageText、answerCallbackQuery、文件上传类）。
+  只把含 token 的 URL 移到 `--config -` 经 stdin 传入（config 行 `url = "..."`，注意对引号 / 反斜杠转义），其余参数保持不变
+- **stdin 冲突**：若某个调用已经用 stdin 传请求体（`--data-binary @-`、`-F x=@-` 等），改为把请求体也写进 config（`data-binary = "..."`）
+  或写入 0600 临时文件并在结束后删除；不得因此把 token 放回 argv
+- 错误信息 / 日志中若会回显 curl 命令或 URL，统一经现有 token 脱敏函数
+- 验收补充：部署后 `ps -Ao args | grep -c "api.telegram.org/bot[0-9]"` 为 0（**只输出计数**）；三 bot `/status` 正常；
+  测试「callOnce 的 argv 不含 token 与 `/bot<id>:`」「config 内容正确转义」「上传类调用同样不含 token」
+
+**T4.6 改写：日志轮转（2026-09-24）**
+- 原规格中「errorClass 汇总单独长期保留」属统计类，随 T4.1–T4.5 一并删除，**不做**
+- 只做：把各实例 `data/logs/launchd.stderr.log`、`launchd.stdout.log` 纳入 `scripts/rotate-bridge-logs.sh` 的现有轮转规则（与 bridge.*.log 相同的大小 / 保留份数）
+- 验收：`zsh -n ./scripts/rotate-bridge-logs.sh`；扩展 `tests/log-rotation.test.js` 覆盖 launchd 两个文件；轮转不截断正在写的文件句柄（沿用现有做法）
 
 ### （旧）Phase 4 — 错误分类与可观测指标
 （分支 `feat/phase-4-observability`）
