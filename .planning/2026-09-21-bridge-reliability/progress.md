@@ -1691,3 +1691,16 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - **T4.12 complete（待三实例灰度）**：永久拒绝仍完全沿用 `_isPermanentReject` 判定；新增持久化 `telegram.unreachableChats`，记录首次/最近拒绝时间、累计丢弃条数和中文原因。群或其他负数 chat 永久拒绝时，24 小时内最多经 outbox 通知 allowlist 中的正数维护者私聊；维护者私聊自身被拒绝时只记结构化错误，不递归通知。原群后续成功送达会清除记录并记录恢复事件；`/status` 增加 `unreachableChats: N`。通知、结构化日志和测试断言均不包含完整群 ID。
 - **Test Results**：新增 `tests/unreachable-chat.test.js`，旧代码先红后绿；覆盖结构化 403 通知、24 小时限频与 dropped 累加、成功清除、维护者私聊防循环、outbox hook 和 `/status` 计数。全套 **237/237 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 全部通过。
 - **部署后维护者验收**：三个 bot 各发 `/status`，确认新 `codeVersion`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变，并核对 `unreachableChats`。不做真实移群/屏蔽演练，T4.12 依赖测试覆盖。
+
+### T4.11 / T4.12 灰度部署（2026-09-24）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 15:32 | rv-prediction | `feat/phase-4-feedback-completion` | `22b3dd50c88336b0e6fed00ed6a0a43c38e77b19` | `9208b5e149db` | ✅ 首批观察通过；appServerSpawnedMs=1134 |
+| 2026-09-24 15:33 | default | `feat/phase-4-feedback-completion` | `22b3dd50c88336b0e6fed00ed6a0a43c38e77b19` | `9208b5e149db` | ✅ 第二批观察通过；appServerSpawnedMs=1740 |
+| 2026-09-24 15:35 | strategy-observation | `feat/phase-4-feedback-completion` | `22b3dd50c88336b0e6fed00ed6a0a43c38e77b19` | `9208b5e149db` | ✅ 第三批观察通过；appServerSpawnedMs=1085 |
+
+- 最终三实例 `DEPLOYED_REF` 均指向 `22b3dd5`；三份安装副本与工作区 index/supervisor 哈希一致。每批启动日志都有本次 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=9208b5e1`、`appServerSpawnedMs`、`Supervisor ready ... start_grace=60`。三把锁各自匹配对应 service 的 index.js 进程，角色文件未覆盖，bridge 与 app-server 均存活。
+- 最终门禁：supervisor 子进程 curl 数量 0、含 token argv 数量 0；bridge/其他 curl 仅报告数量 2，未打印命令行。未触碰真实 env、auth 文件、Clash 配置、service/store。
+- **最终 Test Results**：`node -c index.js`、四项 `zsh -n`、`git diff --check` 通过；全套 **239/239 pass，fail 0**。
+- **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=9208b5e1`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变、`unreachableChats` 符合预期。T4.11 的 rv 私聊审批演练沿用上方步骤；若 `AUTO_APPROVE=1` 使只读命令不触发审批，使用会触发 `request_user_input` 的无副作用任务或保留测试快照验证，不改线上审批配置。T4.12 不做真实移群/屏蔽演练。
