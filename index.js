@@ -2498,7 +2498,10 @@ class TelegramAckManager {
 
   _text(state, status, reason = "", position = null) {
     const text = this._baseText(state, status, reason, position);
-    const withRecovery = state.recoveryNote ? `${text}\n${state.recoveryNote}` : text;
+    const lifecycle = Array.isArray(state.lifecycleNotes) && state.lifecycleNotes.length
+      ? `\n${state.lifecycleNotes.join("\n")}`
+      : "";
+    const withRecovery = `${state.recoveryNote ? `${text}\n${state.recoveryNote}` : text}${lifecycle}`;
     if (status !== "processing" && status !== "steer") return withRecovery;
     const withTimeout = state.waitTimeoutNote ? `${withRecovery}\n${state.waitTimeoutNote}` : withRecovery;
     return state.stallNotice ? `${withTimeout}\n${state.stallNotice}` : withTimeout;
@@ -2561,6 +2564,7 @@ class TelegramAckManager {
   async start({ chatId, requestId, item = null, isReplay = false, initialStatus = "accepted", position = null }) {
     const state = {
       recoveryNote: item?.recoveryNote || "",
+      lifecycleNotes: [],
       chatId, requestId, item, messageId: Number(item?.ackMessageId || 0) || null,
       status: null, lastText: "", lastEditAt: -Infinity, pendingText: null, timer: null,
     };
@@ -2595,6 +2599,7 @@ class TelegramAckManager {
       chatId: entry.chatId,
       requestId: entry.requestId,
       recoveryNote: entry.recoveryNote || "",
+      lifecycleNotes: [],
       item: null,
       messageId: Number(entry.ackMessageId || 0) || null,
       status: entry.state === "queued" ? "queued" : "processing",
@@ -2639,6 +2644,9 @@ class TelegramAckManager {
 
   async update(state, status, { reason = "", position = null, force = false, timeoutOutcome = null } = {}) {
     if (!state || state.status === status && !reason && status !== "queued") return false;
+    if (["completed", "failed", "upstreamPartial", "upstreamUnavailable", "modelBusy", "interrupted", "backendInterrupted"].includes(status)) {
+      state.lifecycleNotes = [];
+    }
     if (status === "waitingForUser") state.stallNotice = "";
     if (timeoutOutcome !== null) {
       state.waitTimeoutNote = timeoutOutcome ? `⌛ 10 分钟未回复，已自动${timeoutOutcome}，任务继续` : "";
@@ -2646,6 +2654,19 @@ class TelegramAckManager {
     state.status = status;
     this.logger({ event: "telegram_ack_state", requestId: state.requestId, chatId: state.chatId, state: status });
     state.pendingText = this._text(state, status, reason, position);
+    if (!state.messageId) return false;
+    return this._flushState(state, false);
+  }
+
+  async appendLifecycleNote(state, note) {
+    const value = String(note || "").trim();
+    if (!state || !value || ["completed", "failed", "upstreamPartial", "upstreamUnavailable", "modelBusy", "interrupted", "backendInterrupted"].includes(state.status)) {
+      return false;
+    }
+    state.lifecycleNotes ||= [];
+    if (state.lifecycleNotes.includes(value)) return false;
+    state.lifecycleNotes.push(value);
+    state.pendingText = this._text(state, state.status);
     if (!state.messageId) return false;
     return this._flushState(state, false);
   }
@@ -6438,15 +6459,7 @@ async function main() {
           reason: extractCodexErrorText(err),
           failureLabel,
         });
-        if (!recovered) {
-          if (chatId && !replayHandoff) {
-            await telegram.sendMessage({
-              chat_id: chatId,
-              text: "Codex backend auth recovery failed after trying every spare account once.",
-            });
-          }
-          throw err;
-        }
+        if (!recovered) throw err;
         if (replayHandoff) {
           return AUTH_RECOVERY_HANDOFF;
         }
@@ -6477,30 +6490,21 @@ async function main() {
       const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
 
       if (!fallbackProfiles.length) {
-        await telegram.sendMessage({
-          chat_id: chatId,
-          text: "Current account hit a limit, and there is no spare Codex account to retry with.",
-        });
+        await notifyLifecycle(chatId, "所有 Codex 账号额度已用尽，请稍后重发");
         throw err;
       }
 
       for (const nextProfile of fallbackProfiles) {
         const nextNumber = accountNumber(nextProfile);
-        const numberLabel = nextNumber ? `#${nextNumber}` : "next";
-        await telegram.sendMessage({
-          chat_id: chatId,
-          text: `Detected an account problem during ${failureLabel}. Switching to account ${numberLabel} and retrying…`,
-        });
+        const numberLabel = nextNumber ? nextNumber : "下一个";
+        await notifyLifecycle(chatId, `🔄 当前账号异常，正在切换备用账号重试（第 ${numberLabel} 个）`);
 
         try {
           await switchAccountProfile(nextProfile);
         } catch (switchErr) {
           lastError = switchErr;
           attempted.add(nextProfile.profileId);
-          await telegram.sendMessage({
-            chat_id: chatId,
-            text: `Account ${numberLabel} failed its health check. Trying the next spare account…`,
-          });
+          await notifyLifecycle(chatId, `🔄 当前账号异常，正在切换备用账号重试（第 ${numberLabel} 个）`);
           continue;
         }
         currentProfile = nextProfile;
@@ -6515,10 +6519,7 @@ async function main() {
         }
       }
 
-      await telegram.sendMessage({
-        chat_id: chatId,
-        text: "All configured Codex accounts appear to be limited right now. I stopped after trying each one once.",
-      });
+      await notifyLifecycle(chatId, "所有 Codex 账号额度已用尽，请稍后重发");
       throw lastError;
     }
   }
@@ -6553,20 +6554,14 @@ async function main() {
     try {
       for (const nextProfile of fallbackProfiles) {
         const nextNumber = accountNumber(nextProfile);
-        const numberLabel = nextNumber ? `#${nextNumber}` : "next";
-        await telegram.sendMessage({
-          chat_id: chatId,
-          text: `Current account hit a usage limit during the turn. Switching to account ${numberLabel} and retrying…`,
-        });
+        const numberLabel = nextNumber ? nextNumber : "下一个";
+        await notifyLifecycle(chatId, `🔄 当前账号异常，正在切换备用账号重试（第 ${numberLabel} 个）`);
 
         try {
           await switchAccountProfile(nextProfile);
         } catch (switchErr) {
           attempted.add(nextProfile.profileId);
-          await telegram.sendMessage({
-            chat_id: chatId,
-            text: `Account ${numberLabel} failed its health check. Trying the next spare account…`,
-          });
+          await notifyLifecycle(chatId, `🔄 当前账号异常，正在切换备用账号重试（第 ${numberLabel} 个）`);
           continue;
         }
 
@@ -6735,12 +6730,6 @@ async function main() {
       turnId: turn?.id || null,
     });
     if (!recovered) await finishAuthRecoveryRequest(chatId, rt, turnMeta);
-    if (!recovered && !replayTask && chatId) {
-      await telegram.sendMessage({
-        chat_id: chatId,
-        text: "Codex backend auth recovery failed after trying every spare account once.",
-      });
-    }
     return true;
   }
 
@@ -8526,7 +8515,11 @@ async function main() {
     for (const { chatId, task } of captured) {
       const text = textBuilder(task);
       if (!text) continue;
-      await telegram.sendMessage({ chat_id: chatId, text });
+      if (typeof notifyLifecycle === "function") {
+        await notifyLifecycle(chatId, text, { requestId: task?.ack?.requestId || null });
+      } else {
+        await telegram.sendMessage({ chat_id: chatId, text });
+      }
     }
   }
 
@@ -8539,10 +8532,16 @@ async function main() {
         rt.authRecoveryReplayTask = null;
         const session = getOrCreateSession(chatId);
         const replayNotice = isCompactionTurnKind(replayTask.kind)
-          ? "认证恢复完成，继续刚才被中断的上下文压缩。"
-          : "认证恢复完成，正在自动重试刚才被中断的输入。";
+          ? "🔁 认证已恢复，正在继续刚才被中断的上下文压缩"
+          : "🔁 认证已恢复，正在自动重试刚才被中断的输入";
         try {
-          await telegram.sendMessage({ chat_id: chatId, text: replayNotice });
+          if (typeof notifyLifecycle === "function") {
+            await notifyLifecycle(chatId, replayNotice, {
+              requestId: replayTask.ack?.requestId || null,
+            });
+          } else {
+            await telegram.sendMessage({ chat_id: chatId, text: replayNotice });
+          }
           await startOrSteerTurn({
             chatId,
             session,
@@ -8801,7 +8800,7 @@ async function main() {
   }
 
   async function startFreshThread(session, chatId, {
-    announceText = (threadId) => `Started new thread: ${threadId}`,
+    announceText = () => "🆕 已开启新对话（之前的上下文不再保留）",
     useFailover = true,
   } = {}) {
     const run = async () => {
@@ -8832,11 +8831,7 @@ async function main() {
         store.saveThrottled();
 
         if (announceText) {
-          await telegram.sendMessage({
-            chat_id: chatId,
-            text: announceText(threadId),
-            disable_web_page_preview: true,
-          });
+          await notifyLifecycle(chatId, typeof announceText === "function" ? announceText(threadId) : announceText);
         }
 
         return threadId;
@@ -8887,6 +8882,19 @@ async function main() {
     });
   }
 
+  async function notifyLifecycle(chatId, text, { requestId = null } = {}) {
+    const entries = activeRequests.list()
+      .filter(entry => String(entry.chatId) === String(chatId) && (entry.state === "running" || entry.state === "queued"));
+    const entry = (requestId && entries.find(item => item.requestId === requestId)) || entries[0];
+    const ack = entry && (ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry));
+    if (ack) {
+      await ackManager.appendLifecycleNote(ack, text);
+      return ack;
+    }
+    await telegram.sendMessage({ chat_id: chatId, text });
+    return null;
+  }
+
   async function ensureThread(session, chatId) {
     if (session.threadId) {
       return requestWithAccountFailover({
@@ -8922,15 +8930,7 @@ async function main() {
     const current = getStoredAccountProfile();
     const preferred = resolveInitialAccountProfile();
     if (!isProfilePreferredOverCurrent(preferred, current)) return current || preferred || null;
-    const reason = !current
-      ? "no current account"
-      : current.lastResort && !preferred.lastResort
-        ? "leaving last-resort account"
-        : "current account is expired, blocked, or unavailable";
-    await telegram.sendMessage({
-      chat_id: chatId,
-      text: `Codex account rotation: ${reason}; switching to ${preferred.shortLabel}.`,
-    });
+    await notifyLifecycle(chatId, "🔄 正在切换 Codex 账号");
     try {
       return await switchAccountProfile(preferred);
     } catch (err) {
@@ -9165,7 +9165,6 @@ async function main() {
         if (steerResult === AUTH_RECOVERY_HANDOFF) {
           return;
         }
-        await telegram.sendMessage({ chat_id: chatId, text: "Steering active turn…" });
         return;
       }
 

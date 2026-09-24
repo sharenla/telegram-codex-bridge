@@ -1712,3 +1712,10 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 维护者确认三 bot `/status`：codeVersion=9208b5e1、codexBackend=ok、`unreachableChats: 0`
 - **T4.11 线上演练不可行，以测试验收**：三实例均 `AUTO_APPROVE=1`，命令 / 文件审批自动通过，仅 Deribit 重启守卫会真正询问（不宜演练）；不为演练改线上审批配置
 - 遗留英文（→ T4.4）：`Answer submitted.`、`Unknown /answer token.`、按钮回执 `Sent: <arg>`
+
+### T4.4a 实现与 Test Results（2026-09-24）
+
+- 生命周期通知现在优先追加到当前请求已有的 ack：账号切换、备用账号健康检查失败、认证恢复续跑、旧 thread 失效后新建 thread、以及 steer 不再另发英文状态消息；没有对应 ack（例如手动 `/new` 或后台切号）才单发中文提示。
+- ack 维护生命周期行并在完成、失败、中断等终态清除，避免终态继续显示过期的切号或恢复提示；新建 thread 文案不再暴露 thread id。
+- 新增 `tests/feedback-lifecycle.test.js`，先在旧代码上失败后通过；全套 **240/240 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.4a 已完成，待 T4.4b 完成后统一灰度部署；当前没有修改 findings.md。
