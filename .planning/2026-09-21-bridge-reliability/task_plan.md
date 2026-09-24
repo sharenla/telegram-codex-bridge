@@ -9,12 +9,12 @@
 
 ## Next Step
 
-执行 **T4.7**（收口文档 `docs/reliability-postmortem.md`），随后 **Phase 4 收口**：合并 main、打 `v0.4.0`、从 main 重装三实例。
-规格见 `handoff_codex.md`「T4.7 改写」「Phase 4 收口」。T4.4c / T4.8 / T4.6 已复核（见 progress.md）。
+Phase 4 已完成；复盘文档已落地，后续按 `docs/reliability-postmortem.md` 运维。
+规格见 `handoff_codex.md`「T4.7 改写」「Phase 4 收口」。
 
 ## Current Phase
 
-Phase 4
+全部完成
 
 ## Phases
 
@@ -84,12 +84,12 @@ Phase 4
   - [x] T4.4c 复核小修：失败原因分类收窄（超时 / 上游 5xx 不再误报）、turn 失败不再在 ack 之外重复单发、压缩失败文案中文化、白名单提示去掉「重启 bridge」
 - [x] T4.8 bot token 不再出现在 curl 的 argv 里（改走 `--config -` 从 stdin 传参）
 - [x] T4.6 日志保留策略：`launchd.stderr.log` 纳入轮转
-- [ ] T4.7 收口沉淀：把根因与 F16 覆盖矩阵提炼成 `docs/reliability-postmortem.md`
+- [x] T4.7 收口沉淀：把根因与 F16 覆盖矩阵提炼成 `docs/reliability-postmortem.md`
 - [ ] ~~T4.1 基线数字~~（2026-09-24 删除：统计非需求）
 - [ ] ~~T4.2 错误码表~~（2026-09-24 删除；「错误原因中文化」并入 T4.4）
 - [ ] ~~T4.3 结构化日志~~（2026-09-24 删除：已有的 JSON 事件日志足够排障）
 - [ ] ~~T4.5 指标计数器 + 日报~~（2026-09-24 删除：统计非需求）
-- **Status:** in_progress
+- **Status:** complete
 
 ## Key Questions
 
