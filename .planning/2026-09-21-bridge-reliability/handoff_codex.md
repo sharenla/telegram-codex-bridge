@@ -291,6 +291,12 @@ git tag -a v0.x.y -m "Phase N: <一句话>"
 - 部署后哈希不一致，或服务起不来
 - 任何操作可能影响线上可用性，而你不确定后果
 
+### 6.1.1 不必停下的情况（2026-09-23 增补）
+
+规格里**同时出现文字描述和具体数值**、两者不一致，而具体数值本身完整、明确时（例如「翻倍 60 → 120 → 300」），
+**以具体数值为准**继续执行，并在 progress.md 里记一行「按数值执行，文字描述疑似笔误」。
+只有数值本身缺失、自相矛盾，或按数值执行会违反其他硬约束时，才按 §6.2 停下。
+
 ### 6.2 必须做的三步
 
 1. **立刻停止改动**。不要为了绕开阻塞去动别的文件
@@ -739,13 +745,185 @@ npm run install:<instance>
 
 **T3.2 supervisor 宽限期 + 强杀退避**（R3）— 进程存活 <60s 不计 miss；连续强杀后退避到 60s / 300s。验收：`zsh -n` 通过 + 脚本测试覆盖 + 模拟启动慢不再触发循环
 
+**T3.2 补充（2026-09-23）**
+
+- **现状**：`scripts/codex-launch-supervisor.sh` 每 `POLL_INTERVAL=5` 秒检查一次 bridge 是否有 app-server 子进程，
+  连续 `APP_SERVER_MISS_LIMIT=3` 次缺失即 `stop_bridge` + `start_bridge`。bridge 刚启动的几秒内必然没有子进程，
+  也会被计入 miss
+- **启动宽限期**：bridge 进程存活时间小于 `START_GRACE_SECONDS`（默认 60）时，缺失不计入 miss
+  （进程启动时间可取自 `ps -o etime= -p <pid>` 或 supervisor 自己记录的 start_bridge 时间戳）
+- **退避 = 延长宽限期，不是停机**：
+  - 若 bridge 被强杀后、下一次启动**始终没有**进入健康状态（从未看到 app-server 子进程）就又被强杀，
+    视为「连续强杀」，下一轮宽限期**逐级延长，固定三级：60 → 120 → 300 秒**，到 300 后保持不变（2026-09-23 裁决：原文「翻倍」为笔误，以明确写出的数值序列为准）
+  - **不要**在强杀后停着不启动。等待期间 bot 完全离线，比循环重启还差
+  - 一旦看到 app-server 子进程（健康），连续计数与宽限期立刻复位为默认
+- **每个决定都写带时间戳的日志**：宽限期内跳过、计入 miss、强杀（附当前连续次数与下一轮宽限期）、复位
+- **supervisor 自身必须被重启才会生效**：supervisor 是 LaunchAgent 常驻的 shell 循环，只在启动时读取脚本。
+  仅 rsync 新脚本并重启 bridge 不会换掉正在运行的旧 supervisor。部署时须确认 `install-launch-agent.sh`
+  会 bootout/bootstrap LaunchAgent；若不会，用 `launchctl kickstart -k gui/$(id -u)/<label>` 重启该实例的 LaunchAgent
+  （这是 launchctl 命令，不是手工改 service 目录，允许）。验收以日志中出现**新时间戳的 `Supervisor ready`** 为准
+- **测试方式**：用一个假的 `BRIDGE_ENTRY`（不创建 app-server 子进程的小脚本）+ 很短的 `POLL_INTERVAL` 与
+  `START_GRACE_SECONDS` 跑 supervisor，断言：宽限期内不强杀；宽限期过后连续缺失才强杀；连续强杀时宽限期翻倍且封顶；
+  （宽限期序列为固定三级 60 → 120 → 300）出现健康子进程后复位。测试须能在有限时间内结束，并清理自己启动的进程
+- **验收**：
+  - 上述 supervisor 行为测试（先在现脚本上失败）
+  - `zsh -n` 通过；166+ 全绿，总数只增
+  - 部署后三实例日志都有新时间戳的 `Supervisor ready`，且 supervisor 启动行里显示新参数（如 `start_grace=60`）
+- **不做**：不改 bridge 内的轮询卡死阈值（T3.3）；不做 supervisor 直发通知（T3.5）
+
 **T3.3 轮询卡死不再 exit**（R4）— 改持续退避重试，只标记 `telegram_degraded`(30s) / `telegram_unreachable`(90s)，**不退出进程**。依赖 T2.2 / T2.4。验收：单测覆盖两级状态迁移；长时间断网不再出现 `Bridge self-recovery restart requested`
 
-**T3.4 恢复播报 + 读回 restartReason**（R2）— 恢复后在受影响会话发「刚与 Telegram 失联 X 分 Y 秒（原因：…），期间积压 N 条，正在按顺序处理」；启动时**先读**再清空（修 `:4319` 的无条件清空）。验收：单测覆盖「消费后才清空」
+**T3.3 补充（2026-09-23，基于 v0.2.0 之后的代码）**
+
+- **现状**：`pollingLoop` 错误分支里，`consecutivePollErrors >= TELEGRAM_POLLING_RESTART_ERROR_THRESHOLD(6)` 且
+  `stalledMs >= TELEGRAM_POLLING_STALL_THRESHOLD_MS(180000)` 时调用 `requestSupervisorRestart()` → `process.exit(1)`；
+  其余情况固定 `await sleep(2000)`。历史 88 次自杀，卡死时长中位 183s（R4）；重启对网络问题无效，只会引入冷启动并打断执行中任务
+- **改法**：
+  1. **网络类轮询错误永不退出进程**。删除 pollingLoop 中基于卡死时长的 `requestSupervisorRestart()` 调用
+     （`requestSupervisorRestart` 函数本身若还有其他调用方则保留，并在 progress.md 列出其余调用方）
+  2. **内部状态**：以最近一次成功轮询为基准，连续失败 ≥30 秒记 `telegram_degraded`，≥90 秒记 `telegram_unreachable`；
+     状态变化时各写一行带时间戳的日志；恢复成功轮询时回到 `ok` 并写日志（含本次失联总时长）
+  3. **持久化失联起点**：进入 `degraded` 时在 store 中记录 `telegram.health.offlineSince`（毫秒时间戳），恢复后
+     记录 `lastOutage = { startedAt, endedAt, durationMs }` 并清空 `offlineSince`。这是 **T3.4 改写：恢复后告知失联时长与原因（2026-09-23）**
+
+> 原规格「恢复后播报 + 读回 restartReason 再清空」已失效：T3.3 删除了 `requestSupervisorRestart`，
+> `restartReason` 不再被写入。改为以下两类数据源。`restartReason` / `restartRequestedAt` 的残留字段**不要动**（不扩大范围）。
+
+- **两类失联**：
+  | 类型 | 数据来源 | 何时判定 |
+  |---|---|---|
+  | A. 网络失联（进程活着） | T3.3 已写的 `health.lastOutage = { startedAt, endedAt, durationMs }` | 轮询恢复成功的那一刻 |
+  | B. 进程停机（强杀 / 崩溃 / 部署 / 机器重启） | 启动时计算 `now − health.lastPollSuccessAt`；加上本任务新增的关机记录 | 进程启动、首次轮询成功之后 |
+- **新增关机记录**：`installGracefulShutdown` 的 `close()` 里，在 `store.save` 之前写入
+  `health.lastShutdown = { at, signal: "SIGTERM"|"SIGINT", graceful: true }`。启动时若停机时长超阈值且上次没有 graceful 记录
+  （或记录时间早于上次成功轮询），判定为「异常退出或被强杀」。启动完成后清掉 `lastShutdown`，避免下次误读
+- **阈值**：失联 / 停机时长 **≥ 120 秒**才告知。部署重启通常只有几秒，不应触发
+- **告知对象与方式（不做全群广播）**：
+  1. **受影响的消息**：失联期间发出、恢复后才收到的消息（Telegram `message.date` 早于恢复时刻且晚于失联起点），
+     在它自己的 ack 文案后追加一行：`（服务刚恢复，这条消息在 X 分钟前发出）`。复用 T2.5 的 ack，不新发消息
+  2. **维护者汇总**：发给 allowlist 中的**私聊**（chat id 为正数的项），每次失联一条，经 outbox（`priority: "notice"`）：
+     `⚠️ <bot 名> 刚才与 Telegram 失联 X 分 Y 秒（<原因>），<开始时间> – <恢复时间>。期间收到的 N 条消息已在处理。`
+     进程停机类的原因写「服务进程停止运行（正常关闭 / 异常退出或被强杀）」
+  3. 群聊不单独发汇总
+- **原因的中文化**（只做这几类，完整错误码表归 T4.2）：DNS 解析超时 → 「网络 DNS 解析失败」；
+  TLS / SSL / connection reset → 「代理或网络连接中断」；连接超时 → 「网络连接超时」；
+  502 / 503 / Bad Gateway → 「Telegram 服务端暂时不可用」；其他 → 「网络异常」。原因取自失联期间最后一次轮询错误
+- **只告知一次**：同一次失联只发一次汇总；汇总发出后在 store 标记 `health.lastOutageNotifiedAt`，重启后不重复发
+- **不做**：不做全群广播；不做 supervisor 直发（T3.5）；不改 T3.3 的状态阈值与退避
+- **验收**：
+  - 测试「网络失联 150 秒后恢复 → 私聊收到一条汇总，含时长与中文原因」（先在现代码上失败）
+  - 测试「失联 60 秒后恢复 → 不发汇总」
+  - 测试「失联期间发出的消息，恢复后其 ack 带『服务刚恢复，X 分钟前发出』」
+  - 测试「进程停机 10 分钟、无 graceful 记录 → 启动后私聊收到『异常退出或被强杀』汇总」
+  - 测试「正常部署（graceful、停机几秒）→ 不发汇总」
+  - 测试「汇总只发一次，重启后不重复」
+  - 测试「群聊 chat id（负数）不会收到汇总」
+  - 176+ 全绿，总数只增
+
+**T3.4b 【必修，零输出】认证恢复耗尽后请求必须收尾（2026-09-23 实战发现）**
+
+- **现象**：请求 `#023b89` 最后一次 turn 以 `refresh token was revoked` 失败后，再无任何消息；ack 永远停在「⚙️ 正在处理」，
+  `activeRequests` 中保持 `running`。认证恢复逻辑（`retryTurnAfterAuthFailure` / `ensureCodexBackendRecovered` /
+  `queueAuthRecoveryReplayTask`，Phase 1 前既有）接管请求并排队「恢复后重跑」，但所有账号都恢复失败时无人置终态
+- **要求**：
+  1. 认证恢复**最终失败**（所有账号都试过、或恢复后重跑又以认证错误失败）时，该请求必须进入终态：
+     ack 改为 `❌ 处理失败（#id）：Codex 账号登录已失效，需要维护者重新登录`，出台账，清掉排队的重跑任务
+  2. 重跑次数有上限：同一请求因认证失败最多自动重跑 1 次；第二次仍是认证失败即按上一条收尾（防止无限「恢复 → 失败 → 恢复」）
+  3. 重跑前沿用 T2.6 的 `turnHasToolActivity`：失败 turn 若已有工具调用，不重跑，按「可能已部分执行」收尾
+  4. **健康状态不许说谎**：app-server 持续报 `Failed to refresh token` / 401 时，`codexBackend.state` 不能停留在 `ok`。
+     近 N 分钟（建议 5 分钟）内出现认证失败即标记 `auth_failing`，并在 `/status` 显示；恢复成功 turn 后复位
+  5. 认证最终失败时，经 outbox 给维护者私聊发一次汇总（同 T3.4 私聊规则、同一次故障只发一次）：
+     `⚠️ <bot 名> 的 Codex 账号登录已失效，所有备用账号也无法恢复。需要重新登录后才能继续处理消息。`
+- **本任务部署会自然清理卡住的 `#023b89`**：部署重启时它处于 running，按 T2.5 规则会被改成「服务重启，已中断」。
+  **不要**手工修改 store 去清它
+- **验收**：
+  - 测试「所有账号恢复失败 → 请求收尾为 ❌ 账号登录已失效，台账清空，无排队重跑」（先在现代码上失败）
+  - 测试「恢复后重跑再次认证失败 → 不再重跑，收尾」
+  - 测试「失败 turn 已有工具调用 → 不重跑」
+  - 测试「持续认证失败 → codexBackend.state=auth_failing；成功 turn 后复位为 ok」
+  - 测试「私聊汇总只发一次」
+  - 188+ 全绿，总数只增
+
+**T3.4a 汇总原因与时间格式（2026-09-23 实战发现，与 T3.4b 同轮做）**
+
+- 网络失联与进程停机重叠时，汇总原因取**最早发生**的那个：失联起点早于关机时间 → 写网络原因；
+  可附一句「期间服务进程也曾重启」。只有关机早于（或无）网络失联时，才写「服务进程停止运行」
+- 汇总中的时间一律用**本地时间**、只到秒，例如 `20:29:30 – 20:55:31`（跨日时带日期 `09-23 20:29`）；不要出现 ISO / UTC 格式
+- 验收：测试「网络 20:29 断、进程 20:33 停 → 原因为网络原因」；测试「汇总时间为本地 HH:MM:SS，无 `T`/`Z`」
 
 **T3.5 supervisor 兜底直发**（R3）— 连续强杀 ≥3 次时 supervisor 自己 curl 发通知。token 从 `.env` 读，**不得**写进日志或提交。验收：`zsh -n` 通过 + 模拟连续强杀能收到
 
+**T3.4c 切号验证成功也视为认证恢复（2026-09-23，小修）**
+
+- 现状：T3.4b 规定 `auth_failing` 只在「turn 成功」后复位。实测 OBS 手动 `/accounts` 切号后，bridge 已通过
+  `verifySwitchedAccount` 验证新账号可用（`lastOkAt` 更新），但 `authFailureUnresolved` 仍为 true、状态仍显示 `auth_failing`
+- 改法：切号（手动 `/accounts` 或自动故障切换）且账号验证成功时，与 turn 成功同样清除 `authFailureUnresolved` 并复位 `ok`；
+  若随后同一账号又出现认证失败，照常再次标记 `auth_failing`
+- 验收：测试「auth_failing 状态下切号且验证成功 → 立即复位 ok」；测试「切号验证失败 → 保持 auth_failing」
+- 与 T3.5 同轮做，**单独一个 commit**
+
+**T3.5 补充：supervisor 兜底直发（2026-09-23）**
+
+- **场景**：bridge 反复起不来（supervisor 连续强杀），bridge 自身的 outbox 与恢复汇总都无从发出。只有 supervisor 还活着
+- **触发**：T3.2 的 `consecutive_unhealthy_restarts` 达到 **3** 时发一次告警
+- **收件人**：只发 allowlist 中的**私聊**（chat id 为正数），与 T3.4 相同；不发群
+- **限频**：同一实例 **30 分钟内最多发 1 次**告警；把上次发送时间写入 `${SERVICE_ROOT}/data/supervisor-alert.json`，重启 supervisor 后仍有效
+- **恢复通知**：发过告警之后，一旦 supervisor 看到 app-server 健康，再发一次「已恢复」，并清除告警标记。
+  未发过告警的普通复位不发任何消息
+- **文案**（中文、一行、不含内部路径与英文堆栈）：
+  - 告警：`⚠️ <实例名> 连续 <N> 次启动失败，app-server 没能起来。最近错误：<最多 120 字、已脱敏>。supervisor 会继续重试。`
+  - 恢复：`✅ <实例名> 已恢复运行（之前连续 <N> 次启动失败）`
+  「最近错误」取 bridge.stderr.log 最后一条非空错误行，**先脱敏**（去掉 `bot<id>:<token>`、URL 中的查询串），再截断
+- **token 不得出现在进程命令行里**：supervisor 从本实例 `.env` 读取 `TELEGRAM_BOT_TOKEN`（只读，不修改 .env），
+  调用 curl 时用 `curl --config -` 从 **stdin** 传入含 token 的 URL，命令行参数中不得出现 token（与 T4.8 同一原则，这里从一开始就做对）。
+  token 也不得写入任何日志
+- **尽力而为，不阻塞主循环**：发送失败（网络断了）只记一行日志，不重试、不影响强杀与宽限期逻辑；curl 加 `--max-time 10`
+- **测试**：用一个假的 `curl`（放在测试专用 PATH 前面，把 stdin 和参数记到文件）跑 supervisor，断言：
+  连续强杀 3 次时恰好发一次；30 分钟内不重复；恢复时发「已恢复」并清标记；只发给正数 chat id；
+  **假 curl 记录到的命令行参数里不含 token**；token 不出现在 supervisor 日志中；告警文案中的错误行已脱敏
+- **部署门禁的范围（2026-09-23 更正）**：token 检查**只针对 supervisor 发起的 curl**（父进程为该实例 supervisor 的 curl）。
+  bridge 自身的 getUpdates 等 curl 目前仍把 token 放在命令行里，这是既有问题，归 **T4.8**，不作为 T3.5 的门禁。
+  原门禁「任何 curl 都不含 token」为规划方写错范围。验证方式：只统计父进程是 supervisor 的 curl，报告其数量及是否含 token；
+  bridge 的 curl 只报告数量，不打印命令行
+- **不做**：不改宽限期序列与强杀条件（T3.2 已完成）；不发群；不改 bridge 内的汇总逻辑
+
 **T3.6 409 Conflict 单独归类**（R6 / R7）— 归入 `telegram_poll_conflict`；检测到即查实例锁、退出重复实例并播报。验收：单测覆盖该分类
+
+**T3.6 补充：409 Conflict（2026-09-23）**
+
+- 背景：T2.8a 后本机不可能再有同 token 第二进程，T2.2 后重启不留孤儿长轮询。此后出现的 409 基本意味着**其他机器**上有进程在用同一 bot token
+- 要做：
+  1. 轮询错误里识别 409（优先用结构化 `error.body.error_code === 409`，不用裸数字文本匹配），归为 `telegram_poll_conflict`，写结构化日志
+  2. 5 分钟内出现 ≥3 次 409 → 内部状态标记为 `conflict`（与 ok / degraded / unreachable 并列），在 `/status` 的 telegramState 显示
+  3. 进入 `conflict` 时经 outbox 给维护者私聊发一次（30 分钟内最多一次）：
+     `⚠️ <bot 名> 检测到另一个进程在用同一个 bot token 收消息（很可能在别的机器上），部分消息可能被它收走。请检查是否有别处运行着同一个 bot。`
+  4. **不退出进程**，不自动做任何其他处理；10 分钟内无新 409 自动回到正常状态
+- 验收：测试「结构化 409 → telegram_poll_conflict」；「5 分钟内 3 次 → conflict + 私聊一次」；「30 分钟内不重复」；「10 分钟无 409 → 复位」；「进程不退出」
+
+**T3.7 Clash 控制器探测与可达性（2026-09-23）**
+
+- 现状：`CLASH_CONFIG_CANDIDATES` 第一项读的是 Verge 应用设置 `clash-verge.yaml`，其中 socket 路径不存在；
+  运行时配置 `config.yaml` 的 unix socket 与 TCP 9097 当前也都不可达（Clash Verge 服务模式，控制器未对用户开放）
+- 要做：
+  1. 探测顺序改为优先读**运行时** `~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml`，
+     同时支持其 `external-controller`（TCP，带 `secret`）与 `external-controller-unix`；`clash-verge.yaml` 降为后备；
+     显式环境变量 `TELEGRAM_CLASH_CONTROLLER_SOCKET` / `_URL` 仍最优先
+  2. 启动时**实测一次**控制器可达性（请求 `/version`，超时 3 秒，不阻塞启动，后台执行）
+  3. `/status` 增加一行：`clashFailover: available（<来源>）` 或 `clashFailover: unavailable（<中文原因>，例：找不到 Clash 控制器）`
+  4. 不可用时启动日志写一行说明；断网时不再每次都报 `ENOENT` 刷屏，改为按不可用状态直接跳过自动换节点并记一次
+  5. **secret 不得出现在日志、/status 或进程命令行**（用 Node 的 http 模块直接请求，不要 shell 出去 curl）
+- **不做**：不修改任何 Clash 配置文件；不尝试启动或重启 Clash；不改换节点的判定条件
+- 验收：测试「运行时 config.yaml 优先于 clash-verge.yaml」；「socket 不存在 → unavailable 且原因正确」；
+  「TCP 控制器可达 → available」；「secret 不出现在日志和 /status」；「不可用时断网只记一次、不刷屏」
+- 部署后：三实例 `/status` 的 clashFailover 如实反映当前环境（预期 unavailable），并把原因写进 progress.md
+
+**Phase 3 收口（T3.6 / T3.7 部署并经人工 `/status` 确认之后）**
+
+1. `task_plan.md` 核对 Phase 3 全部条目已打勾，Status 改 complete，Current Phase 改为 Phase 4
+2. `git switch main` → `git merge --no-ff feat/phase-3-restart-loop` → `git tag -a v0.3.0 -m "Phase 3: restart loop and outage visibility"`
+3. 用 `git rev-list -n1 v0.3.0` 取 tag 指向的 commit，核对 tag 中 `index.js` 与 `scripts/codex-launch-supervisor.sh` 的哈希与三实例一致
+4. 从 main 按灰度顺序重装三实例一次，使 `DEPLOYED_REF` 指向 main 上的 commit
+5. 台账补 tag 行；**不要 push**
 
 ### Phase 4 — 错误分类与可观测指标（分支 `feat/phase-4-observability`）
 

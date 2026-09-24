@@ -9,12 +9,11 @@
 
 ## Next Step
 
-开 Phase 3 分支 `feat/phase-3-restart-loop`，执行 **T3.1**：bot 身份改为「先用缓存、后台校验」，
-不再让 getMe 阻塞 app-server 启动；并列出启动路径上其余可能的网络阻塞点。规格见 `handoff_codex.md`「T3.1 补充」。
+开始 **T4.1**（先用 rollout jsonl 出一版基线数字）。Phase 3 已完成收口并发布 `v0.3.0`。
 
 ## Current Phase
 
-Phase 3
+Phase 4
 
 ## Phases
 
@@ -53,20 +52,25 @@ Phase 3
 
 ### Phase 3: 修重启死循环与失联可见
 
-- [ ] T3.1 调整启动顺序：先起 app-server，或用缓存 botIdentity 起步
-- [ ] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
-- [ ] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
-- [ ] T3.4 恢复后播报失联时长与积压数；`restartReason` 先消费再清空
-- [ ] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
-- [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
-- **Status:** pending
+- [x] T3.1 调整启动顺序：先起 app-server，或用缓存 botIdentity 起步
+- [x] T3.2 supervisor 加启动宽限期（<60s 不计 miss）+ 强杀退避
+- [x] T3.3 轮询卡死不再 `process.exit`，改内部标记 degraded / unreachable
+- [x] T3.4 恢复后播报失联时长与原因（网络失联用 lastOutage；进程停机用上次成功轮询时间 + 关机记录；2026-09-23 因 restartReason 已不再写入而改写）
+- [x] T3.4 已线上验收（2026-09-23 真实断网 26 分钟，三实例汇总送达）
+- [x] T3.4a 汇总原因取最早发生的原因；时间用本地时间
+- [x] T3.4b 【零输出，必修】认证恢复耗尽后请求必须收尾（❌ + 中文原因）；backend 健康状态须反映持续的认证失败
+- [x] T3.4c 切号验证成功也视为认证恢复（清 authFailureUnresolved，状态复位 ok）
+- [x] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
+- [x] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
+- [x] T3.7 修复 Clash 控制 socket 探测（现路径 ENOENT，断网时自动换节点未生效）
+- **Status:** complete
 
 ### Phase 4: 错误分类与可观测指标
 
 - [ ] T4.1 先用 rollout jsonl 出一版基线数字（只读脚本，不依赖新埋点）
 - [ ] T4.2 固定 15 项错误码表
 - [ ] T4.3 结构化日志（每行 JSON，含 `ts` / `chatId` / `requestId` / `errorClass`）
-- [ ] T4.4 群内改中文文案 + 处置建议；英文原文只进日志与 `/health`
+- [ ] T4.4 群内改中文文案 + 处置建议；英文原文只进日志与 `/health`；既有生命周期通知（认证恢复、`Started new thread`、thread 失效）并入 ack，不再单独发
 - [ ] T4.5 指标计数器 12 项 + 日报口径
 - [ ] T4.6 日志保留策略：errorClass 汇总长期留，`launchd.stderr.log` 纳入轮转
 - [ ] T4.7 收口沉淀：把 `findings.md` 的根因结论提炼成 `docs/reliability-postmortem.md`
@@ -109,6 +113,9 @@ Phase 3
 | T2.7 满载时只**建议**换模型，不自动换 | 模型选择影响回答质量与成本，是用户的决定；自动降级会让用户在不知情时得到更弱模型的回答。bridge 只负责把原因说清楚并给出可执行的命令 |
 | T2.8 锁的存活校验不能只看 PID | 锁挪到持久目录后会跨开机保留，旧 PID 可能被无关进程复用；只用 `kill(pid, 0)` 会误判锁被占用而拒绝启动，比原问题（锁被系统清理）更糟。须同时校验启动时间或命令行 |
 | 锁是否被持有，只看持有者本身 | 判断依据是「锁里记录的那个 bridge 还活着吗」（用它自己记录的 indexPath 比对其命令行），不是「它和我是不是同一个实例」。后者会让不同目录下的同 token 进程互相抢锁，正是锁要防的情况 |
+| supervisor 的退避是「延长宽限期」而非「强杀后停机等待」 | 停机等待期间 bot 完全离线，比循环重启更差；延长宽限期让 bridge 继续活着、给网络恢复留时间，健康后立即复位 |
+| T3.7 只修探测与可见性，不替维护者开启 Clash 外部控制器 | 本机 Clash Verge 以服务模式运行，控制器未对用户开放；开启与否是维护者对其代理软件的决定。代码侧保证：探测正确、启动时实测可达、不可用时在 /status 与日志中如实说明，而不是断网时才报 ENOENT |
+| T3.4 恢复播报不做全群广播 | 失联期间确实发过消息的会话，在其消息的 ack 上附「服务刚恢复」说明；汇总只发维护者私聊。没人等回复的群保持安静，避免网络不稳时一天多次打扰群成员。维护者可改为全群广播 |
 
 ## Errors Encountered
 
