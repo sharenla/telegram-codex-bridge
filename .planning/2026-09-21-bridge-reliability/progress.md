@@ -550,6 +550,28 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ---
 
+**T4.9 部署台账：**
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 10:59 (UTC+8) | rv-prediction | feat/phase-4-feedback-completion | 98e434e2b5cb | f27db7027cd2 | 灰度通过；appServerSpawnedMs=1084 |
+| 2026-09-24 11:01 (UTC+8) | default | feat/phase-4-feedback-completion | 98e434e2b5cb | f27db7027cd2 | 灰度通过；appServerSpawnedMs=1973 |
+| 2026-09-24 11:02 (UTC+8) | strategy-observation | feat/phase-4-feedback-completion | 98e434e2b5cb | f27db7027cd2 | 灰度通过；appServerSpawnedMs=1029 |
+
+### T4.9 灰度部署（2026-09-24）
+
+- 提交：98e434e2b5cb532c513944c59ee3e1173535e81e（Handle app-server exits without silent requests）。
+- 三实例安装顺序完成：rv-prediction → 观察一轮 → default → strategy-observation。
+- 运行哈希：三实例 index.js=f27db7027cd2、scripts/codex-launch-supervisor.sh=7a7878924997；三实例 DEPLOYED_REF 均为 98e434e2b5cb... / v0.3.0-3-g98e434e。
+- 启动证据：appServerSpawnedMs 为 rv-prediction 1084 ms、default 1973 ms、strategy-observation 1029 ms；三实例均有本次 Supervisor ready（start_grace=60）和 Telegram Codex Bridge started。
+- 运行门禁：三进程存活；持久锁目录仍为 3 把锁且 PID 分别匹配对应 service 的 index.js；supervisor 子 curl 0 / 0 / 0；bridge curl 数量 0（未打印命令行）；命名实例角色文件未被覆盖。
+- 本地 store 快照：三实例 activeRequests=0、outboxQueued=0、telegramState=ok；rv-prediction 的 codexBackend=auth_failing 为部署前后持续存在的已知认证失效，未触碰凭证；default / strategy-observation 为 codexBackend=ok。
+
+**维护者人工验收（待确认后继续 T4.10）：**
+
+1. 三个 bot 各发 /status：确认新 codeVersion=f27db702、telegramState=ok、outboxQueued=0、outboxDiscarded=0、truthProfile 不变，并记录各自 codexBackend。
+2. 只在 rv-prediction 私聊执行无副作用长任务；看到「正在处理」后仅杀 app-server，确认同一条 ack 变为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」；确认无自动重跑。
+
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |
