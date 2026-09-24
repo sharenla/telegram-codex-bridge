@@ -2158,6 +2158,81 @@ function getOutboxStatus(store) {
   };
 }
 
+function getUnreachableChatCount(store) {
+  const chats = store?.data?.telegram?.unreachableChats;
+  return chats && typeof chats === "object" ? Object.keys(chats).length : 0;
+}
+
+function telegramPermanentRejectReason(error) {
+  const body = error?.body || {};
+  const description = String(body.description || error?.message || "");
+  if (/blocked/i.test(description)) return "bot 被对方屏蔽";
+  if (Number(body.error_code) === 403 || /kicked|not a member/i.test(description)) {
+    return "bot 已被移出群或无发言权限";
+  }
+  if (/chat not found/i.test(description)) return "找不到该会话";
+  return "Telegram 拒绝发送";
+}
+
+class TelegramUnreachableChatNotifier {
+  static COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+  constructor({ store, outbox, allowlist, getBotName = () => "Telegram bot", now = Date.now, logger = () => {} } = {}) {
+    Object.assign(this, { store, outbox, allowlist, getBotName, now, logger });
+    store.data.telegram.unreachableChats ||= {};
+  }
+
+  _save() {
+    try { this.store.save({ force: true }); }
+    catch (error) { this.logger({ errorClass: "telegram_unreachable_state_save_failed" }); }
+  }
+
+  async handlePermanentReject(item, error) {
+    if (item?.unreachableNoticeForChatId) {
+      this.logger({ errorClass: "telegram_unreachable_notice_rejected" });
+      return;
+    }
+    const chatId = Number(item?.chatId);
+    if (!Number.isFinite(chatId)) return;
+    const key = String(chatId);
+    const chats = this.store.data.telegram.unreachableChats;
+    const now = this.now();
+    const entry = chats[key] || { firstAt: now, lastAt: now, dropped: 0, reason: "" };
+    entry.lastAt = now;
+    entry.dropped = Number(entry.dropped || 0) + 1;
+    entry.reason = telegramPermanentRejectReason(error);
+    const privateRecipients = [...(this.allowlist || [])]
+      .map(Number).filter(id => Number.isInteger(id) && id > 0);
+    const shouldNotify = chatId < 0 && (!entry.lastNotifiedAt || now - entry.lastNotifiedAt >= TelegramUnreachableChatNotifier.COOLDOWN_MS);
+    if (shouldNotify && privateRecipients.length) {
+      entry.lastNotifiedAt = now;
+      const text = `⚠️ ${this.getBotName()} 无法在「某个群」发消息（Telegram 拒绝：${entry.reason}），已有 ${entry.dropped} 条回复未送达。请检查 bot 是否还在群里、是否被禁言。`;
+      for (const recipient of privateRecipients) {
+        const noticeItem = this.outbox.enqueue({ chat_id: recipient, text }, {
+          priority: "notice",
+          requestId: `unreachable-chat:${now}:${recipient}:${crypto.randomUUID()}`,
+          unreachableNoticeForChatId: chatId,
+        });
+        if (typeof this.outbox.deliver === "function") {
+          await this.outbox.deliver(noticeItem).catch(() => {});
+        }
+      }
+    }
+    chats[key] = entry;
+    this._save();
+  }
+
+  async onDelivered(item) {
+    if (item?.unreachableNoticeForChatId) return;
+    const key = String(Number(item?.chatId));
+    const chats = this.store.data.telegram.unreachableChats || {};
+    if (!chats[key]) return;
+    delete chats[key];
+    this._save();
+    this.logger({ event: "telegram_unreachable_chat_recovered" });
+  }
+}
+
 function recoveryNetworkReason(error) {
   const text = String(error || "");
   if (/DNS|resolv(?:e|ing)|ENOTFOUND|EAI_AGAIN/i.test(text)) return "网络 DNS 解析失败";
@@ -2267,12 +2342,13 @@ class TelegramOutbox {
   static MAX_AGE_MS = 24 * 60 * 60 * 1000;
   static MAX_RETRIES = 10;
 
-  constructor(store, { send, now = Date.now, logger = (event) => console.warn(JSON.stringify(event)), onDelivered = null }) {
+  constructor(store, { send, now = Date.now, logger = (event) => console.warn(JSON.stringify(event)), onDelivered = null, onPermanentReject = null }) {
     this.store = store;
     this.send = send;
     this.now = now;
     this.logger = logger;
     this.onDelivered = onDelivered;
+    this.onPermanentReject = onPermanentReject;
     this.active = new Map();
     this.flushing = null;
     store.data.telegram.outbox ||= [];
@@ -2319,10 +2395,11 @@ class TelegramOutbox {
     }
   }
 
-  enqueue(params, { priority = "normal", requestId = null, recoveryNotice = null } = {}) {
+  enqueue(params, { priority = "normal", requestId = null, recoveryNotice = null, unreachableNoticeForChatId = null } = {}) {
     const queue = this.store.data.telegram.outbox;
     const item = { id: crypto.randomUUID(), kind: "sendMessage", chatId: params.chat_id,
-      params: { ...params }, priority, requestId, recoveryNotice, receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
+      params: { ...params }, priority, requestId, recoveryNotice, unreachableNoticeForChatId,
+      receivedAt: this.now(), replayCount: 0, nextAttemptAt: 0 };
     queue.push(item);
     try {
       this._trimOverflow();
@@ -2365,6 +2442,7 @@ class TelegramOutbox {
       } catch (error) {
         if (this._isPermanentReject(error)) {
           this._remove(item, "telegram_permanent_reject");
+          if (this.onPermanentReject) await this.onPermanentReject(item, error);
           throw error;
         }
         item.replayCount = Number(item.replayCount || 0) + 1;
@@ -5414,11 +5492,16 @@ async function main() {
     logger: event => console.log(JSON.stringify(event)),
   });
   let ackManager = null;
+  let unreachableNotifier = null;
   const outbox = new TelegramOutbox(store, {
     send: params => telegram.call("sendMessage", params, { serialize: true }),
     onDelivered: (item, result) => {
       recordRecoveryNoticeDelivered(store, item);
+      void unreachableNotifier?.onDelivered(item, result);
       return ackManager?.handleDelivered(item, result);
+    },
+    onPermanentReject: (item, error) => {
+      return unreachableNotifier?.handlePermanentReject(item, error);
     },
   });
   telegram.outbox = outbox;
@@ -5443,9 +5526,6 @@ async function main() {
     })));
   }, 30000);
   stallTimer.unref?.();
-  // Start recovery before intake, without allowing a stalled send to block polling.
-  void outbox.flush().catch(() => console.error("Outbox recovery failed"));
-
   let telegramTransportRecovery = null;
   const telegramTransportFailoverEnabled = parseBooleanEnv(
     process.env.TELEGRAM_TRANSPORT_FAILOVER,
@@ -5504,6 +5584,12 @@ async function main() {
   telegram.recoveryNotices = new TelegramRecoveryNotices({
     store, outbox, allowlist, getBotName: () => botIdentity.current.username || "Telegram bot",
   });
+  unreachableNotifier = new TelegramUnreachableChatNotifier({
+    store, outbox, allowlist, getBotName: () => botIdentity.current.username || "Telegram bot",
+    logger: event => console.warn(JSON.stringify(event)),
+  });
+  // Start recovery before intake, without allowing a stalled send to block polling.
+  void outbox.flush().catch(() => console.error("Outbox recovery failed"));
 
   function ensureTelegramHealthState() {
     if (!store.data.telegram || typeof store.data.telegram !== "object") {
@@ -10095,6 +10181,7 @@ async function main() {
           `replayQueued: ${rt.authRecoveryReplayTask?.text ? "yes" : "no"}`,
           `outboxQueued: ${getOutboxStatus(store).queued}`,
           `outboxDiscarded: ${getOutboxStatus(store).discarded}`,
+          `unreachableChats: ${getUnreachableChatCount(store)}`,
           `autoCompact: ${autoCompact ? "on" : "off"} (soft ${formatPercent(contextThresholds.soft)}, hard ${formatPercent(contextThresholds.hard)}, emergency ${formatPercent(contextThresholds.emergency)})`,
           `telegramPolling: ${buildPollingStatusLine()}`,
           `telegramState: ${ensureTelegramHealthState().state}`,
@@ -10452,6 +10539,7 @@ module.exports = {
     TelegramOutbox,
     TelegramAckManager,
     TelegramStallMonitor,
+    TelegramUnreachableChatNotifier,
     resolveTelegramStallNoticeMs,
     formatCommandApprovalMessage,
     formatFileApprovalMessage,
@@ -10461,6 +10549,8 @@ module.exports = {
     TelegramActiveRequests,
     handleAppServerExitRequests,
     getOutboxStatus,
+    getUnreachableChatCount,
+    telegramPermanentRejectReason,
     installGracefulShutdown,
     terminateChild,
     INDEX_CODE_SHA256,

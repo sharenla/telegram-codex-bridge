@@ -1685,3 +1685,9 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - **T4.11 complete（待 T4.12 后统一灰度）**：四个等待入口（命令审批、文件审批、文本回答、多问题）统一进入 `waitingForUser`；同一条 ack 显示「❓ 等你回答」并注明 10 分钟后拒绝或跳过。按钮回答恢复 processing；5 分钟只通过 `reply_to_message_id` 对问题消息发送一次提醒；10 分钟超时恢复 processing 并追加自动拒绝/跳过说明。只改问题文案与等待反馈，callback_data 的 `appr|token|...` / `ui|token|...` 格式和 token 生成机制保持不变，未改 10 分钟时长、autoApprove、Deribit 门禁。
 - **Test Results**：新增 `tests/waiting-for-user.test.js`，旧代码先失败后通过；覆盖 ack waiting、按钮恢复、5 分钟单次 reply、10 分钟自动跳过、T4.10 waiting 抑制、四类中文快照和 callback token 格式。全套 **232/232 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 全部通过。
 - **维护者人工验收（部署后）**：在 rv-prediction 私聊发一条需要审批的只读命令，例如「运行 ls 看一下当前目录，需要我批准」。OBS/RV 当前 `AUTO_APPROVE=1`，简单命令可能不会触发审批；若 rv 也自动批准，改用会触发 `request_user_input` 的无副作用任务验证文本回答路径，或在不改线上配置的前提下以测试快照作为审批路径证据。若触发审批，预期同一 ack 变为「等你回答」、问题消息为中文、按钮点「拒绝」后 ack 回 processing 并最终收尾；5 分钟提醒只出现一次。
+
+### T4.12 实现与 Test Results（2026-09-24）
+
+- **T4.12 complete（待三实例灰度）**：永久拒绝仍完全沿用 `_isPermanentReject` 判定；新增持久化 `telegram.unreachableChats`，记录首次/最近拒绝时间、累计丢弃条数和中文原因。群或其他负数 chat 永久拒绝时，24 小时内最多经 outbox 通知 allowlist 中的正数维护者私聊；维护者私聊自身被拒绝时只记结构化错误，不递归通知。原群后续成功送达会清除记录并记录恢复事件；`/status` 增加 `unreachableChats: N`。通知、结构化日志和测试断言均不包含完整群 ID。
+- **Test Results**：新增 `tests/unreachable-chat.test.js`，旧代码先红后绿；覆盖结构化 403 通知、24 小时限频与 dropped 累加、成功清除、维护者私聊防循环、outbox hook 和 `/status` 计数。全套 **237/237 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 全部通过。
+- **部署后维护者验收**：三个 bot 各发 `/status`，确认新 `codeVersion`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变，并核对 `unreachableChats`。不做真实移群/屏蔽演练，T4.12 依赖测试覆盖。

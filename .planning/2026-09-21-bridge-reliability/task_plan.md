@@ -9,7 +9,7 @@
 
 ## Next Step
 
-下一项执行 **T4.12**（回复永久发不出去时告知维护者）；T4.11 已完成，两个任务按要求分开提交并在 T4.12 后一次灰度部署。
+T4.11 与 T4.12 已完成本地实现与检查；下一步按 rv-prediction → default → strategy-observation 一次灰度部署，交维护者复核后进入 T4.4。
 规格见 `handoff_codex.md` Phase 4 对应小节。T4.9a / T4.9b / T4.10 已于 2026-09-24 人工验收通过（见 progress.md）。
 之后顺序：T4.4 → T4.8 → T4.6 → T4.7 → Phase 4 收口（v0.4.0）。
 
@@ -77,7 +77,7 @@ Phase 4
 - [x] T4.9b codex-lb 模式下，旧 ChatGPT 登录的旁路 401（拉模型列表、MCP 连接）不再误标 auth_failing
 - [x] T4.10 任务长时间无进展时在 ack 上提示（不杀任务），进展恢复后复原
 - [x] T4.11 模型向用户提问时 ack 显示「等你回答」；提问文案中文化；长时间未答提醒一次
-- [ ] T4.12 回复永久发不出去（bot 被移出群/被屏蔽）时私聊告知维护者
+- [x] T4.12 回复永久发不出去（bot 被移出群/被屏蔽）时私聊告知维护者
 - [ ] T4.4 群内改中文文案 + 处置建议；英文原文只进日志与 `/health`；既有生命周期通知（认证恢复、`Started new thread`、thread 失效、额度切号）并入 ack；白名单提示中文化；`/stop` 显示「已按你的要求停止」
 - [ ] T4.8 bot token 不再出现在 curl 的 argv 里（改走 `--config -` 从 stdin 传参）
 - [ ] T4.6 日志保留策略：`launchd.stderr.log` 纳入轮转
