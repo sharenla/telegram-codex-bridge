@@ -591,6 +591,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
+| 2026-09-24 T4.9 演练 | Claude 查看 rv 进程树时 `ps` 输出未脱敏，bridge 的 curl 命令行被打印进会话记录（截断于 150 字符：bot 编号 + token 密钥前 4 位，完整 token 未泄露）。第二次同类事故 | 1 | 不足以冒用；是否轮换由维护者决定。再次说明 T4.8 必要。规则重申：任何 `ps`/`pgrep -l` 输出一律先过脱敏 sed，或只打印 PID |
 | 2026-09-23 T3.2 | 宽限期递增规则存在数值矛盾：handoff「T3.2 补充」同时写“下一轮宽限期翻倍”和“60 → 120 → 300 秒封顶”；严格翻倍并封顶应为 60 → 120 → 240 → 300 | 已按顺序读取契约、Next Step/Decisions、T3.1 验收和 supervisor 全文；原样提交维护者三份规划文件 `4838e81` | 按用户硬约束停在实现前，请维护者选择严格翻倍含 240 秒，或固定三级 60/120/300。脚本及已有测试未改，没有安装或重启，线上仍为上轮已验收的 T3.1 版本；本轮未另作线上健康检查 |
 | 2026-09-23 T2.5 | 重启复用 ack 的 inbox 持久化前提与实际生命周期冲突：dispatch 使用副本，turn/start 返回或进入内存队列即删除 inbox | 读取 TelegramInbox.run、startOrSteerTurn、turn/completed；新增 6 项管理器测试并做初步接入，复核发现缺口 | 停止修改业务代码及部署。需维护者明确 inbox 延迟出队与 turn/排队/steer/重试的完成边界；未勾选 T2.5，未推进 T2.6 |
 | 2026-09-21 调查期 | `~/mnt/wukong` 这个 rclone 挂载不含 `Library/`，读不到 wukong 的 service 日志 | 1 | 改用 SSH `remote-mac-wukong` 直接在 wukong 上统计 |
@@ -1573,3 +1574,42 @@ T2.8a 后本机已不可能出现同 token 第二进程；T2.2 后重启也不�
 - 已完成的 Phase 1–3 逻辑覆盖到位；T2.6 / T2.7 / T3.5 / T3.6 四条路径仅测试验证，待真实故障
 - **4 处未覆盖**：app-server 单独崩溃（零输出）、任务卡住无进展、模型提问时状态误导、回复因 403 永久丢弃且维护者不知情
 - Phase 4 删去 T4.1 / T4.2 / T4.3 / T4.5（划线保留），新增 T4.9–T4.12
+
+### 方案 A：两个命名实例改走 codex-lb（2026-09-24，维护者决定并授权执行）
+
+背景：openclaw 账号池 refresh token 陆续被吊销，strategy-observation 与 rv-prediction 长期 `auth_failing`，
+T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。维护者选方案 A：命名实例也改走 codex-lb。
+
+操作（由 Claude 在 wukong 执行，非 Codex；未改代码、未碰 auth.json / auth-profiles）：
+- 两实例各自的 `config/instances/<name>.env`（git 忽略）与 service 目录 `.env` 末尾追加从 default 复制的 4 行：
+  `CODEX_BACKEND`、`CODEX_LB_CODEX_BASE_URL`、`CODEX_LB_ENV_KEY`、`CODEX_LB_API_KEY`（注释「方案A」）
+- 原文件备份在 `~/.telegram-bridge-env-backups/`（目录 700、文件 600），**不在仓库内**；回滚 = 用备份覆盖后 kickstart
+- `launchctl kickstart -k` 重启；bridge 自动把 codex-lb provider 写入各实例私有 `data/codex-home/config.toml`（`~/.codex` 未被改动），
+  并重置旧 thread（「Reset 2 saved Codex thread(s) after backend switch to codex-lb」）
+
+验收：
+| 实例 | 结果 |
+|---|---|
+| rv-prediction | ✅ 维护者发「回复一个字：好」得到回复，`/status` codexBackend 由 auth_failing 复位 ok |
+| strategy-observation | ✅ 启动日志确认 codex-lb、codeVersion=313d82d6；真实应答待维护者顺手确认 |
+
+观察（→ findings / 后续小修，不阻塞）：
+1. codex-lb 模式下，实例私有 codex-home 里的旧 ChatGPT 登录仍被两处旁路使用：拉模型列表（`codex_models_manager`）与
+   MCP 连接（`rmcp::transport::worker`），启动及新建 thread 时报 401。`shouldEmitAuthWatchdogFromStderr` 只放过
+   `codex_login::auth::manager`，这两类 401 会把状态误标 `auth_failing`，直到下一次成功 turn 复位。default 因私有登录仍有效不受影响
+2. 同一原因，两个命名实例的 MCP 工具在 codex-lb 下可能不可用（旧登录失效所致，非本方案引入）
+3. `426 Upgrade Required`（codex-lb 不支持 websocket，回落 HTTP）为正常现象，default 同样存在
+
+下一步：重做 T4.9 线上演练（rv 私聊无副作用长任务 → 看到「正在处理」后
+`B=$(pgrep -f "telegram-codex-bridge-rv-prediction-service/index.js"); pkill -P "$B" -f "codex app-server"`）。
+
+### T4.9 线上演练（2026-09-24 12:32 UTC+8，rv-prediction）—— 通过（附一个缺口 → T4.9a）
+
+- 方案 A 之后重做演练：维护者私聊 rv 发无副作用长任务，看到「正在处理」后执行
+  `B=$(pgrep -f "telegram-codex-bridge-rv-prediction-service/index.js"); pkill -P "$B" -f "codex app-server"`
+- ✅ `#d7b581` ack 由 processing → `backendInterrupted`，维护者确认 Telegram 显示「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#d7b581）」；无自动重跑
+- ✅ 前一请求 `#7716ec` 已 completed，不受影响；演练后 `/status` codexBackend=ok
+- ⚠️ **缺口**：当时无排队任务，bridge 没有自行拉起 app-server；约 15 秒后 supervisor 连续 3 次检查不健康，
+  **重启了整个 bridge**（`Bridge app-server unhealthy for 3 checks; restarting; consecutive=1; next_grace=120`）。
+  结果可用，但：① 空档期新消息可能被报错或丢到重启后；② 白白计一次强杀、下一轮宽限期升到 120 秒；
+  ③ T4.9 规格前提「下一条消息到来时会重新拉起」与代码不符（该处 `waitForCodexBackendRecovery` 在 `codex` 为空时直接抛错）→ **T4.9a**

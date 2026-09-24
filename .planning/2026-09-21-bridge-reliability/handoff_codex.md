@@ -948,7 +948,54 @@ npm run install:<instance>
   看到「正在处理」后在 wukong 上 `pkill -f "rv-prediction-service.*app-server"`（只杀 app-server，不杀 bridge），
   预期同一条 ack 变为「Codex 后端意外退出，这条任务已中断」
 
-T4.10 / T4.11 / T4.12 的规格在 T4.9 验收后补充。
+**T4.9 规格更正（2026-09-24 线上演练发现）**：上文「现状」中「下一条消息到来时会重新拉起 app-server」与代码不符——
+`waitForCodexBackendRecovery` 在 `codex` 为空时直接抛错。演练中无排队任务时，是 supervisor 在约 15 秒后重启了整个 bridge。由 T4.9a 修正。
+
+**T4.9a app-server 意外退出后立即自行拉起（2026-09-24）**
+- 现状：`handleAppServerExitRequests` 只在有排队任务时调用 `restartQueued`；无排队时 `codex` 保持为空，直到 supervisor 判不健康并重启整个 bridge
+- 要做：
+  1. 非预期退出（`expected === false`）后，**无论有无排队任务**，都立即重新拉起 app-server；有排队任务时拉起后照旧继续队列（T4.9 逻辑不变）
+  2. 退避：连续失败按 1 秒 → 5 秒 → 30 秒重试，**5 分钟内最多 3 次**；3 次都失败就停止自拉，交给 supervisor（不与 supervisor 抢）
+  3. 认证失败导致的退出（`authFailure`）仍交 T3.4b 的恢复流程，不重复拉起
+  4. 拉起期间（`codex` 为空）到达的新消息：必须得到中文说明而不是异常或沉默——要么排队等拉起完成后处理（ack 显示「⚙️ 后端正在重启，稍后自动处理」），
+     要么在自拉彻底失败时 ack 收尾为 `❌ Codex 后端暂时无法启动，请稍后重发（#id）`。二选一由你按现有排队机制判断，写入 progress.md
+- 验收：
+  - 测试「非预期退出、无排队 → 立即重新拉起，无需新消息触发」（先在现代码上失败）
+  - 测试「连续拉起失败 → 1s/5s/30s 退避，第 3 次后停止」
+  - 测试「拉起期间到达的消息 → 有中文 ack，拉起后被处理（或按上条收尾）」
+  - 测试「authFailure 退出 → 不走自拉」；T4.9 原有测试保持通过
+- 部署后维护者重做一次 T4.9 演练：预期 ack 同样变为中断提示，且 supervisor 日志**没有**新的 `unhealthy ... restarting`，bridge 进程 PID 不变
+
+**T4.9b codex-lb 模式下旁路 401 不再误标 auth_failing（2026-09-24）**
+- 背景：方案 A 后两个命名实例走 codex-lb（见 progress.md「方案 A」）。实例私有 codex-home 里的旧 ChatGPT 登录已失效，
+  app-server 仍用它去拉模型列表（`codex_models_manager::manager ... 401`）和连 MCP（`rmcp::transport::worker ... HTTP 401`），
+  启动与新建 thread 时各报几条。`shouldEmitAuthWatchdogFromStderr` 在 codex-lb 下只放过 `codex_login::auth::manager`，
+  这两类 401 因此把 `codexBackend` 误标 `auth_failing`，直到下一个成功 turn 才复位
+- 要做：codex-lb 启用时，`codex_models_manager` 与 `rmcp::transport` 的 401 / `refresh_token_invalidated` 同样不触发认证看门狗；
+  只写一行结构化日志（同一类 10 分钟内最多一行）。**provider / turn 本身的 401 必须照旧触发恢复**
+- 验收：测试「codex-lb + models_manager 401 → 不触发」；「codex-lb + rmcp 401 → 不触发」；
+  「codex-lb + turn/responses 401 → 仍触发」；「非 codex-lb + models_manager 401 → 行为与现状一致」
+- **不做**：不修改、不删除任何 auth.json；不处理 MCP 在 codex-lb 下能否使用（旧登录失效所致，另议）
+
+**T4.10 任务长时间无进展时在 ack 上提示（2026-09-24）**
+- 场景：turn 已开始，但长时间没有任何新事件（模型卡住、上游挂起、长命令无输出），用户只看到一条不变的「⚙️ 正在处理」，无从判断是在干活还是卡死
+- 「进展」定义：该 turn 收到**任何** app-server 通知（item 开始/完成、消息或推理增量、命令输出、token 用量等）即刷新 `lastProgressAt`
+- 要做：
+  1. 执行中请求 `now − lastProgressAt ≥ 5 分钟`（环境变量 `TELEGRAM_STALL_NOTICE_MS`，默认 300000）时，编辑**同一条 ack**，在原状态后追加一行：
+     `⏳ 已有 X 分钟没有新进展，任务仍在运行（可能在执行耗时命令）。可以继续等，或发 /stop 停止。`
+  2. 仍无进展时每 5 分钟更新一次分钟数（走 T2.5 ack 的编辑限频），不新发消息
+  3. 一旦有进展，去掉这一行，恢复正常的处理中文案
+  4. **不杀任务、不自动重试、不改 turn 超时逻辑**；只影响 ack 文案
+  5. 已处于「等你回答」（T4.11 将实现）或已进入终态的请求不提示；排队中的请求不在本任务范围
+  6. 检查用单个定时器扫描 activeRequests（例如每 30 秒），不要给每个请求各开定时器；进程重启后不需要恢复这一状态
+- 验收（用假时钟）：
+  - 测试「running 请求 5 分钟无事件 → ack 追加提示，X=5」（先在现代码上失败）
+  - 测试「再过 5 分钟 → 分钟数更新为 10，仍是同一条 ack」
+  - 测试「随后收到一条增量事件 → 提示行消失」
+  - 测试「4 分 59 秒 → 不提示」；「请求完成后定时器不再动它」；「TELEGRAM_STALL_NOTICE_MS 可覆盖默认值」
+- 部署后无需人工演练（线上难以安全制造 5 分钟卡死）；维护者日常遇到长任务时顺带观察即可
+
+T4.11 / T4.12 的规格在 T4.10 验收后补充。
 
 ### （旧）Phase 4 — 错误分类与可观测指标
 （分支 `feat/phase-4-observability`）
