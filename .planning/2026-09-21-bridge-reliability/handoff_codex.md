@@ -1116,6 +1116,26 @@ npm run install:<instance>
 - 只做：把各实例 `data/logs/launchd.stderr.log`、`launchd.stdout.log` 纳入 `scripts/rotate-bridge-logs.sh` 的现有轮转规则（与 bridge.*.log 相同的大小 / 保留份数）
 - 验收：`zsh -n ./scripts/rotate-bridge-logs.sh`；扩展 `tests/log-rotation.test.js` 覆盖 launchd 两个文件；轮转不截断正在写的文件句柄（沿用现有做法）
 
+**T4.7 改写：收口文档（2026-09-24）**
+- 新建 `docs/reliability-postmortem.md`（中文，面向以后接手的人，**300 行以内**），只写结论、链接证据，不复制大段日志：
+  1. 一句话目标与结果（「任何被受理的消息，在任何故障下都至少收到一条中文说明」）
+  2. 根因清单：每条一行「现象 → 根因 → 修复任务号 → 提交」，来源 findings.md 与 progress.md
+  3. **断联场景覆盖矩阵**：以 findings F16 为底，把 ❌ / 🟡 更新为当前状态，并标出「线上实测 / 仅测试覆盖」
+  4. 已知限制（设计上不做）：bot token 被吊销时无法通知任何人；群里未 @bot 的消息不响应；线上无法安全演练的路径（T2.6 / T2.7 / T3.5 / T3.6 / T4.10 / T4.11 / T4.12）
+  5. 运维要点：灰度顺序、`/status` 关键字段含义、T4.9 崩溃演练命令、诊断输出一律先脱敏（含 `grep -c` 自匹配陷阱）
+  6. 遗留事项（不在本计划内）：openclaw 账号池重新登录与配置修复；bot token 是否轮换；是否 push；Clash 外部控制器是否开启；命名实例 MCP 在 codex-lb 下不可用
+- **公开仓库红线**：文档中不得出现 token、API key、群 ID、chat id、账号邮箱、本机绝对路径中的用户名以外的敏感信息；群一律称「某个群」
+- 同时在 `README.md` 或 `docs/bridge-reliability.md` 增加一行链接到该文档（二选一，选已存在的入口）
+- 验收：文档存在且 ≤300 行；`grep -nE "bot[0-9]{6,}:|-100[0-9]{6,}|@[A-Za-z0-9.-]+\.(com|cn)" docs/reliability-postmortem.md` 无输出；findings.md 不改
+
+**Phase 4 收口（T4.7 完成、维护者确认三 bot `/status` 之后）**
+1. `task_plan.md` 核对 Phase 4 全部未划线条目已打勾（含 T4.4a/b/c、T4.9a/b），Status 改 complete；Current Phase 写「全部完成」
+2. `git switch main` → `git merge --no-ff feat/phase-4-feedback-completion` → `git tag -a v0.4.0 -m "Phase 4: Chinese feedback completion"`
+3. 用 `git rev-list -n1 v0.4.0` 取 commit，核对 tag 内 `index.js` 与 supervisor 哈希与三实例一致
+4. 从 main 按灰度顺序重装三实例一次，使 `DEPLOYED_REF` 指向 main 上的 commit（`ref=v0.4.0`）；每批后 token argv 计数为 0
+5. 台账补 tag 行；**不要 push**
+6. 在 progress.md 写「计划完成」小结：共完成任务数、测试总数、四个 tag、遗留事项（同 T4.7 第 6 条）
+
 ### （旧）Phase 4 — 错误分类与可观测指标
 （分支 `feat/phase-4-observability`）
 

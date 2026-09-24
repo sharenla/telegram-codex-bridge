@@ -9,8 +9,8 @@
 
 ## Next Step
 
-下一项执行 **T4.7**（T4.4c、T4.8、T4.6 已完成），随后 Phase 4 收口。
-规格见 `handoff_codex.md`「T4.4c」「T4.8」「T4.6 改写」。之后 T4.7 → Phase 4 收口（v0.4.0）。
+执行 **T4.7**（收口文档 `docs/reliability-postmortem.md`），随后 **Phase 4 收口**：合并 main、打 `v0.4.0`、从 main 重装三实例。
+规格见 `handoff_codex.md`「T4.7 改写」「Phase 4 收口」。T4.4c / T4.8 / T4.6 已复核（见 progress.md）。
 
 ## Current Phase
 

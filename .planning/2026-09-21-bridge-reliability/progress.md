@@ -1797,3 +1797,10 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - supervisor 父进程 curl 数量为 `0 / 0 / 0`，bridge curl 仅计数 `1 / 1 / 1`，未打印命令行。最终 `ps -Ao args | grep -c "api.telegram.org/bot[0-9]"` 为 **0**。rv 首批计数 2、default 批次计数 1 均由尚未重装的旧实例 curl 产生，重装后归零；未发现新代码泄露 token。
 - **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=354e8ada`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变。
 - T4.8 不需要真实消息演练；维护者可复核最终 token argv 计数为 0。T4.6 可在下一次日志超过阈值时观察 `launchd.stdout.log` / `launchd.stderr.log` 与 bridge 日志遵循同一轮转规则。
+
+### T4.4c / T4.8 / T4.6 复核（2026-09-24，Claude）—— 通过（待维护者 /status）
+
+- 三实例 index.js `354e8adab3ec`、DEPLOYED_REF `e1c6972`；工作区干净
+- T4.8：`TelegramApi` 唯一的 curl 调用点已改为 `--config -` 经 stdin 传 URL（引号 / 反斜杠 / 换行转义）；
+  线上复查（只输出计数，用 `telegram[.]org` 写法避免 grep 匹配到自身）：`api.telegram.org/bot<id>` 0、`/file/bot<id>` 0，当时有 3 个 curl 在跑
+- 注意：`ps | grep -c "<字面串>"` 会把 grep 自身与 ssh 的 shell 命令行算进去，复查时须用 `[.]` 之类写法，否则会误报非零
