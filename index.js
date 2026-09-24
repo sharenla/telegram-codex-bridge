@@ -1602,6 +1602,48 @@ function truncateMiddle(text, maxLen) {
   return `${takeUtf8Prefix(value, headBytes)}${marker}${takeUtf8Suffix(value, tailBytes)}`;
 }
 
+function classifyUserFacingFailure(errorText = "") {
+  const text = String(errorText || "");
+  if (/ETIMEDOUT|ECONNRESET|fetch failed|socket hang up/i.test(text)) return "网络连接中断";
+  if (/Codex backend is unavailable|app-server(?: process)? (?:is )?not (?:ready|available)|backend unavailable/i.test(text)) {
+    return "Codex 后端暂时不可用";
+  }
+  if (/context|token limit/i.test(text)) return "对话上下文过长，建议 /new 开启新对话后重发";
+  if (/thread not found/i.test(text)) return "对话已失效，请重发";
+  if (/\b(?:502|503)\b|Bad Gateway/i.test(text)) return "Telegram 服务端暂时不可用";
+  return "处理失败，原因未知";
+}
+
+function sanitizeUserFacingFailureDetail(errorText = "") {
+  return redactTelegramBotToken(String(errorText || ""))
+    .replace(/https?:\/\/\S+/gi, "<链接>")
+    .replace(/[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}/g, "<邮箱>")
+    .replace(/\b(?:thread|turn)_[A-Za-z0-9_-]+\b/gi, "<内部标识>")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatUserFacingFailure({ errorText = "", group = false } = {}) {
+  const reason = classifyUserFacingFailure(errorText);
+  if (group) return reason;
+  const detail = truncateMiddle(sanitizeUserFacingFailureDetail(errorText), 80);
+  return detail ? `${reason}（${detail}）` : reason;
+}
+
+function formatStopNotice({ active = false, clearedCount = 0 } = {}) {
+  const cleared = Number(clearedCount || 0);
+  if (!active) return cleared ? `当前没有进行中的任务，已清空排队的 ${cleared} 条` : "当前没有进行中的任务";
+  return cleared ? `已请求停止，已清空排队的 ${cleared} 条` : "已请求停止";
+}
+
+function formatApprovalCallbackLabel(value = "") {
+  return {
+    accept: "允许",
+    acceptForSession: "本会话都允许",
+    decline: "拒绝",
+  }[String(value)] || "已处理";
+}
+
 function formatRelativeAge(ms) {
   const value = Number(ms || 0);
   if (!value) return "n/a";
@@ -2523,6 +2565,7 @@ class TelegramAckManager {
     if (status === "replay") return `🔁 服务重启后继续处理${suffix}`;
     if (status === "interrupted") return `⚠️ 服务重启，这条任务已中断，请确认后重发${suffix}`;
     if (status === "backendInterrupted") return `⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发${suffix}`;
+    if (status === "userInterrupted") return `⏹ 已按你的要求停止${suffix}`;
     if (status === "backendRestarting") return `⚙️ 后端正在重启，稍后自动处理${suffix}`;
     return `⏳ 已收到，正在处理${suffix}`;
   }
@@ -2644,7 +2687,7 @@ class TelegramAckManager {
 
   async update(state, status, { reason = "", position = null, force = false, timeoutOutcome = null } = {}) {
     if (!state || state.status === status && !reason && status !== "queued") return false;
-    if (["completed", "failed", "upstreamPartial", "upstreamUnavailable", "modelBusy", "interrupted", "backendInterrupted"].includes(status)) {
+    if (["completed", "failed", "upstreamPartial", "upstreamUnavailable", "modelBusy", "interrupted", "backendInterrupted", "userInterrupted"].includes(status)) {
       state.lifecycleNotes = [];
     }
     if (status === "waitingForUser") state.stallNotice = "";
@@ -2660,7 +2703,7 @@ class TelegramAckManager {
 
   async appendLifecycleNote(state, note) {
     const value = String(note || "").trim();
-    if (!state || !value || ["completed", "failed", "upstreamPartial", "upstreamUnavailable", "modelBusy", "interrupted", "backendInterrupted"].includes(state.status)) {
+    if (!state || !value || ["completed", "failed", "upstreamPartial", "upstreamUnavailable", "modelBusy", "interrupted", "backendInterrupted", "userInterrupted"].includes(state.status)) {
       return false;
     }
     state.lifecycleNotes ||= [];
@@ -7200,10 +7243,7 @@ async function main() {
                 const hint = isRemoteCompactTransportFailureText(rawDetail)
                   ? buildRemoteCompactFailureHint({ hasSpareAccounts: autoAccountFailover && accountProfiles.length > 1 })
                   : null;
-                const maxDetailLen = hint ? 900 : 1200;
-                const text = detail
-                  ? `Turn ${status}: ${truncateMiddle(detail, maxDetailLen)}${hint ? `\n\n${hint}` : ""}`
-                  : `Turn ${status}.${hint ? `\n\n${hint}` : ""}`;
+                const text = `${formatUserFacingFailure({ errorText: detail || status, group: isGroupChat(chatId) })}${hint ? `\n\n${hint}` : ""}`;
                 if (!(shouldRedactCodexTurnOutput(chatId) && hasSeenGroupVisibleText(rt, text))) {
                   await telegram.sendMessage({ chat_id: chatId, text });
                   if (shouldRedactCodexTurnOutput(chatId)) rememberGroupVisibleText(rt, text);
@@ -7212,6 +7252,7 @@ async function main() {
             }
             if (!authRetried && !retried && !contextRetried) {
               for (const ack of turnMeta?.acks || (turnMeta?.ack ? [turnMeta.ack] : [])) {
+                if (ack?.userInterrupted) continue;
                 if (modelBusyResult.partialExecution) await ackManager?.update(ack, "upstreamPartial");
                 else if (modelBusyResult.exhausted) await ackManager?.update(ack, "modelBusy", {
                   position: Number(turnMeta?.modelRetryCount || MAX_UPSTREAM_RETRIES),
@@ -7219,7 +7260,7 @@ async function main() {
                 else if (upstreamResult.partialExecution) await ackManager?.update(ack, "upstreamPartial");
                 else if (upstreamResult.exhausted) await ackManager?.update(ack, "upstreamUnavailable");
                 else await ackManager?.update(ack, "failed", {
-                  reason: isGroupChat(chatId) ? "上游处理失败" : truncateMiddle(extractTurnErrorText(turn) || "执行未完成", 120),
+                  reason: formatUserFacingFailure({ errorText: extractTurnErrorText(turn) || "执行未完成", group: isGroupChat(chatId) }),
                 });
                 if (ack?.requestId) activeRequests.remove(ack.requestId);
               }
@@ -8873,9 +8914,9 @@ async function main() {
     await telegram.sendMessage({
       chat_id: chatId,
       text: [
-        "This chat is not in TELEGRAM_ALLOWLIST.",
-        `Your chat_id is: ${chatId}`,
-        "Add it to .env, then restart the bridge.",
+        "这个会话还没有开通 bot。",
+        `请把下面的 chat_id 发给维护者开通：${chatId}`,
+        "开通后请重启 bridge。",
       ].join("\n"),
     }).catch((err) => {
       console.warn(`Failed to notify unauthorized chat ${chatId}:`, err.message);
@@ -9335,21 +9376,23 @@ async function main() {
 
   async function interruptTurn({ chatId, session }) {
     const rt = getRuntime(chatId);
+    const activeEntry = activeRequests.list().find(entry => String(entry.chatId) === String(chatId)
+      && entry.state === "running");
+    const activeAck = activeEntry
+      ? (ackManager.byRequestId.get(activeEntry.requestId) || ackManager.restore(activeEntry))
+      : null;
     const clearedCount = clearPendingTasks(rt);
     if (rt.compactionInProgress && !rt.activeTurnId) {
       rt.compactionInProgress = false;
       rt.postCompactionRetryTask = null;
-      const text = clearedCount
-        ? `Compaction was pending. Cleared ${clearedCount} queued task(s).`
-        : "Compaction was pending and is now cancelled.";
-      await telegram.sendMessage({ chat_id: chatId, text });
+      await telegram.sendMessage({
+        chat_id: chatId,
+        text: clearedCount ? `已取消待执行的上下文压缩，已清空排队的 ${clearedCount} 条` : "已取消待执行的上下文压缩",
+      });
       return;
     }
     if (!session.threadId || !rt.activeTurnId) {
-      const text = clearedCount
-        ? `No active turn. Cleared ${clearedCount} queued task(s).`
-        : "No active turn.";
-      await telegram.sendMessage({ chat_id: chatId, text });
+      await telegram.sendMessage({ chat_id: chatId, text: formatStopNotice({ active: false, clearedCount }) });
       return;
     }
     await requestWithAccountFailover({
@@ -9361,10 +9404,13 @@ async function main() {
         turnId: rt.activeTurnId,
       }),
     });
-    const text = clearedCount
-      ? `Interrupt requested. Cleared ${clearedCount} queued task(s).`
-      : "Interrupt requested.";
-    await telegram.sendMessage({ chat_id: chatId, text });
+    if (activeAck) {
+      activeAck.userInterrupted = true;
+      await ackManager.update(activeAck, "userInterrupted");
+      if (activeEntry?.requestId) activeRequests.remove(activeEntry.requestId);
+    } else {
+      await telegram.sendMessage({ chat_id: chatId, text: formatStopNotice({ active: true, clearedCount }) });
+    }
   }
 
   function scheduleEdit({ chatId, messageId, getText, rt, itemId }) {
@@ -10215,11 +10261,11 @@ async function main() {
       const answer = answerParts.join(" ").trim();
       const action = pendingActions.get(token);
       if (!action || action.kind !== "userInputText" || action.chatId !== chatId) {
-        await telegram.sendMessage({ chat_id: chatId, text: "Unknown /answer token." });
+        await telegram.sendMessage({ chat_id: chatId, text: "这个回答链接已失效或不存在" });
         return;
       }
       await action.resolve(answer);
-      await telegram.sendMessage({ chat_id: chatId, text: "Answer submitted." });
+      await telegram.sendMessage({ chat_id: chatId, text: "已收到你的回答" });
       return;
     }
 
@@ -10229,7 +10275,7 @@ async function main() {
       stopTyping(chatId);
       await telegram.sendMessage({
         chat_id: chatId,
-        text: `处理失败：${truncateMiddle(err.message || String(err), 1200)}`,
+        text: formatUserFacingFailure({ errorText: err.message || String(err), group: isGroupChat(chatId) }),
       }).catch((notifyErr) => {
         console.warn(`Failed to notify chat ${chatId} about handler error:`, notifyErr.message);
       });
@@ -10252,13 +10298,13 @@ async function main() {
     try {
       if (kind === "appr" && action && action.kind === "approval" && action.chatId === chatId) {
         await action.resolve(arg);
-        await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `Sent: ${arg}`, show_alert: false });
+        await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: `已选择：${formatApprovalCallbackLabel(arg)}`, show_alert: false });
         return;
       }
 
       if (kind === "ui" && action && action.kind === "userInputOption" && action.chatId === chatId) {
         await action.resolve(arg);
-        await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "Answer submitted", show_alert: false });
+        await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "已收到你的回答", show_alert: false });
         return;
       }
 
@@ -10305,7 +10351,7 @@ async function main() {
 
         if (actionType === "stop") {
           await interruptTurn({ chatId, session });
-          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "Interrupt requested", show_alert: false });
+          await telegram.answerCallbackQuery({ callback_query_id: cbq.id, text: "已请求停止", show_alert: false });
           await renderMenuMessage(chatId, cbq.message.message_id);
           return;
         }
@@ -10457,7 +10503,7 @@ async function main() {
         });
       } catch (error) {
         await ackManager.update(ack, "failed", {
-          reason: isGroupChat(entry.chatId) ? "上游处理失败" : truncateMiddle(error.message || String(error), 120),
+          reason: formatUserFacingFailure({ errorText: error.message || String(error), group: isGroupChat(entry.chatId) }),
         });
         activeRequests.remove(entry.requestId);
       }
@@ -10543,6 +10589,10 @@ module.exports = {
     TelegramAckManager,
     TelegramStallMonitor,
     TelegramUnreachableChatNotifier,
+    classifyUserFacingFailure,
+    formatUserFacingFailure,
+    formatStopNotice,
+    formatApprovalCallbackLabel,
     resolveTelegramStallNoticeMs,
     formatCommandApprovalMessage,
     formatFileApprovalMessage,

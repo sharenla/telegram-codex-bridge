@@ -1719,3 +1719,11 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - ack 维护生命周期行并在完成、失败、中断等终态清除，避免终态继续显示过期的切号或恢复提示；新建 thread 文案不再暴露 thread id。
 - 新增 `tests/feedback-lifecycle.test.js`，先在旧代码上失败后通过；全套 **240/240 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
 - T4.4a 已完成，待 T4.4b 完成后统一灰度部署；当前没有修改 findings.md。
+
+### T4.4b 实现与 Test Results（2026-09-24）
+
+- `/stop`、白名单拒绝、`/answer` 失效/成功回执、审批按钮回执统一改为中文；活动任务的停止结果编辑原 ack 为「⏹ 已按你的要求停止（#id）」，不改变停止判定、命令名或 callback_data/token。
+- 新增用户可见失败原因分类：网络连接中断、Codex 后端暂时不可用、上下文过长、对话失效、Telegram 服务端暂时不可用及未知原因。群聊只显示中文短句；私聊在中文原因后附脱敏原文前 80 字，隐藏 URL、邮箱、bot token 和 thread/turn 标识。
+- 新增 `tests/feedback-copy.test.js`，先在旧代码上失败后通过；全套 **242/242 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.4a、T4.4b 与总项 T4.4 均已完成，待统一灰度部署；未修改 findings.md。
+- 部署后人工验收：三个 bot 各发 `/status`，确认新 `codeVersion`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变；rv 私聊 `/stop`（无任务）应显示「当前没有进行中的任务」。
