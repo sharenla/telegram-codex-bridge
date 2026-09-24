@@ -948,7 +948,193 @@ npm run install:<instance>
   看到「正在处理」后在 wukong 上 `pkill -f "rv-prediction-service.*app-server"`（只杀 app-server，不杀 bridge），
   预期同一条 ack 变为「Codex 后端意外退出，这条任务已中断」
 
-T4.10 / T4.11 / T4.12 的规格在 T4.9 验收后补充。
+**T4.9 规格更正（2026-09-24 线上演练发现）**：上文「现状」中「下一条消息到来时会重新拉起 app-server」与代码不符——
+`waitForCodexBackendRecovery` 在 `codex` 为空时直接抛错。演练中无排队任务时，是 supervisor 在约 15 秒后重启了整个 bridge。由 T4.9a 修正。
+
+**T4.9a app-server 意外退出后立即自行拉起（2026-09-24）**
+- 现状：`handleAppServerExitRequests` 只在有排队任务时调用 `restartQueued`；无排队时 `codex` 保持为空，直到 supervisor 判不健康并重启整个 bridge
+- 要做：
+  1. 非预期退出（`expected === false`）后，**无论有无排队任务**，都立即重新拉起 app-server；有排队任务时拉起后照旧继续队列（T4.9 逻辑不变）
+  2. 尝试节奏（2026-09-24 裁决 A）：**总计 3 次**——退出后立即 1 次、失败后隔 1 秒 1 次、再失败隔 5 秒 1 次；舍去 30 秒档。
+     3 次都失败就停止自拉，交给 supervisor（其判定窗口约 15 秒，3 次尝试约 6 秒内结束，不与它抢）。
+     **5 分钟内**累计自拉次数上限 3 次（防崩溃循环时反复自拉）；窗口过后计数清零
+  3. 认证失败导致的退出（`authFailure`）仍交 T3.4b 的恢复流程，不重复拉起
+  4. 拉起期间（`codex` 为空）到达的新消息：必须得到中文说明而不是异常或沉默——要么排队等拉起完成后处理（ack 显示「⚙️ 后端正在重启，稍后自动处理」），
+     要么在自拉彻底失败时 ack 收尾为 `❌ Codex 后端暂时无法启动，请稍后重发（#id）`。二选一由你按现有排队机制判断，写入 progress.md
+- 验收：
+  - 测试「非预期退出、无排队 → 立即重新拉起，无需新消息触发」（先在现代码上失败）
+  - 测试「连续拉起失败 → 立即 / 1s / 5s 共 3 次，之后不再尝试」；「5 分钟内第二次崩溃时剩余额度正确扣减，窗口过后恢复」
+  - 测试「拉起期间到达的消息 → 有中文 ack，拉起后被处理（或按上条收尾）」
+  - 测试「authFailure 退出 → 不走自拉」；T4.9 原有测试保持通过
+- 部署后维护者重做一次 T4.9 演练：预期 ack 同样变为中断提示，且 supervisor 日志**没有**新的 `unhealthy ... restarting`，bridge 进程 PID 不变
+
+**T4.9b codex-lb 模式下旁路 401 不再误标 auth_failing（2026-09-24）**
+- 背景：方案 A 后两个命名实例走 codex-lb（见 progress.md「方案 A」）。实例私有 codex-home 里的旧 ChatGPT 登录已失效，
+  app-server 仍用它去拉模型列表（`codex_models_manager::manager ... 401`）和连 MCP（`rmcp::transport::worker ... HTTP 401`），
+  启动与新建 thread 时各报几条。`shouldEmitAuthWatchdogFromStderr` 在 codex-lb 下只放过 `codex_login::auth::manager`，
+  这两类 401 因此把 `codexBackend` 误标 `auth_failing`，直到下一个成功 turn 才复位
+- 要做：codex-lb 启用时，`codex_models_manager` 与 `rmcp::transport` 的 401 / `refresh_token_invalidated` 同样不触发认证看门狗；
+  只写一行结构化日志（同一类 10 分钟内最多一行）。**provider / turn 本身的 401 必须照旧触发恢复**
+- 验收：测试「codex-lb + models_manager 401 → 不触发」；「codex-lb + rmcp 401 → 不触发」；
+  「codex-lb + turn/responses 401 → 仍触发」；「非 codex-lb + models_manager 401 → 行为与现状一致」
+- **不做**：不修改、不删除任何 auth.json；不处理 MCP 在 codex-lb 下能否使用（旧登录失效所致，另议）
+
+**T4.10 任务长时间无进展时在 ack 上提示（2026-09-24）**
+- 场景：turn 已开始，但长时间没有任何新事件（模型卡住、上游挂起、长命令无输出），用户只看到一条不变的「⚙️ 正在处理」，无从判断是在干活还是卡死
+- 「进展」定义：该 turn 收到**任何** app-server 通知（item 开始/完成、消息或推理增量、命令输出、token 用量等）即刷新 `lastProgressAt`
+- 要做：
+  1. 执行中请求 `now − lastProgressAt ≥ 5 分钟`（环境变量 `TELEGRAM_STALL_NOTICE_MS`，默认 300000）时，编辑**同一条 ack**，在原状态后追加一行：
+     `⏳ 已有 X 分钟没有新进展，任务仍在运行（可能在执行耗时命令）。可以继续等，或发 /stop 停止。`
+  2. 仍无进展时每 5 分钟更新一次分钟数（走 T2.5 ack 的编辑限频），不新发消息
+  3. 一旦有进展，去掉这一行，恢复正常的处理中文案
+  4. **不杀任务、不自动重试、不改 turn 超时逻辑**；只影响 ack 文案
+  5. 已处于「等你回答」（T4.11 将实现）或已进入终态的请求不提示；排队中的请求不在本任务范围
+  6. 检查用单个定时器扫描 activeRequests（例如每 30 秒），不要给每个请求各开定时器；进程重启后不需要恢复这一状态
+- 验收（用假时钟）：
+  - 测试「running 请求 5 分钟无事件 → ack 追加提示，X=5」（先在现代码上失败）
+  - 测试「再过 5 分钟 → 分钟数更新为 10，仍是同一条 ack」
+  - 测试「随后收到一条增量事件 → 提示行消失」
+  - 测试「4 分 59 秒 → 不提示」；「请求完成后定时器不再动它」；「TELEGRAM_STALL_NOTICE_MS 可覆盖默认值」
+- 部署后无需人工演练（线上难以安全制造 5 分钟卡死）；维护者日常遇到长任务时顺带观察即可
+
+**T4.11 模型向用户提问时，ack 显示「等你回答」（2026-09-24）**
+- 现状（代码勘查）：四个等待点——`item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、
+  `item/tool/requestUserInput`、`input/request`——另发一条**英文**问题消息（`Approve command?` / `Reply with: /answer …`）后，
+  经 `waitForTelegramAction` 等待，**10 分钟超时自动按拒绝 / 空答案继续**，用户不会被告知；
+  这期间 ack 仍是「⚙️ 正在处理」，T4.10 还会误报「X 分钟没有新进展」。多问题的 requestUserInput 直接发英文说明并返回空答案
+- 要做：
+  1. 进入任一等待点时，把该 chat 当前 running 请求的 ack 切到新状态 `waitingForUser`：
+     `❓ 等你回答：请看下方的问题，10 分钟内未回复将自动<拒绝|跳过>（#id）`（审批类写「拒绝」，提问类写「跳过」）。
+     T4.10 的无进展提示不作用于该状态（现实现只看 processing / steer，保持即可，补测试锁住）
+  2. 收到回答（按钮或 `/answer`）→ ack 回到 processing
+  3. 等待满 **5 分钟**仍未回答 → 以回复（reply_to）问题消息的方式发**一次**提醒：`⏰ 还在等你回答，5 分钟后将自动<拒绝|跳过>`
+  4. 超时 → ack 回到 processing 并在其后附一行 `⌛ 10 分钟未回复，已自动<拒绝|跳过>，任务继续`（该行在下一次终态时可丢弃）
+  5. 四处问题消息中文化（**只改文案，不改 callback_data 格式与 token 机制**）：
+     - 命令审批：`是否允许执行这条命令？` + 命令 + `原因：…` / `保护规则：…`；按钮 `允许` / `本会话都允许` / `拒绝`
+     - 文件修改审批：`是否允许修改文件？` + 标题 + `原因：…`；按钮同上
+     - 文本回答：`请直接回复：/answer <token> 你的回答`
+     - 多问题：`暂不支持一次回答多个问题，已跳过，任务继续`
+  6. **不做**：不改 10 分钟超时时长；不改自动审批（autoApprove）与 Deribit 相关的门禁及其文案（后者归 T4.4 评估）；不持久化等待状态（重启后按 T2.5 已有逻辑处理）
+- 验收：
+  - 测试「命令审批等待 → ack=waitingForUser，文案含『等你回答』与『拒绝』」（先在现代码上失败）
+  - 测试「点按钮回答 → ack 回 processing」；「5 分钟未答 → 恰好一条 reply_to 提醒」；「10 分钟超时 → ack 附自动拒绝说明」
+  - 测试「waitingForUser 期间 T4.10 不提示无进展」；四处问题消息快照为中文、callback_data 不变
+- 部署后维护者演练（rv 私聊，无副作用）：让 bot 执行一条需要审批的只读命令（例如「运行 ls 看一下当前目录，需要我批准」；
+  若该实例审批策略不触发审批则跳过并记录），确认 ack 显示「等你回答」、问题为中文、点「拒绝」后任务继续并收尾
+
+**T4.12 回复永久发不出去时私聊告知维护者（2026-09-24）**
+- 现状：`TelegramOutbox.deliver` 遇永久拒绝（结构化 403，或 description 为 chat not found / bot blocked / kicked / not a member）
+  只 `_remove(item, "telegram_permanent_reject")` 并计入 `discardedTotal`，**没有人被告知**；
+  bot 被移出群或被禁言后，群里用户和维护者都看不到任何说明
+- 要做：
+  1. 永久拒绝发生时记录 `store.data.telegram.unreachableChats[chatId] = { firstAt, lastAt, dropped, reason }`（`dropped` 累加）
+  2. 若该 chat **不是**维护者私聊：经 outbox 给维护者私聊（allowlist 中正数 chat id，同 T3.4 规则）发一次：
+     `⚠️ <bot 名> 无法在「<群名，取不到则写『某个群』>」发消息（Telegram 拒绝：<中文原因>），已有 N 条回复未送达。请检查 bot 是否还在群里、是否被禁言。`
+     中文原因映射：403 / kicked / not a member → 「bot 已被移出群或无发言权限」；blocked → 「bot 被对方屏蔽」；chat not found → 「找不到该会话」
+  3. 同一 chat **24 小时内最多通知一次**；之后该 chat 再有成功送达即清除记录并在日志记一行恢复（不另发消息）
+  4. **防止自我循环**：发往维护者私聊的消息本身被永久拒绝（维护者屏蔽了 bot）时只记日志，不再尝试通知
+  5. 群 ID 不写入通知正文与日志正文（日志可用 chat id 后 4 位）；`/status` 增加一行 `unreachableChats: N`
+  6. **不做**：不自动退群、不停止处理该群的入站消息、不改 `_isPermanentReject` 判定
+- 验收：
+  - 测试「群消息结构化 403 → 维护者私聊收到一条中文通知，含未送达条数」（先在现代码上失败）
+  - 测试「24 小时内再次 403 → 不重复通知，dropped 累加」；「该群恢复送达 → 记录清除」
+  - 测试「维护者私聊自身 403 → 不通知、不循环」；「通知与日志正文不含完整群 ID」；`/status` 显示 unreachableChats
+- 部署后无需人工演练（不应为测试把 bot 移出真实群）
+
+**T4.4 改写：中文反馈收尾（2026-09-24，拆为 T4.4a / T4.4b，分开提交、一次部署）**
+
+> 原 T4.4 旧规格（「群内改中文文案 + 处置建议」一行）以本节为准。范围只限**用户在处理一条消息的过程中会看到的**文字；
+> `/menu` 按钮、`/effort` `/resume` `/accounts` `/sessions` `/test` 等管理命令的用法提示与 `/status` 字段名**不在范围**（维护者自用，保持英文）；
+> Deribit 相关门禁文案**不在范围**。
+
+**T4.4a 请求期间的生命周期通知并入 ack**
+- 现状：一条请求处理中，以下通知会**另发新消息**，群里一条请求可能刷出 5–6 条（2026-09-23 实战见 progress.md「T3.4 线上验收」第 4 点）：
+  | 位置（约） | 现文案 | 改为 ack 状态（同一条 ack 追加一行，或切到对应状态） |
+  |---|---|---|
+  | 6482 / 6520 | `Current account hit a limit…` / `All configured Codex accounts appear to be limited…` | 终态 `failed`：`所有 Codex 账号额度已用尽，请稍后重发` |
+  | 6492 / 6559 | `Detected an account problem… Switching to account N…` / `…usage limit… Switching…` | 行：`🔄 当前账号异常，正在切换备用账号重试（第 N 个）` |
+  | 6502 / 6568 | `Account N failed its health check. Trying the next…` | 同上一行，更新 N |
+  | 6445 / 6741 | `Codex backend auth recovery failed after trying every spare account once.` | 已由 T3.4b ack 终态覆盖 → **删除这条单发**（维护者私聊汇总保留） |
+  | 8932 | `Codex account rotation: <reason>; switching to <label>.` | 行：`🔄 正在切换 Codex 账号` |
+  | 8544 附近 | `认证恢复完成，正在自动重试刚才被中断的输入。` 等 | 行：`🔁 认证已恢复，正在自动重试` |
+  | 8804 | `Started new thread: <threadId>`（英文且暴露内部 id） | 行：`🆕 已开启新对话（之前的上下文不再保留）`；**不显示 threadId** |
+  | 9288 | `Codex 后端重启后旧 thread 已失效，已自动新建 thread 并重试这条消息。` | 行：`🆕 旧对话已失效，已自动开启新对话重试` |
+  | 9168 | `Steering active turn…` | 已由 ack `steer` 状态覆盖 → **删除这条单发** |
+- 规则：
+  1. 有对应 ack（该 chat 当前 running / 即将重跑的请求）时，一律写入 ack，**不单独 sendMessage**；追加行在请求进入终态时去掉
+  2. **没有** ack 的场景（例如维护者手动 `/new`、`/accounts` 切号、后台轮换时无请求在跑）：仍可单发，但文案用上表中文，且不含 threadId、账号邮箱等内部标识
+  3. 不改切号 / 重试 / 新建 thread 的**判定与流程**，只改「怎么告诉用户」
+- 验收：
+  - 测试「一次切号重试 → 群里只有一条 ack，且含『正在切换备用账号』，无新 sendMessage」（先在现代码上失败）
+  - 测试「新建 thread → ack 追加中文行，文案不含 threadId」；「无 ack 时手动 /new → 单发中文、不含 threadId」
+  - 测试「额度全部用尽 → ack 终态中文」；「终态后追加行消失」
+
+**T4.4b 用户可见文案中文化**
+- 逐条改为（**只改文案，不改命令名、callback_data、token 机制**）：
+  | 位置（约） | 现文案 | 改为 |
+  |---|---|---|
+  | 9351–9352 | `No active turn.` / `No active turn. Cleared N queued task(s).` | `当前没有进行中的任务` / `当前没有进行中的任务，已清空排队的 N 条` |
+  | 9345–9346 | `Compaction was pending…` | `已取消待执行的上下文压缩`（有清空时附「，已清空排队的 N 条」） |
+  | /stop 成功中断 | （现为 ack 的 interrupted / 其他） | 被停止请求的 ack 终态：`⏹ 已按你的要求停止（#id）`，与「服务重启中断」区分 |
+  | 10309 回执 | `Interrupt requested` | `已请求停止` |
+  | 白名单拒绝 `notifyUnauthorizedChat` | `This chat is not in TELEGRAM_ALLOWLIST…` | `这个会话还没有开通 bot。请把下面的 chat_id 发给维护者开通：<chat_id>`（仍只提示一次；chat_id 是对方自己的，可以显示） |
+  | 10219 / 10223 | `Unknown /answer token.` / `Answer submitted.` | `这个回答链接已失效或不存在` / `已收到你的回答` |
+  | 10256 / 10262 回执 | `Sent: <arg>` / `Answer submitted` | `已选择：允许 / 本会话都允许 / 拒绝`（按 arg 映射）/ `已收到你的回答` |
+  | 7232 / 9682 / 10460 私聊失败原因 | `truncateMiddle(原始英文错误, 120)` | 先按下条分类给中文，**私聊**在其后括号附原文前 80 字；群聊只给中文 |
+- **失败原因分类**（替代群里笼统的「上游处理失败」）：新增一个纯函数把错误文本映射为中文，至少覆盖：
+  网络 / 超时（`ETIMEDOUT` `ECONNRESET` `fetch failed` `socket hang up`）→ `网络连接中断`；
+  `Codex backend is unavailable` / app-server 未就绪 → `Codex 后端暂时不可用`；
+  `context` / `token limit` 超限 → `对话上下文过长，建议 /new 开启新对话后重发`；
+  `thread not found` → `对话已失效，请重发`；其他 → `处理失败，原因未知`（原文只进日志）
+- 验收：文案快照测试覆盖上表每一行；测试「群聊失败只含中文」；「私聊失败含中文 + 原文前 80 字」；
+  分类函数对每一类给出正确中文且未知不吞掉已知形态；`grep` 检查上表英文原串已不再出现在发送路径中
+- 部署后人工验收：维护者在 rv 私聊发 `/stop`（无任务时）应看到「当前没有进行中的任务」；其余以测试为准
+
+**T4.4c T4.4 复核小修（2026-09-24）**
+1. `classifyUserFacingFailure` 收窄：
+   - `context deadline exceeded` / `context canceled` / `timed out` / `timeout` → `网络连接超时`（放在上下文判断之前）
+   - 上下文超限只认 `context window` / `context length` / `maximum context` / `token limit` / `too many tokens` → 维持现中文
+   - `502` / `503` / `Bad Gateway` / `Service Unavailable` → `上游服务暂时不可用`（这里是 Codex 上游，不是 Telegram）
+2. 普通 turn 失败：**有 ack 时不再另发单独消息**，只保留 ack 终态（`remote compact` 的处置提示 hint 若有，附在 ack 终态原因之后）；
+   无 ack 的 turn（例如维护者手动 `/compact` 之外的无请求场景）才单发，文案同 ack
+3. 上下文压缩结束的单发改中文：取消 → `已取消上下文压缩，继续使用当前对话`；失败 → `上下文压缩失败，继续使用当前对话`（私聊附脱敏原文前 80 字，群聊只中文）
+4. 白名单提示删去「开通后请重启 bridge。」一行
+- 验收：分类函数新增用例（`context deadline exceeded` → 超时；`context window exceeded` → 上下文过长；`503` → 上游）；
+  测试「有 ack 的 turn 失败 → 只有 ack 编辑、无新 sendMessage」（先在现代码上失败）；压缩结束文案快照；白名单文案快照
+
+**T4.8 补充（2026-09-24，执行前必读）**
+- 覆盖 `TelegramApi` 的**所有** curl 调用（含 getUpdates、sendMessage、editMessageText、answerCallbackQuery、文件上传类）。
+  只把含 token 的 URL 移到 `--config -` 经 stdin 传入（config 行 `url = "..."`，注意对引号 / 反斜杠转义），其余参数保持不变
+- **stdin 冲突**：若某个调用已经用 stdin 传请求体（`--data-binary @-`、`-F x=@-` 等），改为把请求体也写进 config（`data-binary = "..."`）
+  或写入 0600 临时文件并在结束后删除；不得因此把 token 放回 argv
+- 错误信息 / 日志中若会回显 curl 命令或 URL，统一经现有 token 脱敏函数
+- 验收补充：部署后 `ps -Ao args | grep -c "api.telegram.org/bot[0-9]"` 为 0（**只输出计数**）；三 bot `/status` 正常；
+  测试「callOnce 的 argv 不含 token 与 `/bot<id>:`」「config 内容正确转义」「上传类调用同样不含 token」
+
+**T4.6 改写：日志轮转（2026-09-24）**
+- 原规格中「errorClass 汇总单独长期保留」属统计类，随 T4.1–T4.5 一并删除，**不做**
+- 只做：把各实例 `data/logs/launchd.stderr.log`、`launchd.stdout.log` 纳入 `scripts/rotate-bridge-logs.sh` 的现有轮转规则（与 bridge.*.log 相同的大小 / 保留份数）
+- 验收：`zsh -n ./scripts/rotate-bridge-logs.sh`；扩展 `tests/log-rotation.test.js` 覆盖 launchd 两个文件；轮转不截断正在写的文件句柄（沿用现有做法）
+
+**T4.7 改写：收口文档（2026-09-24）**
+- 新建 `docs/reliability-postmortem.md`（中文，面向以后接手的人，**300 行以内**），只写结论、链接证据，不复制大段日志：
+  1. 一句话目标与结果（「任何被受理的消息，在任何故障下都至少收到一条中文说明」）
+  2. 根因清单：每条一行「现象 → 根因 → 修复任务号 → 提交」，来源 findings.md 与 progress.md
+  3. **断联场景覆盖矩阵**：以 findings F16 为底，把 ❌ / 🟡 更新为当前状态，并标出「线上实测 / 仅测试覆盖」
+  4. 已知限制（设计上不做）：bot token 被吊销时无法通知任何人；群里未 @bot 的消息不响应；线上无法安全演练的路径（T2.6 / T2.7 / T3.5 / T3.6 / T4.10 / T4.11 / T4.12）
+  5. 运维要点：灰度顺序、`/status` 关键字段含义、T4.9 崩溃演练命令、诊断输出一律先脱敏（含 `grep -c` 自匹配陷阱）
+  6. 遗留事项（不在本计划内）：openclaw 账号池重新登录与配置修复；bot token 是否轮换；是否 push；Clash 外部控制器是否开启；命名实例 MCP 在 codex-lb 下不可用
+- **公开仓库红线**：文档中不得出现 token、API key、群 ID、chat id、账号邮箱、本机绝对路径中的用户名以外的敏感信息；群一律称「某个群」
+- 同时在 `README.md` 或 `docs/bridge-reliability.md` 增加一行链接到该文档（二选一，选已存在的入口）
+- 验收：文档存在且 ≤300 行；`grep -nE "bot[0-9]{6,}:|-100[0-9]{6,}|@[A-Za-z0-9.-]+\.(com|cn)" docs/reliability-postmortem.md` 无输出；findings.md 不改
+
+**Phase 4 收口（T4.7 完成、维护者确认三 bot `/status` 之后）**
+1. `task_plan.md` 核对 Phase 4 全部未划线条目已打勾（含 T4.4a/b/c、T4.9a/b），Status 改 complete；Current Phase 写「全部完成」
+2. `git switch main` → `git merge --no-ff feat/phase-4-feedback-completion` → `git tag -a v0.4.0 -m "Phase 4: Chinese feedback completion"`
+3. 用 `git rev-list -n1 v0.4.0` 取 commit，核对 tag 内 `index.js` 与 supervisor 哈希与三实例一致
+4. 从 main 按灰度顺序重装三实例一次，使 `DEPLOYED_REF` 指向 main 上的 commit（`ref=v0.4.0`）；每批后 token argv 计数为 0
+5. 台账补 tag 行；**不要 push**
+6. 在 progress.md 写「计划完成」小结：共完成任务数、测试总数、四个 tag、遗留事项（同 T4.7 第 6 条）
 
 ### （旧）Phase 4 — 错误分类与可观测指标
 （分支 `feat/phase-4-observability`）

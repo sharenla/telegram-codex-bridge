@@ -8,6 +8,8 @@ BRIDGE_ROOT="${BRIDGE_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
 LOG_DIR="${BRIDGE_LOG_DIR:-${BRIDGE_ROOT}/data/logs}"
 STDOUT_LOG="${BRIDGE_STDOUT_LOG:-${LOG_DIR}/bridge.stdout.log}"
 STDERR_LOG="${BRIDGE_STDERR_LOG:-${LOG_DIR}/bridge.stderr.log}"
+LAUNCHD_STDOUT_LOG="${BRIDGE_LAUNCHD_STDOUT_LOG:-${LOG_DIR}/launchd.stdout.log}"
+LAUNCHD_STDERR_LOG="${BRIDGE_LAUNCHD_STDERR_LOG:-${LOG_DIR}/launchd.stderr.log}"
 
 STDOUT_MAX_BYTES="${BRIDGE_STDOUT_MAX_BYTES:-10485760}"
 STDERR_MAX_BYTES="${BRIDGE_STDERR_MAX_BYTES:-26214400}"
@@ -55,7 +57,9 @@ file_size_bytes() {
 
 if [[ "${MODE}" == "--needs-rotation" ]]; then
   if (( $(file_size_bytes "${STDERR_LOG}") > STDERR_MAX_BYTES )) \
-    || (( $(file_size_bytes "${STDOUT_LOG}") > STDOUT_MAX_BYTES )); then
+    || (( $(file_size_bytes "${STDOUT_LOG}") > STDOUT_MAX_BYTES )) \
+    || (( $(file_size_bytes "${LAUNCHD_STDERR_LOG}") > STDERR_MAX_BYTES )) \
+    || (( $(file_size_bytes "${LAUNCHD_STDOUT_LOG}") > STDOUT_MAX_BYTES )); then
     exit 0
   fi
   exit 1
@@ -124,7 +128,8 @@ rotate_if_oversized() {
 
 prune_by_age() {
   find "${LOG_DIR}" -type f \
-    \( -name 'bridge.stdout.log.*.gz' -o -name 'bridge.stderr.log.*.gz' \) \
+    \( -name 'bridge.stdout.log.*.gz' -o -name 'bridge.stderr.log.*.gz' \
+       -o -name 'launchd.stdout.log.*.gz' -o -name 'launchd.stderr.log.*.gz' \) \
     -mtime "+${MAX_AGE_DAYS}" -exec rm -f -- {} +
 }
 
@@ -151,7 +156,8 @@ prune_to_total_cap() {
   total_bytes="$(log_dir_size_bytes)"
   while (( total_bytes > TOTAL_MAX_BYTES )); do
     oldest_archive="$(find "${LOG_DIR}" -maxdepth 1 -type f \
-      \( -name 'bridge.stdout.log.*.gz' -o -name 'bridge.stderr.log.*.gz' \) \
+      \( -name 'bridge.stdout.log.*.gz' -o -name 'bridge.stderr.log.*.gz' \
+         -o -name 'launchd.stdout.log.*.gz' -o -name 'launchd.stderr.log.*.gz' \) \
       -print | LC_ALL=C sort | head -n 1)"
     if [[ -z "${oldest_archive}" ]]; then
       break
@@ -163,7 +169,11 @@ prune_to_total_cap() {
 
 rotate_if_oversized "${STDERR_LOG}" "${STDERR_MAX_BYTES}"
 rotate_if_oversized "${STDOUT_LOG}" "${STDOUT_MAX_BYTES}"
+rotate_if_oversized "${LAUNCHD_STDERR_LOG}" "${STDERR_MAX_BYTES}"
+rotate_if_oversized "${LAUNCHD_STDOUT_LOG}" "${STDOUT_MAX_BYTES}"
 prune_by_age
 prune_by_count "${STDERR_LOG}"
 prune_by_count "${STDOUT_LOG}"
+prune_by_count "${LAUNCHD_STDERR_LOG}"
+prune_by_count "${LAUNCHD_STDOUT_LOG}"
 prune_to_total_cap

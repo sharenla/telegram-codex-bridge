@@ -136,6 +136,13 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ---
 
+### Phase 4: 中文反馈补全与收尾
+
+- **Status:** in_progress
+- **T4.9 实现：** app-server 非预期退出时，running activeRequests 的 ack 改为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」并移出台账；queued 条目保留，主动重启后端并继续队列；expected 退出不触发；认证失败退出交由 T3.4b 恢复流程，同时不遗留 running 台账。
+- **测试：** 新增 tests/app-server-exit.test.js 四项回归；旧路径先失败，修复后全套 **215/215 pass / fail 0**。
+- **部署：** 待提交后按 rv-prediction → 观察一轮 → default → strategy-observation 灰度。
+
 ## Test Results
 
 | Test | Input | Expected | Actual | Status |
@@ -543,10 +550,64 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 ---
 
+**T4.9 部署台账：**
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 10:59 (UTC+8) | rv-prediction | feat/phase-4-feedback-completion | 98e434e2b5cb | f27db7027cd2 | 灰度通过；appServerSpawnedMs=1084 |
+| 2026-09-24 11:01 (UTC+8) | default | feat/phase-4-feedback-completion | 98e434e2b5cb | f27db7027cd2 | 灰度通过；appServerSpawnedMs=1973 |
+| 2026-09-24 11:02 (UTC+8) | strategy-observation | feat/phase-4-feedback-completion | 98e434e2b5cb | f27db7027cd2 | 灰度通过；appServerSpawnedMs=1029 |
+
+### T4.9 灰度部署（2026-09-24）
+
+- 提交：98e434e2b5cb532c513944c59ee3e1173535e81e（Handle app-server exits without silent requests）。
+- 三实例安装顺序完成：rv-prediction → 观察一轮 → default → strategy-observation。
+- 运行哈希：三实例 index.js=f27db7027cd2、scripts/codex-launch-supervisor.sh=7a7878924997；三实例 DEPLOYED_REF 均为 98e434e2b5cb... / v0.3.0-3-g98e434e。
+- 启动证据：appServerSpawnedMs 为 rv-prediction 1084 ms、default 1973 ms、strategy-observation 1029 ms；三实例均有本次 Supervisor ready（start_grace=60）和 Telegram Codex Bridge started。
+- 运行门禁：三进程存活；持久锁目录仍为 3 把锁且 PID 分别匹配对应 service 的 index.js；supervisor 子 curl 0 / 0 / 0；bridge curl 数量 0（未打印命令行）；命名实例角色文件未被覆盖。
+- 本地 store 快照：三实例 activeRequests=0、outboxQueued=0、telegramState=ok；rv-prediction 的 codexBackend=auth_failing 为部署前后持续存在的已知认证失效，未触碰凭证；default / strategy-observation 为 codexBackend=ok。
+
+**维护者人工验收（待确认后继续 T4.10）：**
+
+1. 三个 bot 各发 /status：确认新 codeVersion=f27db702、telegramState=ok、outboxQueued=0、outboxDiscarded=0、truthProfile 不变，并记录各自 codexBackend。
+2. 只在 rv-prediction 私聊执行无副作用长任务；看到「正在处理」后仅杀 app-server，确认同一条 ack 变为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」；确认无自动重跑。
+
+### T4.9 竞态护栏修正部署（2026-09-24）
+
+- 追加提交：2960dba（Guard terminal ack after backend exit）。
+- 原 app-server 退出 ack 在 request reject 竞态下可能被普通失败覆盖；新增 backendExitTerminal guard 后重新按 rv-prediction → 观察一轮 → default → strategy-observation 安装。
+- 新运行哈希：index.js=313d82d616a6、supervisor=7a7878924997；三实例 DEPLOYED_REF 均指向 2960dba，进程和三把持久锁正常。
+- 新启动日志均出现本次 Deployed ref、Telegram Codex Bridge started、Supervisor ready（start_grace=60）和 appServerSpawnedMs；supervisor 子 curl 仍为 0，bridge curl 仅报告数量。
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 11:18 (UTC+8) | rv-prediction | feat/phase-4-feedback-completion | 2960dba | 313d82d616a6 | 竞态护栏重装通过 |
+| 2026-09-24 11:19 (UTC+8) | default | feat/phase-4-feedback-completion | 2960dba | 313d82d616a6 | 竞态护栏重装通过 |
+| 2026-09-24 11:20 (UTC+8) | strategy-observation | feat/phase-4-feedback-completion | 2960dba | 313d82d616a6 | 竞态护栏重装通过 |
+
+维护者人工验收中的 codeVersion 预期值更新为 313d82d6。
+
+### T4.9a / T4.9b / T4.10 灰度部署（2026-09-24）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 13:58 | rv-prediction | `feat/phase-4-feedback-completion` | `63b02a351329c73b65f462beb085211cca7b2520` | `345d09cab371` | ✅ 首批观察通过；appServerSpawnedMs=1118 |
+| 2026-09-24 14:00 | default | `feat/phase-4-feedback-completion` | `63b02a351329c73b65f462beb085211cca7b2520` | `345d09cab371` | ✅ 第二批观察通过；appServerSpawnedMs=2180 |
+| 2026-09-24 14:01 | strategy-observation | `feat/phase-4-feedback-completion` | `63b02a351329c73b65f462beb085211cca7b2520` | `345d09cab371` | ✅ 第三批观察通过；appServerSpawnedMs=1005 |
+
+- 三实例 `DEPLOYED_REF` 均指向 `63b02a3`；工作区与三服务的 `index.js` 哈希一致，supervisor 脚本哈希均为 `7a7878924997`。各批日志均有本次 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=345d09ca`、`appServerSpawnedMs` 及带 `start_grace=60` 的 `Supervisor ready`。
+- 三个 bridge 与 app-server 子进程均存活；命名实例角色文件哈希不变；持久锁目录 3 把锁，各自 PID 与实例 index.js 进程匹配。最后核对 supervisor 发起的 curl 0 个、其 argv 含 token 0 个；bridge/其他 curl 仅计数 3 个，不打印命令行。真实 env、凭证、Clash 配置与 service/store 均未手工改动。
+- **人工验收待维护者执行，Codex 不代发消息**：
+  1. 三个 bot 各发 `/status`：应显示 `codeVersion=345d09ca`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`，并核对 `truthProfile` 不变；请记录每个实例的实际值。旁路 401 可能随真实新建 thread 出现，T4.9b 只保证它不误标 `auth_failing`。
+  2. 仅在 rv-prediction 私聊发无副作用的长任务；看到「正在处理」后先记下 bridge PID，再由维护者在 wukong 执行 `B=$(pgrep -f '/telegram-codex-bridge-rv-prediction-service/index.js' | head -n 1); pkill -P "$B" -f 'codex app-server'`，只杀该实例的 app-server 子进程。预期原 ack 改为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」、不自动重跑，app-server 自动拉起；复查 **bridge PID 不变，supervisor 日志无新的 `unhealthy ... restarting`**。诊断只打印 PID 或先脱敏，不输出完整 ps/curl 命令行。
+  3. T4.10 无需制造五分钟卡死；日常长任务顺带观察同一条 ack 的无进展提示与恢复清除即可。
+
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
+| 2026-09-24 T4.9a 退避次数 | T4.9a 同时要求意外退出后立即拉起、按 1s → 5s → 30s 退避、5 分钟内最多 3 次且第 3 次失败后停止。已提交的 d513440 按“立即 + 3 次重试”实现，实际最多 4 次，违反明确的 3 次上限；若总计只尝试 3 次，则 30s 档在同轮失败中不会执行 | 已核对 handoff T4.9a 数值、retryCodexServerStart 代码与新增测试；T4.9b 两项新增测试旧代码先失败，当前本地 221/221 全绿，但代码未提交；T4.10 未开始 | 按 §6 停止修改与部署，待维护者裁决：A. 总计 3 次（立即、1s、5s），删除本轮 30s 档；或 B. 允许初次 + 3 次重试共 4 次，以完整使用 1s/5s/30s。线上仍是上一轮已验收的 T4.9 版本；本轮没有安装或重启服务，真实 env/凭证未碰 |
+| 2026-09-24 T4.9 演练 | Claude 查看 rv 进程树时 `ps` 输出未脱敏，bridge 的 curl 命令行被打印进会话记录（截断于 150 字符：bot 编号 + token 密钥前 4 位，完整 token 未泄露）。第二次同类事故 | 1 | 不足以冒用；是否轮换由维护者决定。再次说明 T4.8 必要。规则重申：任何 `ps`/`pgrep -l` 输出一律先过脱敏 sed，或只打印 PID |
 | 2026-09-23 T3.2 | 宽限期递增规则存在数值矛盾：handoff「T3.2 补充」同时写“下一轮宽限期翻倍”和“60 → 120 → 300 秒封顶”；严格翻倍并封顶应为 60 → 120 → 240 → 300 | 已按顺序读取契约、Next Step/Decisions、T3.1 验收和 supervisor 全文；原样提交维护者三份规划文件 `4838e81` | 按用户硬约束停在实现前，请维护者选择严格翻倍含 240 秒，或固定三级 60/120/300。脚本及已有测试未改，没有安装或重启，线上仍为上轮已验收的 T3.1 版本；本轮未另作线上健康检查 |
 | 2026-09-23 T2.5 | 重启复用 ack 的 inbox 持久化前提与实际生命周期冲突：dispatch 使用副本，turn/start 返回或进入内存队列即删除 inbox | 读取 TelegramInbox.run、startOrSteerTurn、turn/completed；新增 6 项管理器测试并做初步接入，复核发现缺口 | 停止修改业务代码及部署。需维护者明确 inbox 延迟出队与 turn/排队/steer/重试的完成边界；未勾选 T2.5，未推进 T2.6 |
 | 2026-09-21 调查期 | `~/mnt/wukong` 这个 rclone 挂载不含 `Library/`，读不到 wukong 的 service 日志 | 1 | 改用 SSH `remote-mac-wukong` 直接在 wukong 上统计 |
@@ -1529,3 +1590,217 @@ T2.8a 后本机已不可能出现同 token 第二进程；T2.2 后重启也不�
 - 已完成的 Phase 1–3 逻辑覆盖到位；T2.6 / T2.7 / T3.5 / T3.6 四条路径仅测试验证，待真实故障
 - **4 处未覆盖**：app-server 单独崩溃（零输出）、任务卡住无进展、模型提问时状态误导、回复因 403 永久丢弃且维护者不知情
 - Phase 4 删去 T4.1 / T4.2 / T4.3 / T4.5（划线保留），新增 T4.9–T4.12
+
+### 方案 A：两个命名实例改走 codex-lb（2026-09-24，维护者决定并授权执行）
+
+背景：openclaw 账号池 refresh token 陆续被吊销，strategy-observation 与 rv-prediction 长期 `auth_failing`，
+T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。维护者选方案 A：命名实例也改走 codex-lb。
+
+操作（由 Claude 在 wukong 执行，非 Codex；未改代码、未碰 auth.json / auth-profiles）：
+- 两实例各自的 `config/instances/<name>.env`（git 忽略）与 service 目录 `.env` 末尾追加从 default 复制的 4 行：
+  `CODEX_BACKEND`、`CODEX_LB_CODEX_BASE_URL`、`CODEX_LB_ENV_KEY`、`CODEX_LB_API_KEY`（注释「方案A」）
+- 原文件备份在 `~/.telegram-bridge-env-backups/`（目录 700、文件 600），**不在仓库内**；回滚 = 用备份覆盖后 kickstart
+- `launchctl kickstart -k` 重启；bridge 自动把 codex-lb provider 写入各实例私有 `data/codex-home/config.toml`（`~/.codex` 未被改动），
+  并重置旧 thread（「Reset 2 saved Codex thread(s) after backend switch to codex-lb」）
+
+验收：
+| 实例 | 结果 |
+|---|---|
+| rv-prediction | ✅ 维护者发「回复一个字：好」得到回复，`/status` codexBackend 由 auth_failing 复位 ok |
+| strategy-observation | ✅ 启动日志确认 codex-lb、codeVersion=313d82d6；真实应答待维护者顺手确认 |
+
+观察（→ findings / 后续小修，不阻塞）：
+1. codex-lb 模式下，实例私有 codex-home 里的旧 ChatGPT 登录仍被两处旁路使用：拉模型列表（`codex_models_manager`）与
+   MCP 连接（`rmcp::transport::worker`），启动及新建 thread 时报 401。`shouldEmitAuthWatchdogFromStderr` 只放过
+   `codex_login::auth::manager`，这两类 401 会把状态误标 `auth_failing`，直到下一次成功 turn 复位。default 因私有登录仍有效不受影响
+2. 同一原因，两个命名实例的 MCP 工具在 codex-lb 下可能不可用（旧登录失效所致，非本方案引入）
+3. `426 Upgrade Required`（codex-lb 不支持 websocket，回落 HTTP）为正常现象，default 同样存在
+
+下一步：重做 T4.9 线上演练（rv 私聊无副作用长任务 → 看到「正在处理」后
+`B=$(pgrep -f "telegram-codex-bridge-rv-prediction-service/index.js"); pkill -P "$B" -f "codex app-server"`）。
+
+### T4.9 线上演练（2026-09-24 12:32 UTC+8，rv-prediction）—— 通过（附一个缺口 → T4.9a）
+
+- 方案 A 之后重做演练：维护者私聊 rv 发无副作用长任务，看到「正在处理」后执行
+  `B=$(pgrep -f "telegram-codex-bridge-rv-prediction-service/index.js"); pkill -P "$B" -f "codex app-server"`
+- ✅ `#d7b581` ack 由 processing → `backendInterrupted`，维护者确认 Telegram 显示「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#d7b581）」；无自动重跑
+- ✅ 前一请求 `#7716ec` 已 completed，不受影响；演练后 `/status` codexBackend=ok
+- ⚠️ **缺口**：当时无排队任务，bridge 没有自行拉起 app-server；约 15 秒后 supervisor 连续 3 次检查不健康，
+  **重启了整个 bridge**（`Bridge app-server unhealthy for 3 checks; restarting; consecutive=1; next_grace=120`）。
+  结果可用，但：① 空档期新消息可能被报错或丢到重启后；② 白白计一次强杀、下一轮宽限期升到 120 秒；
+  ③ T4.9 规格前提「下一条消息到来时会重新拉起」与代码不符（该处 `waitForCodexBackendRecovery` 在 `codex` 为空时直接抛错）→ **T4.9a**
+
+### T4.9a Test Results
+
+| Test | Actual | Status |
+|---|---|---|
+| T4.9a restart/queue/ack regressions | 新增 8 项，旧代码先失败；全套 219/219 pass、fail 0 | complete |
+| Required syntax and diff checks | node -c、四个 zsh -n、git diff --check 全部通过 | complete |
+
+### T4.9a 实现与检查（2026-09-24）
+
+- 非预期 app-server 退出后，无论是否有排队任务都立即进入自拉流程；认证失败退出仍只交给 T3.4b，不重复自拉。
+- 自拉采用“初次立即 + 1 秒 / 5 秒 / 30 秒”三次退避重试；第四次启动仍失败时收尾排队请求为「❌ Codex 后端暂时无法启动，请稍后重发（#id）」并停止自拉，交 supervisor 接管。成功启动后恢复正常队列处理。
+- 拉起期间到达的新消息选择**排队等拉起**：ack 为「⚙️ 后端正在重启，稍后自动处理（#id）」；消息进入现有 pendingTasks/activeRequests，成功后继续执行，失败时统一中文收尾。选择理由：复用现有持久队列，避免丢消息和新增第二套生命周期。
+- 新增 tests/app-server-restart.test.js，旧代码先红后绿；全套 **219/219 pass / fail 0**；node -c、四项 zsh -n、git diff --check 通过。
+- 代码与测试文件：index.js、tests/app-server-restart.test.js。
+
+**当前阻塞（2026-09-24）：** T4.9a 的“立即拉起 + 三档退避 + 最多 3 次”数值不能同时成立；提交 d513440 目前最多尝试 4 次。按执行契约停止在部署前，T4.9b 本地草稿保持未提交，T4.10 尚未开始。详见 Error Log；Phase 4 保持 in_progress。
+
+### T4.9a 规格裁决（2026-09-24）—— 选 A
+- 冲突：「立即拉起」+「1s/5s/30s 三档」+「最多 3 次」无法同时成立（Codex 实现为 1+3=4 次，停在部署前，做法正确）
+- 裁决 **A：总计 3 次（立即、1 秒、5 秒），舍去 30 秒档**。理由：自拉的目的是抢在 supervisor 之前恢复；
+  supervisor 约 15 秒判不健康，30 秒档必然落在 supervisor 重启之后，只会与它竞争，无收益
+- 「5 分钟内最多 3 次」为跨崩溃的累计额度，窗口过后清零。handoff T4.9a 第 2 条与对应验收已按此改写
+
+### T4.9a 裁决落实（2026-09-24）
+
+- **Phase 4 / T4.9a complete（待三实例灰度）**：在 `d513440` 之上修正自拉额度；每 5 分钟固定窗口最多启动 3 次，单次崩溃立即、1 秒、5 秒尝试，窗口过后计数清零。跨崩溃共享额度，耗尽时中文收尾排队请求并交 supervisor；认证失败退出不消费额度。
+- 拉起期间的新消息沿用方案 **排队等拉起**，ack 显示「⚙️ 后端正在重启，稍后自动处理」；成功后继续队列，三次耗尽后改为中文失败终态。复用已有 pendingTasks/activeRequests，避免另一套生命周期。
+- **Test Results**：新增裁决相关测试先红后绿；全套 **225/225 pass，fail 0**（含未提交的 T4.9b 草稿测试）；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。新增测试覆盖总计 3 次与 1s/5s、跨崩溃剩余额度、5 分钟清零、额度已耗尽时不再启动，以及认证失败不走自拉。T4.9a 不单独部署，待 T4.9b/T4.10 完成后一起灰度。
+
+### T4.9b 实现与 Test Results（2026-09-24）
+
+- **Phase 4 / T4.9b complete（待三实例灰度）**：codex-lb 模式下仅将 `codex_models_manager::manager` 与 `rmcp::transport` 的 401 / `refresh_token_invalidated` 识别为旁路认证噪声；每类十分钟最多一条不含原文的结构化日志，不触发认证看门狗。provider/turn 401 与非 codex-lb 行为仍按原路径处理。未动凭证与 MCP 配置。
+- 新增 `tests/auth-recovery.test.js` 用例先红后绿，覆盖两类旁路 401、provider 401、非 codex-lb 回归及逐类日志限频；全套 **225/225 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。改动仅 `index.js` 与该测试文件，待 T4.10 完成后一起部署。
+
+### T4.10 实现与 Test Results（2026-09-24）
+
+- **Phase 4 / T4.10 complete（待三实例灰度）**：单个 30 秒扫描器只检查 running activeRequests；同一 turn 的通知刷新内存中的 `lastProgressAt` 并清除提示。达到默认 300000 毫秒后，在同一条 ack 后加中文无进展提示，每五分钟更新显示时长；不杀任务、不自动重试。`TELEGRAM_STALL_NOTICE_MS` 可覆盖首次提示阈值；进程重启不恢复这份内存状态。
+- **Test Results**：新建 `tests/stall-notice.test.js`，旧代码先红后绿；假时钟覆盖 4:59 无提示、5/10 分钟同一 message_id 更新、收到进展后清除、终态不再编辑及环境变量覆盖。全套 **228/228 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。文件：`index.js`、`.env.example`、`tests/stall-notice.test.js`。
+
+### T4.9a / T4.9b / T4.10 人工验收（2026-09-24 14:19 UTC+8）—— 通过
+
+- Claude 复核代码：自拉总计 3 次（立即/1s/5s）、5 分钟跨崩溃额度、authFailure 提前返回不自拉、拉起期间新消息排队并显示「后端正在重启」；
+  T4.9b 仅在 codex-lb 下放过 models_manager / rmcp 两类 401；T4.10 单个 30 秒扫描器、只改同一条 ack。未发现需返工的问题
+  （遗留一个用不到的 30000 常量，无行为影响）
+- 三实例 index.js `345d09cab371`、DEPLOYED_REF `63b02a3`；维护者确认三 bot `/status` codeVersion=345d09ca、codexBackend=ok
+- **T4.9a 重演练（rv）**：杀 app-server 后 `#b37010` ack → backendInterrupted（维护者确认 Telegram 文案）；
+  **bridge PID 保持 16623**，新 app-server 自行拉起，supervisor **无新增** `unhealthy ... restarting`；随后「回复一个字：好」正常回复
+- **T4.9b 线上生效**：日志出现 `codex_auth_noise_ignored`（`rmcp_transport_401`），未误标 auth_failing
+- T4.10：线上未人为制造，日常观察
+
+### T4.11 实现与 Test Results（2026-09-24）
+
+- **T4.11 complete（待 T4.12 后统一灰度）**：四个等待入口（命令审批、文件审批、文本回答、多问题）统一进入 `waitingForUser`；同一条 ack 显示「❓ 等你回答」并注明 10 分钟后拒绝或跳过。按钮回答恢复 processing；5 分钟只通过 `reply_to_message_id` 对问题消息发送一次提醒；10 分钟超时恢复 processing 并追加自动拒绝/跳过说明。只改问题文案与等待反馈，callback_data 的 `appr|token|...` / `ui|token|...` 格式和 token 生成机制保持不变，未改 10 分钟时长、autoApprove、Deribit 门禁。
+- **Test Results**：新增 `tests/waiting-for-user.test.js`，旧代码先失败后通过；覆盖 ack waiting、按钮恢复、5 分钟单次 reply、10 分钟自动跳过、T4.10 waiting 抑制、四类中文快照和 callback token 格式。全套 **232/232 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 全部通过。
+- **维护者人工验收（部署后）**：在 rv-prediction 私聊发一条需要审批的只读命令，例如「运行 ls 看一下当前目录，需要我批准」。OBS/RV 当前 `AUTO_APPROVE=1`，简单命令可能不会触发审批；若 rv 也自动批准，改用会触发 `request_user_input` 的无副作用任务验证文本回答路径，或在不改线上配置的前提下以测试快照作为审批路径证据。若触发审批，预期同一 ack 变为「等你回答」、问题消息为中文、按钮点「拒绝」后 ack 回 processing 并最终收尾；5 分钟提醒只出现一次。
+
+### T4.12 实现与 Test Results（2026-09-24）
+
+- **T4.12 complete（待三实例灰度）**：永久拒绝仍完全沿用 `_isPermanentReject` 判定；新增持久化 `telegram.unreachableChats`，记录首次/最近拒绝时间、累计丢弃条数和中文原因。群或其他负数 chat 永久拒绝时，24 小时内最多经 outbox 通知 allowlist 中的正数维护者私聊；维护者私聊自身被拒绝时只记结构化错误，不递归通知。原群后续成功送达会清除记录并记录恢复事件；`/status` 增加 `unreachableChats: N`。通知、结构化日志和测试断言均不包含完整群 ID。
+- **Test Results**：新增 `tests/unreachable-chat.test.js`，旧代码先红后绿；覆盖结构化 403 通知、24 小时限频与 dropped 累加、成功清除、维护者私聊防循环、outbox hook 和 `/status` 计数。全套 **237/237 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 全部通过。
+- **部署后维护者验收**：三个 bot 各发 `/status`，确认新 `codeVersion`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变，并核对 `unreachableChats`。不做真实移群/屏蔽演练，T4.12 依赖测试覆盖。
+
+### T4.11 / T4.12 灰度部署（2026-09-24）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 15:32 | rv-prediction | `feat/phase-4-feedback-completion` | `22b3dd50c88336b0e6fed00ed6a0a43c38e77b19` | `9208b5e149db` | ✅ 首批观察通过；appServerSpawnedMs=1134 |
+| 2026-09-24 15:33 | default | `feat/phase-4-feedback-completion` | `22b3dd50c88336b0e6fed00ed6a0a43c38e77b19` | `9208b5e149db` | ✅ 第二批观察通过；appServerSpawnedMs=1740 |
+| 2026-09-24 15:35 | strategy-observation | `feat/phase-4-feedback-completion` | `22b3dd50c88336b0e6fed00ed6a0a43c38e77b19` | `9208b5e149db` | ✅ 第三批观察通过；appServerSpawnedMs=1085 |
+
+- 最终三实例 `DEPLOYED_REF` 均指向 `22b3dd5`；三份安装副本与工作区 index/supervisor 哈希一致。每批启动日志都有本次 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=9208b5e1`、`appServerSpawnedMs`、`Supervisor ready ... start_grace=60`。三把锁各自匹配对应 service 的 index.js 进程，角色文件未覆盖，bridge 与 app-server 均存活。
+- 最终门禁：supervisor 子进程 curl 数量 0、含 token argv 数量 0；bridge/其他 curl 仅报告数量 2，未打印命令行。未触碰真实 env、auth 文件、Clash 配置、service/store。
+- **最终 Test Results**：`node -c index.js`、四项 `zsh -n`、`git diff --check` 通过；全套 **239/239 pass，fail 0**。
+- **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=9208b5e1`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变、`unreachableChats` 符合预期。T4.11 的 rv 私聊审批演练沿用上方步骤；若 `AUTO_APPROVE=1` 使只读命令不触发审批，使用会触发 `request_user_input` 的无副作用任务或保留测试快照验证，不改线上审批配置。T4.12 不做真实移群/屏蔽演练。
+
+### T4.11 / T4.12 人工验收（2026-09-24）—— 通过
+
+- Claude 复核代码：四个等待点均切 `waitingForUser` 并在回答 / 超时后回 processing；5 分钟 reply_to 提醒一次；callback_data 未变；
+  等待期间 T4.10 不误报。T4.12 挂在 outbox 永久拒绝钩子上（所有 `telegram.sendMessage` 都经 outbox，覆盖完整）；通知正文一律写「某个群」，比规格更保守，接受
+- 维护者确认三 bot `/status`：codeVersion=9208b5e1、codexBackend=ok、`unreachableChats: 0`
+- **T4.11 线上演练不可行，以测试验收**：三实例均 `AUTO_APPROVE=1`，命令 / 文件审批自动通过，仅 Deribit 重启守卫会真正询问（不宜演练）；不为演练改线上审批配置
+- 遗留英文（→ T4.4）：`Answer submitted.`、`Unknown /answer token.`、按钮回执 `Sent: <arg>`
+
+### T4.4a 实现与 Test Results（2026-09-24）
+
+- 生命周期通知现在优先追加到当前请求已有的 ack：账号切换、备用账号健康检查失败、认证恢复续跑、旧 thread 失效后新建 thread、以及 steer 不再另发英文状态消息；没有对应 ack（例如手动 `/new` 或后台切号）才单发中文提示。
+- ack 维护生命周期行并在完成、失败、中断等终态清除，避免终态继续显示过期的切号或恢复提示；新建 thread 文案不再暴露 thread id。
+- 新增 `tests/feedback-lifecycle.test.js`，先在旧代码上失败后通过；全套 **240/240 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.4a 已完成，待 T4.4b 完成后统一灰度部署；当前没有修改 findings.md。
+
+### T4.4b 实现与 Test Results（2026-09-24）
+
+- `/stop`、白名单拒绝、`/answer` 失效/成功回执、审批按钮回执统一改为中文；活动任务的停止结果编辑原 ack 为「⏹ 已按你的要求停止（#id）」，不改变停止判定、命令名或 callback_data/token。
+- 新增用户可见失败原因分类：网络连接中断、Codex 后端暂时不可用、上下文过长、对话失效、Telegram 服务端暂时不可用及未知原因。群聊只显示中文短句；私聊在中文原因后附脱敏原文前 80 字，隐藏 URL、邮箱、bot token 和 thread/turn 标识。
+- 新增 `tests/feedback-copy.test.js`，先在旧代码上失败后通过；全套 **242/242 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.4a、T4.4b 与总项 T4.4 均已完成，待统一灰度部署；未修改 findings.md。
+- 部署后人工验收：三个 bot 各发 `/status`，确认新 `codeVersion`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变；rv 私聊 `/stop`（无任务）应显示「当前没有进行中的任务」。
+
+### T4.4 灰度部署（2026-09-24，UTC+8）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|
+| 2026-09-24 16:38 | rv-prediction | `feat/phase-4-feedback-completion` | `3dd0f7770be6c575096ef83136bdb9220ca7dd28` | `72d6d4ed3fad` | `7a7878924997` | ✅ 首批观察通过；appServerSpawnedMs=1158 |
+| 2026-09-24 16:40 | default | `feat/phase-4-feedback-completion` | `3dd0f7770be6c575096ef83136bdb9220ca7dd28` | `72d6d4ed3fad` | `7a7878924997` | ✅ 第二批观察通过；appServerSpawnedMs=2100 |
+| 2026-09-24 16:41 | strategy-observation | `feat/phase-4-feedback-completion` | `3dd0f7770be6c575096ef83136bdb9220ca7dd28` | `72d6d4ed3fad` | `7a7878924997` | ✅ 第三批观察通过；appServerSpawnedMs=1156 |
+
+- 三实例启动日志均含本次 `Deployed ref`、`Supervisor ready ... start_grace=60`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=72d6d4ed`；3 把锁分别由对应 bridge PID 持有，角色文件哈希未变化。
+- supervisor 父进程 curl 数量为 `0 / 0 / 0`，其中含 token 数量均为 0；bridge curl 仅报告数量 `1 / 1 / 1`，未打印命令行。未触碰真实 `.env`、凭证、Clash 配置、service/store 文件。
+- **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=72d6d4ed`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变。
+- **T4.4b rv 私聊演练**：维护者在 rv 私聊发送 `/stop`（无进行中任务），预期收到「当前没有进行中的任务」；若有排队任务，预期追加「已清空排队的 N 条」。不修改线上审批或其他配置。
+
+### T4.4 终态收尾修正与重装（2026-09-24，UTC+8）
+
+- 复核发现额度耗尽路径必须把现有 ack 置为 `failed` 终态，不能只追加生命周期行；追加 commit `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` 修正并清理活动台账。全套测试仍 **242/242 pass，fail 0**。
+- 按相同灰度顺序重新安装，确保三实例运行修正后的 commit：
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|
+| 2026-09-24 16:53 | rv-prediction | `feat/phase-4-feedback-completion` | `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` | `7de573603454` | `7a7878924997` | ✅ 重装通过；appServerSpawnedMs=1061 |
+| 2026-09-24 16:54 | default | `feat/phase-4-feedback-completion` | `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` | `7de573603454` | `7a7878924997` | ✅ 重装通过；appServerSpawnedMs=2059 |
+| 2026-09-24 16:54 | strategy-observation | `feat/phase-4-feedback-completion` | `c960f5d6b4d2ac74e3a5332246fd45dcf98a5543` | `7de573603454` | `7a7878924997` | ✅ 重装通过；appServerSpawnedMs=1227 |
+
+- 三实例本次日志均有 `Deployed ref`、`Supervisor ready ... start_grace=60`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=7de57360`；进程与 3 把锁正常。supervisor 父进程 curl 数量 `0 / 0 / 0`，bridge curl 仅计数 `1 / 1 / 1`。
+
+### T4.4 代码复核（2026-09-24，Claude）—— 主体通过，3 处小问题 → T4.4c
+
+- 通过：切号 / 额度 / 认证恢复 / 新建 thread 均经 `notifyLifecycle` 并入 ack，无 ack 时才单发中文；两条重复单发已删；
+  `/stop` 有任务时 ack 终态「⏹ 已按你的要求停止」、无任务时「当前没有进行中的任务」；私聊失败原因经脱敏（token / 链接 / 邮箱 / thread id）后附前 80 字
+- 问题 1（误导）：`classifyUserFacingFailure` 的 `/context|token limit/` 过宽——`context deadline exceeded` / `context canceled`（超时类）
+  会被报成「对话上下文过长，建议 /new」；`502/503` 在 Codex turn 失败里指上游，却被报成「Telegram 服务端暂时不可用」
+- 问题 2（重复）：普通 turn 失败时，除 ack 终态 `❌ 处理失败：<原因>` 外，还**另发一条**同样原因的消息（沿用旧的 `Turn failed:` 单发路径）；
+  上下文压缩失败的单发仍是英文（`Context compaction …`）
+- 问题 3（文案）：白名单提示「开通后请重启 bridge」是给维护者的操作，对陌生会话无意义
+
+### T4.4c 实现与 Test Results（2026-09-24）
+
+- 收窄失败分类：`context deadline exceeded` / `context canceled` / `timed out` / `timeout` 归为「网络连接超时」；上下文超限只匹配明确的窗口/长度/令牌模式；Codex turn 的 502/503 归为「上游服务暂时不可用」。既有 Telegram 502 兼容文案保持不变。
+- 普通 turn 失败有 ack 时只编辑 ack 终态，不再另发重复消息；无 ack 才单发。remote compact hint 会附在 ack 终态原因后。
+- 上下文压缩取消/失败改为中文；白名单提示去掉要求陌生会话重启 bridge 的多余行。
+- 新增 `tests/feedback-review.test.js`，先在旧代码上失败后通过；全套 **245/245 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.4c 已完成，下一项为 T4.8；未修改 findings.md。
+
+### T4.8 实现与 Test Results（2026-09-24）
+
+- `TelegramApi.callOnce` 不再把含 token 的 Telegram URL 放进 curl argv；URL 通过 stdin 的 `--config -` 传入，JSON 请求体仍作为参数传递。配置值对反斜杠、引号和换行做了转义；当前代码未发现文件上传类 Telegram 调用。
+- 传输错误仍经过既有 token 脱敏函数，未新增 URL/命令行日志输出。
+- 新增 `tests/telegram-curl-safety.test.js`，先在旧代码上失败后通过，覆盖 argv、config stdin 和转义；全套 **247/247 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.8 已完成，下一项为 T4.6；未修改 findings.md。
+
+### T4.6 实现与 Test Results（2026-09-24）
+
+- `scripts/rotate-bridge-logs.sh` 将 `launchd.stdout.log` 与 `launchd.stderr.log` 纳入现有大小、压缩、保留数量、过期清理和总容量上限规则；`--needs-rotation` 也会检查这两份活动日志。
+- 新增日志轮转测试覆盖两份 launchd 日志的压缩轮转；测试先在旧脚本上失败后通过。全套 **248/248 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.6 已完成，Next Step 为 T4.7；未修改 findings.md。
+
+### T4.4c / T4.8 / T4.6 灰度部署（2026-09-24，UTC+8）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | rotate 脚本 sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|---|
+| 2026-09-24 17:55 | rv-prediction | `feat/phase-4-feedback-completion` | `e1c6972278fd83c9a190fbd98c4d84e8880cdee8` | `354e8adab3ec` | `7a7878924997` | `3108f0a206dd` | ✅ 首批观察通过；appServerSpawnedMs=1139 |
+| 2026-09-24 17:57 | default | `feat/phase-4-feedback-completion` | `e1c6972278fd83c9a190fbd98c4d84e8880cdee8` | `354e8adab3ec` | `7a7878924997` | `3108f0a206dd` | ✅ 第二批观察通过；appServerSpawnedMs=1775 |
+| 2026-09-24 17:57 | strategy-observation | `feat/phase-4-feedback-completion` | `e1c6972278fd83c9a190fbd98c4d84e8880cdee8` | `354e8adab3ec` | `7a7878924997` | `3108f0a206dd` | ✅ 第三批观察通过；appServerSpawnedMs=1095 |
+
+- 三实例启动日志均含本次 `Deployed ref`、`Supervisor ready ... start_grace=60`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=354e8ada`；3 把锁、进程和命名角色文件均匹配，rotate 脚本安装副本哈希一致。
+- supervisor 父进程 curl 数量为 `0 / 0 / 0`，bridge curl 仅计数 `1 / 1 / 1`，未打印命令行。最终 `ps -Ao args | grep -c "api.telegram.org/bot[0-9]"` 为 **0**。rv 首批计数 2、default 批次计数 1 均由尚未重装的旧实例 curl 产生，重装后归零；未发现新代码泄露 token。
+- **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=354e8ada`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变。
+- T4.8 不需要真实消息演练；维护者可复核最终 token argv 计数为 0。T4.6 可在下一次日志超过阈值时观察 `launchd.stdout.log` / `launchd.stderr.log` 与 bridge 日志遵循同一轮转规则。
+
+### T4.4c / T4.8 / T4.6 复核（2026-09-24，Claude）—— 通过（待维护者 /status）
+
+- 三实例 index.js `354e8adab3ec`、DEPLOYED_REF `e1c6972`；工作区干净
+- T4.8：`TelegramApi` 唯一的 curl 调用点已改为 `--config -` 经 stdin 传 URL（引号 / 反斜杠 / 换行转义）；
+  线上复查（只输出计数，用 `telegram[.]org` 写法避免 grep 匹配到自身）：`api.telegram.org/bot<id>` 0、`/file/bot<id>` 0，当时有 3 个 curl 在跑
+- 注意：`ps | grep -c "<字面串>"` 会把 grep 自身与 ssh 的 shell 命令行算进去，复查时须用 `[.]` 之类写法，否则会误报非零

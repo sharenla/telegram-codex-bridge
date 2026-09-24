@@ -16,6 +16,7 @@ Telegram 群里 bot「没反馈」且「原因未知」：轻则甩一段英文�
 | [`.planning/2026-09-21-bridge-reliability/findings.md`](../.planning/2026-09-21-bridge-reliability/findings.md) | 根因 R1–R9（定位到行）、turn 级失败分类、代码版本考古 |
 | [`.planning/2026-09-21-bridge-reliability/progress.md`](../.planning/2026-09-21-bridge-reliability/progress.md) | 当前状态、改动前基线、**版本与部署台账** |
 | [`.planning/2026-09-21-bridge-reliability/handoff_codex.md`](../.planning/2026-09-21-bridge-reliability/handoff_codex.md) | 给执行 agent 的契约：可改 / 禁改 / 必跑检查 / 逐任务规格 |
+| [`reliability-postmortem.md`](reliability-postmortem.md) | Phase 1–4 的根因、断联覆盖矩阵、运维要点与遗留事项 |
 
 agent 入口是仓库根的 [`AGENTS.md`](../AGENTS.md)。
 
