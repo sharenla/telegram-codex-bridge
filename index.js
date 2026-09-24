@@ -2418,7 +2418,9 @@ class TelegramAckManager {
 
   _text(state, status, reason = "", position = null) {
     const text = this._baseText(state, status, reason, position);
-    return state.recoveryNote ? `${text}\n${state.recoveryNote}` : text;
+    const withRecovery = state.recoveryNote ? `${text}\n${state.recoveryNote}` : text;
+    return state.stallNotice && (status === "processing" || status === "steer")
+      ? `${withRecovery}\n${state.stallNotice}` : withRecovery;
   }
 
   _baseText(state, status, reason = "", position = null) {
@@ -2562,8 +2564,63 @@ class TelegramAckManager {
     return this._flushState(state, false);
   }
 
+  async setStallNotice(state, notice = "") {
+    if (!state || state.stallNotice === notice) return false;
+    state.stallNotice = notice;
+    if (state.status !== "processing" && state.status !== "steer") return false;
+    state.pendingText = this._text(state, state.status);
+    if (!state.messageId) return false;
+    return this._flushState(state, false);
+  }
+
   async flushDue(force = false) {
     for (const state of this.states) await this._flushState(state, force);
+  }
+}
+
+
+function resolveTelegramStallNoticeMs(env = process.env) {
+  const value = Number(env.TELEGRAM_STALL_NOTICE_MS);
+  return Number.isFinite(value) && value > 0 ? value : 300000;
+}
+
+class TelegramStallMonitor {
+  constructor({ activeRequests, ackManager, now = Date.now, stallNoticeMs = 300000 } = {}) {
+    this.activeRequests = activeRequests;
+    this.ackManager = ackManager;
+    this.now = now;
+    this.stallNoticeMs = stallNoticeMs;
+    this.lastProgressAt = new Map();
+  }
+
+  markRunning(requestId) {
+    this.lastProgressAt.set(requestId, this.now());
+  }
+
+  async noteProgress(chatId) {
+    for (const entry of this.activeRequests.list()) {
+      if (entry.state !== "running" || String(entry.chatId) !== String(chatId)) continue;
+      this.lastProgressAt.set(entry.requestId, this.now());
+      await this.ackManager.setStallNotice(this.ackManager.byRequestId.get(entry.requestId), "");
+    }
+  }
+
+  async tick() {
+    const running = this.activeRequests.list().filter(entry => entry.state === "running");
+    const activeIds = new Set(running.map(entry => entry.requestId));
+    for (const id of this.lastProgressAt.keys()) if (!activeIds.has(id)) this.lastProgressAt.delete(id);
+    for (const entry of running) {
+      const ack = this.ackManager.byRequestId.get(entry.requestId);
+      if (!ack || (ack.status !== "processing" && ack.status !== "steer")) continue;
+      if (!this.lastProgressAt.has(entry.requestId)) this.markRunning(entry.requestId);
+      const elapsed = this.now() - this.lastProgressAt.get(entry.requestId);
+      if (elapsed < this.stallNoticeMs) continue;
+      const noticeElapsed = this.stallNoticeMs
+        + Math.floor((elapsed - this.stallNoticeMs) / 300000) * 300000;
+      const minutes = Math.max(1, Math.floor(noticeElapsed / 60000));
+      const notice = `⏳ 已有 ${minutes} 分钟没有新进展，任务仍在运行（可能在执行耗时命令）。可以继续等，或发 /stop 停止。`;
+      await this.ackManager.setStallNotice(ack, notice);
+    }
   }
 }
 
@@ -5309,6 +5366,15 @@ async function main() {
     },
     logger: event => console.warn(JSON.stringify(event)),
   });
+  const stallMonitor = new TelegramStallMonitor({
+    activeRequests, ackManager, stallNoticeMs: resolveTelegramStallNoticeMs(),
+  });
+  const stallTimer = setInterval(() => {
+    void stallMonitor.tick().catch(error => console.warn(JSON.stringify({
+      errorClass: "telegram_stall_notice_failed", detail: String(error?.message || error),
+    })));
+  }, 30000);
+  stallTimer.unref?.();
   // Start recovery before intake, without allowing a stalled send to block polling.
   void outbox.flush().catch(() => console.error("Outbox recovery failed"));
 
@@ -6862,6 +6928,10 @@ async function main() {
     server.onNotification(async (msg) => {
       const { method, params } = msg;
       if (!method || !params) return;
+      const progressChatId = params.threadId
+        ? chatIdForThread(params.threadId)
+        : method === "token_count" ? chatIdForTelemetry(params) : null;
+      if (progressChatId) await stallMonitor.noteProgress(progressChatId);
 
       if (method === "token_count") {
         const chatId = chatIdForTelemetry(params);
@@ -8738,6 +8808,7 @@ async function main() {
       const ack = ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry);
       const session = getOrCreateSession(entry.chatId);
       activeRequests.update(entry.requestId, { state: "running" });
+      stallMonitor.markRunning(entry.requestId);
       await startOrSteerTurn({
         chatId: entry.chatId,
         session,
@@ -8902,6 +8973,7 @@ async function main() {
       }
       await ackManager?.update(ack, "processing");
       if (ack?.requestId) activeRequests.update(ack.requestId, { state: "running" });
+      if (ack?.requestId) stallMonitor.markRunning(ack.requestId);
       startTyping(chatId);
 
       if (rt.activeTurnId) {
@@ -10315,6 +10387,8 @@ module.exports = {
     TelegramInbox,
     TelegramOutbox,
     TelegramAckManager,
+    TelegramStallMonitor,
+    resolveTelegramStallNoticeMs,
     TelegramActiveRequests,
     handleAppServerExitRequests,
     getOutboxStatus,

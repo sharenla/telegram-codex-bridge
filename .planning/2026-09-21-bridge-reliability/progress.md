@@ -1648,3 +1648,8 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 
 - **Phase 4 / T4.9b complete（待三实例灰度）**：codex-lb 模式下仅将 `codex_models_manager::manager` 与 `rmcp::transport` 的 401 / `refresh_token_invalidated` 识别为旁路认证噪声；每类十分钟最多一条不含原文的结构化日志，不触发认证看门狗。provider/turn 401 与非 codex-lb 行为仍按原路径处理。未动凭证与 MCP 配置。
 - 新增 `tests/auth-recovery.test.js` 用例先红后绿，覆盖两类旁路 401、provider 401、非 codex-lb 回归及逐类日志限频；全套 **225/225 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。改动仅 `index.js` 与该测试文件，待 T4.10 完成后一起部署。
+
+### T4.10 实现与 Test Results（2026-09-24）
+
+- **Phase 4 / T4.10 complete（待三实例灰度）**：单个 30 秒扫描器只检查 running activeRequests；同一 turn 的通知刷新内存中的 `lastProgressAt` 并清除提示。达到默认 300000 毫秒后，在同一条 ack 后加中文无进展提示，每五分钟更新显示时长；不杀任务、不自动重试。`TELEGRAM_STALL_NOTICE_MS` 可覆盖首次提示阈值；进程重启不恢复这份内存状态。
+- **Test Results**：新建 `tests/stall-notice.test.js`，旧代码先红后绿；假时钟覆盖 4:59 无提示、5/10 分钟同一 message_id 更新、收到进展后清除、终态不再编辑及环境变量覆盖。全套 **228/228 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。文件：`index.js`、`.env.example`、`tests/stall-notice.test.js`。
