@@ -9,7 +9,7 @@
 
 ## Next Step
 
-T4.9a、T4.9b、T4.10 已完成本地实现与检查；下一步三项一起按 rv-prediction → default → strategy-observation 灰度部署，然后交维护者人工验收。验收后进入 T4.11。
+T4.9a、T4.9b、T4.10 已完成并按 rv-prediction → default → strategy-observation 灰度部署；下一步由维护者执行 progress.md 的三 bot /status 与 T4.9a 重演练，确认后进入 T4.11。
 规格见 `handoff_codex.md` Phase 4 对应小节。T4.9 线上演练已于 2026-09-24 通过（见 progress.md）。
 之后顺序：T4.11 → T4.12 → T4.4 → T4.8 → T4.6 → T4.7。
 

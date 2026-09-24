@@ -587,6 +587,21 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 
 维护者人工验收中的 codeVersion 预期值更新为 313d82d6。
 
+### T4.9a / T4.9b / T4.10 灰度部署（2026-09-24）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 13:58 | rv-prediction | `feat/phase-4-feedback-completion` | `63b02a351329c73b65f462beb085211cca7b2520` | `345d09cab371` | ✅ 首批观察通过；appServerSpawnedMs=1118 |
+| 2026-09-24 14:00 | default | `feat/phase-4-feedback-completion` | `63b02a351329c73b65f462beb085211cca7b2520` | `345d09cab371` | ✅ 第二批观察通过；appServerSpawnedMs=2180 |
+| 2026-09-24 14:01 | strategy-observation | `feat/phase-4-feedback-completion` | `63b02a351329c73b65f462beb085211cca7b2520` | `345d09cab371` | ✅ 第三批观察通过；appServerSpawnedMs=1005 |
+
+- 三实例 `DEPLOYED_REF` 均指向 `63b02a3`；工作区与三服务的 `index.js` 哈希一致，supervisor 脚本哈希均为 `7a7878924997`。各批日志均有本次 `Deployed ref`、`Telegram Codex Bridge started`、`codeVersion=345d09ca`、`appServerSpawnedMs` 及带 `start_grace=60` 的 `Supervisor ready`。
+- 三个 bridge 与 app-server 子进程均存活；命名实例角色文件哈希不变；持久锁目录 3 把锁，各自 PID 与实例 index.js 进程匹配。最后核对 supervisor 发起的 curl 0 个、其 argv 含 token 0 个；bridge/其他 curl 仅计数 3 个，不打印命令行。真实 env、凭证、Clash 配置与 service/store 均未手工改动。
+- **人工验收待维护者执行，Codex 不代发消息**：
+  1. 三个 bot 各发 `/status`：应显示 `codeVersion=345d09ca`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`，并核对 `truthProfile` 不变；请记录每个实例的实际值。旁路 401 可能随真实新建 thread 出现，T4.9b 只保证它不误标 `auth_failing`。
+  2. 仅在 rv-prediction 私聊发无副作用的长任务；看到「正在处理」后只杀该实例的 app-server 子进程。预期原 ack 改为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」、不自动重跑，app-server 自动拉起；**bridge PID 不变，supervisor 日志无新的 `unhealthy ... restarting`**。
+  3. T4.10 无需制造五分钟卡死；日常长任务顺带观察同一条 ack 的无进展提示与恢复清除即可。
+
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |
