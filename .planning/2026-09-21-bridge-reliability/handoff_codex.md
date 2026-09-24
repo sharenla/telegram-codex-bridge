@@ -1041,7 +1041,56 @@ npm run install:<instance>
   - 测试「维护者私聊自身 403 → 不通知、不循环」；「通知与日志正文不含完整群 ID」；`/status` 显示 unreachableChats
 - 部署后无需人工演练（不应为测试把 bot 移出真实群）
 
-T4.4 的规格在 T4.11 / T4.12 验收后补充。
+**T4.4 改写：中文反馈收尾（2026-09-24，拆为 T4.4a / T4.4b，分开提交、一次部署）**
+
+> 原 T4.4 旧规格（「群内改中文文案 + 处置建议」一行）以本节为准。范围只限**用户在处理一条消息的过程中会看到的**文字；
+> `/menu` 按钮、`/effort` `/resume` `/accounts` `/sessions` `/test` 等管理命令的用法提示与 `/status` 字段名**不在范围**（维护者自用，保持英文）；
+> Deribit 相关门禁文案**不在范围**。
+
+**T4.4a 请求期间的生命周期通知并入 ack**
+- 现状：一条请求处理中，以下通知会**另发新消息**，群里一条请求可能刷出 5–6 条（2026-09-23 实战见 progress.md「T3.4 线上验收」第 4 点）：
+  | 位置（约） | 现文案 | 改为 ack 状态（同一条 ack 追加一行，或切到对应状态） |
+  |---|---|---|
+  | 6482 / 6520 | `Current account hit a limit…` / `All configured Codex accounts appear to be limited…` | 终态 `failed`：`所有 Codex 账号额度已用尽，请稍后重发` |
+  | 6492 / 6559 | `Detected an account problem… Switching to account N…` / `…usage limit… Switching…` | 行：`🔄 当前账号异常，正在切换备用账号重试（第 N 个）` |
+  | 6502 / 6568 | `Account N failed its health check. Trying the next…` | 同上一行，更新 N |
+  | 6445 / 6741 | `Codex backend auth recovery failed after trying every spare account once.` | 已由 T3.4b ack 终态覆盖 → **删除这条单发**（维护者私聊汇总保留） |
+  | 8932 | `Codex account rotation: <reason>; switching to <label>.` | 行：`🔄 正在切换 Codex 账号` |
+  | 8544 附近 | `认证恢复完成，正在自动重试刚才被中断的输入。` 等 | 行：`🔁 认证已恢复，正在自动重试` |
+  | 8804 | `Started new thread: <threadId>`（英文且暴露内部 id） | 行：`🆕 已开启新对话（之前的上下文不再保留）`；**不显示 threadId** |
+  | 9288 | `Codex 后端重启后旧 thread 已失效，已自动新建 thread 并重试这条消息。` | 行：`🆕 旧对话已失效，已自动开启新对话重试` |
+  | 9168 | `Steering active turn…` | 已由 ack `steer` 状态覆盖 → **删除这条单发** |
+- 规则：
+  1. 有对应 ack（该 chat 当前 running / 即将重跑的请求）时，一律写入 ack，**不单独 sendMessage**；追加行在请求进入终态时去掉
+  2. **没有** ack 的场景（例如维护者手动 `/new`、`/accounts` 切号、后台轮换时无请求在跑）：仍可单发，但文案用上表中文，且不含 threadId、账号邮箱等内部标识
+  3. 不改切号 / 重试 / 新建 thread 的**判定与流程**，只改「怎么告诉用户」
+- 验收：
+  - 测试「一次切号重试 → 群里只有一条 ack，且含『正在切换备用账号』，无新 sendMessage」（先在现代码上失败）
+  - 测试「新建 thread → ack 追加中文行，文案不含 threadId」；「无 ack 时手动 /new → 单发中文、不含 threadId」
+  - 测试「额度全部用尽 → ack 终态中文」；「终态后追加行消失」
+
+**T4.4b 用户可见文案中文化**
+- 逐条改为（**只改文案，不改命令名、callback_data、token 机制**）：
+  | 位置（约） | 现文案 | 改为 |
+  |---|---|---|
+  | 9351–9352 | `No active turn.` / `No active turn. Cleared N queued task(s).` | `当前没有进行中的任务` / `当前没有进行中的任务，已清空排队的 N 条` |
+  | 9345–9346 | `Compaction was pending…` | `已取消待执行的上下文压缩`（有清空时附「，已清空排队的 N 条」） |
+  | /stop 成功中断 | （现为 ack 的 interrupted / 其他） | 被停止请求的 ack 终态：`⏹ 已按你的要求停止（#id）`，与「服务重启中断」区分 |
+  | 10309 回执 | `Interrupt requested` | `已请求停止` |
+  | 白名单拒绝 `notifyUnauthorizedChat` | `This chat is not in TELEGRAM_ALLOWLIST…` | `这个会话还没有开通 bot。请把下面的 chat_id 发给维护者开通：<chat_id>`（仍只提示一次；chat_id 是对方自己的，可以显示） |
+  | 10219 / 10223 | `Unknown /answer token.` / `Answer submitted.` | `这个回答链接已失效或不存在` / `已收到你的回答` |
+  | 10256 / 10262 回执 | `Sent: <arg>` / `Answer submitted` | `已选择：允许 / 本会话都允许 / 拒绝`（按 arg 映射）/ `已收到你的回答` |
+  | 7232 / 9682 / 10460 私聊失败原因 | `truncateMiddle(原始英文错误, 120)` | 先按下条分类给中文，**私聊**在其后括号附原文前 80 字；群聊只给中文 |
+- **失败原因分类**（替代群里笼统的「上游处理失败」）：新增一个纯函数把错误文本映射为中文，至少覆盖：
+  网络 / 超时（`ETIMEDOUT` `ECONNRESET` `fetch failed` `socket hang up`）→ `网络连接中断`；
+  `Codex backend is unavailable` / app-server 未就绪 → `Codex 后端暂时不可用`；
+  `context` / `token limit` 超限 → `对话上下文过长，建议 /new 开启新对话后重发`；
+  `thread not found` → `对话已失效，请重发`；其他 → `处理失败，原因未知`（原文只进日志）
+- 验收：文案快照测试覆盖上表每一行；测试「群聊失败只含中文」；「私聊失败含中文 + 原文前 80 字」；
+  分类函数对每一类给出正确中文且未知不吞掉已知形态；`grep` 检查上表英文原串已不再出现在发送路径中
+- 部署后人工验收：维护者在 rv 私聊发 `/stop`（无任务时）应看到「当前没有进行中的任务」；其余以测试为准
+
+T4.8 的规格已在上文（「T4.8 bot token 不再出现在 curl 的 argv 里」），T4.4 验收后直接执行。
 
 ### （旧）Phase 4 — 错误分类与可观测指标
 （分支 `feat/phase-4-observability`）

@@ -1704,3 +1704,11 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 最终门禁：supervisor 子进程 curl 数量 0、含 token argv 数量 0；bridge/其他 curl 仅报告数量 2，未打印命令行。未触碰真实 env、auth 文件、Clash 配置、service/store。
 - **最终 Test Results**：`node -c index.js`、四项 `zsh -n`、`git diff --check` 通过；全套 **239/239 pass，fail 0**。
 - **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=9208b5e1`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变、`unreachableChats` 符合预期。T4.11 的 rv 私聊审批演练沿用上方步骤；若 `AUTO_APPROVE=1` 使只读命令不触发审批，使用会触发 `request_user_input` 的无副作用任务或保留测试快照验证，不改线上审批配置。T4.12 不做真实移群/屏蔽演练。
+
+### T4.11 / T4.12 人工验收（2026-09-24）—— 通过
+
+- Claude 复核代码：四个等待点均切 `waitingForUser` 并在回答 / 超时后回 processing；5 分钟 reply_to 提醒一次；callback_data 未变；
+  等待期间 T4.10 不误报。T4.12 挂在 outbox 永久拒绝钩子上（所有 `telegram.sendMessage` 都经 outbox，覆盖完整）；通知正文一律写「某个群」，比规格更保守，接受
+- 维护者确认三 bot `/status`：codeVersion=9208b5e1、codexBackend=ok、`unreachableChats: 0`
+- **T4.11 线上演练不可行，以测试验收**：三实例均 `AUTO_APPROVE=1`，命令 / 文件审批自动通过，仅 Deribit 重启守卫会真正询问（不宜演练）；不为演练改线上审批配置
+- 遗留英文（→ T4.4）：`Answer submitted.`、`Unknown /answer token.`、按钮回执 `Sent: <arg>`
