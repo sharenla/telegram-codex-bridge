@@ -1516,3 +1516,16 @@ Clash Verge 以**服务模式**运行（内核在 `/Library/Application Support/
 
 代码中无 Telegram 409 专门处理（`Conflict` 命中的均为无关的 workspace 冲突逻辑）。
 T2.8a 后本机已不可能出现同 token 第二进程；T2.2 后重启也不再留孤儿长轮询。**此后再出现 409，基本可判定为其他机器上有进程在用同一 bot token。**
+
+## Session: 2026-09-24 — Phase 3 收口验收 + Phase 4 重排
+
+### Phase 3 收口验收 —— 通过
+- main 上 `v0.3.0` → `1311884`（rev-list 核实）；tag 内 index.js `15f553e60c`、supervisor `7a78789249` 与三实例一致
+- 三实例 `DEPLOYED_REF` 均 `commit=1311884 ref=v0.3.0`；211/211；未 push（领先 origin/main 82 个提交）
+
+### 目标更正与 Phase 4 重排
+维护者更正：目标是「任何原因断联都有明确中文反馈」，统计不是需求。
+按消息生命周期逐段核对代码与线上（见 findings F16），结论：
+- 已完成的 Phase 1–3 逻辑覆盖到位；T2.6 / T2.7 / T3.5 / T3.6 四条路径仅测试验证，待真实故障
+- **4 处未覆盖**：app-server 单独崩溃（零输出）、任务卡住无进展、模型提问时状态误导、回复因 403 永久丢弃且维护者不知情
+- Phase 4 删去 T4.1 / T4.2 / T4.3 / T4.5（划线保留），新增 T4.9–T4.12

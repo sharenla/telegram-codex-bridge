@@ -925,7 +925,33 @@ npm run install:<instance>
 4. 从 main 按灰度顺序重装三实例一次，使 `DEPLOYED_REF` 指向 main 上的 commit
 5. 台账补 tag 行；**不要 push**
 
-### Phase 4 — 错误分类与可观测指标（分支 `feat/phase-4-observability`）
+### Phase 4 — 中文反馈补全与收尾（2026-09-24 重排，分支 `feat/phase-4-feedback-completion`）
+
+> 统计类任务（T4.1 / T4.2 / T4.3 / T4.5）已删除，以下旧规格中的这几项**不再执行**。依据见 findings F16。
+
+**T4.9 【零输出】app-server 单独崩溃时，执行中请求立即中断并告知**
+- 现状：`server.onProcessExit` 只调用 `recordCodexBackendFailure`；`index.js` 约 8124 行 `if (!codex)` 会在下一条消息到来时重新拉起 app-server，
+  supervisor 看到子进程健康便不重启 bridge → 执行中请求永远收不到 turn/completed，ack 永远停在「⚙️ 正在处理」
+- 要做：
+  1. app-server **非预期**退出（`expected === false`）时，把 `activeRequests` 中所有 `running` 条目：
+     ack 改为 `⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）`，出台账。**不自动重跑**（同 T2.5 原则）
+  2. `queued` 条目保留；若存在排队条目，主动重新拉起 app-server 并继续处理队列，不要等下一条新消息
+  3. 预期内的停止（切号、部署、优雅关闭，`expected === true`）不走这条路径
+  4. 与 T3.4b 的认证失败退出不冲突：带 `authFailure` 的退出仍按 T3.4b 处理，但执行中请求同样不能被遗留在 running
+- 验收：
+  - 测试「非预期退出 → running 请求 ack 变中断提示并出台账」（先在现代码上失败）
+  - 测试「queued 请求保留，且后端被主动拉起后继续执行」
+  - 测试「expected 退出（切号）→ 不触发中断」
+  - 测试「认证失败导致的退出 → running 请求同样收尾，不遗留」
+  - 211+ 全绿，总数只增
+- 部署后人工演练（维护者执行，影响面最小的 rv-prediction）：私聊 `@Codex_RV_bot` 发一个要跑一阵、**无副作用**的任务，
+  看到「正在处理」后在 wukong 上 `pkill -f "rv-prediction-service.*app-server"`（只杀 app-server，不杀 bridge），
+  预期同一条 ack 变为「Codex 后端意外退出，这条任务已中断」
+
+T4.10 / T4.11 / T4.12 的规格在 T4.9 验收后补充。
+
+### （旧）Phase 4 — 错误分类与可观测指标
+（分支 `feat/phase-4-observability`）
 
 **T4.1 先出基线数字** — 只读脚本，从 `data/codex-home/sessions/**/*.jsonl` 算 turn 开始 / 完成 / 孤儿 / 失败分类。验收：在 wukong 上复现 F5 的数字（1,683 / 1,630 / 29 / 24 / 27）
 
