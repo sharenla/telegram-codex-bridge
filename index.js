@@ -499,6 +499,13 @@ function formatCurlTransportError(error, stderr, { timeoutMs = 0 } = {}) {
   return "curl failed";
 }
 
+function quoteCurlConfigValue(value) {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r?\n/g, "\\n");
+}
+
 function detectLocalTelegramProxy() {
   for (const candidate of CLASH_CONFIG_CANDIDATES) {
     const text = readTextFile(candidate);
@@ -3105,7 +3112,7 @@ class Store {
 }
 
 class TelegramApi {
-  constructor(token, { proxyUrl = null, proxySource = null, sleepFn = sleep } = {}) {
+  constructor(token, { proxyUrl = null, proxySource = null, sleepFn = sleep, execFileFn = execFile } = {}) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
     this.proxyUrl = proxyUrl || null;
     this.proxySource = proxySource || null;
@@ -3114,6 +3121,7 @@ class TelegramApi {
       : "direct";
     this.writeQueue = Promise.resolve();
     this.sleep = sleepFn;
+    this.execFile = execFileFn;
     this.children = new Set();
     this.closing = false;
   }
@@ -3180,14 +3188,15 @@ class TelegramApi {
     curlArgs.push(
       "-X",
       "POST",
-      `${this.baseUrl}/${method}`,
       "-H",
       "content-type: application/json",
       "-d",
       body,
+      "--config",
+      "-",
     );
     const stdout = await new Promise((resolve, reject) => {
-      const child = execFile("curl", curlArgs, {
+      const child = this.execFile("curl", curlArgs, {
         timeout: childTimeoutMs,
         maxBuffer: 1024 * 1024,
       }, (error, out, stderr) => {
@@ -3198,6 +3207,8 @@ class TelegramApi {
         }
         resolve(out);
       });
+      child.stdin?.write(`url = "${quoteCurlConfigValue(`${this.baseUrl}/${method}`)}"\n`);
+      child.stdin?.end();
       this.children.add(child);
       child.once("close", () => this.children.delete(child));
     });
@@ -10806,6 +10817,7 @@ module.exports = {
     recoveryNetworkReason,
     CodexAppServer,
     TelegramApi,
+    quoteCurlConfigValue,
     resolveClashControllerConfig,
     probeClashControllerAvailability,
     formatClashFailoverStatus,

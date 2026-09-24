@@ -1771,3 +1771,10 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 上下文压缩取消/失败改为中文；白名单提示去掉要求陌生会话重启 bridge 的多余行。
 - 新增 `tests/feedback-review.test.js`，先在旧代码上失败后通过；全套 **245/245 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
 - T4.4c 已完成，下一项为 T4.8；未修改 findings.md。
+
+### T4.8 实现与 Test Results（2026-09-24）
+
+- `TelegramApi.callOnce` 不再把含 token 的 Telegram URL 放进 curl argv；URL 通过 stdin 的 `--config -` 传入，JSON 请求体仍作为参数传递。配置值对反斜杠、引号和换行做了转义；当前代码未发现文件上传类 Telegram 调用。
+- 传输错误仍经过既有 token 脱敏函数，未新增 URL/命令行日志输出。
+- 新增 `tests/telegram-curl-safety.test.js`，先在旧代码上失败后通过，覆盖 argv、config stdin 和转义；全套 **247/247 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.8 已完成，下一项为 T4.6；未修改 findings.md。
