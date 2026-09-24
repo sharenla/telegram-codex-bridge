@@ -8920,7 +8920,7 @@ async function main() {
         return;
       }
     } catch (err) {
-      if (ack?.authTerminal) return;
+      if (ack?.authTerminal || ack?.backendExitTerminal) return;
       if (isAccountAuthFailure(err)) {
         recordCodexBackendFailure(extractCodexErrorText(err), { auth: true });
         await finishAuthRecoveryRequest(chatId, rt, rt.pendingInputMeta || { ack },
