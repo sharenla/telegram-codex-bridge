@@ -6533,7 +6533,7 @@ async function main() {
       const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
 
       if (!fallbackProfiles.length) {
-        await notifyLifecycle(chatId, "所有 Codex 账号额度已用尽，请稍后重发");
+        await finishLifecycleFailure(chatId, "所有 Codex 账号额度已用尽，请稍后重发");
         throw err;
       }
 
@@ -6562,7 +6562,7 @@ async function main() {
         }
       }
 
-      await notifyLifecycle(chatId, "所有 Codex 账号额度已用尽，请稍后重发");
+      await finishLifecycleFailure(chatId, "所有 Codex 账号额度已用尽，请稍后重发");
       throw lastError;
     }
   }
@@ -6589,7 +6589,12 @@ async function main() {
       currentProfile?.profileId || null,
     ]));
     const fallbackProfiles = listFallbackProfiles(currentProfile?.profileId, attempted);
-    if (!fallbackProfiles.length) return false;
+    if (!fallbackProfiles.length) {
+      await finishLifecycleFailure(chatId, "所有 Codex 账号额度已用尽，请稍后重发", {
+        requestId: inputMeta.acks?.[0]?.requestId || inputMeta.ack?.requestId || null,
+      });
+      return true;
+    }
 
     rt.failoverInProgress = true;
     delete rt.turnInputMetaByTurnId[turn.id];
@@ -6626,7 +6631,10 @@ async function main() {
         });
         return true;
       }
-      return false;
+      await finishLifecycleFailure(chatId, "所有 Codex 账号额度已用尽，请稍后重发", {
+        requestId: inputMeta.acks?.[0]?.requestId || inputMeta.ack?.requestId || null,
+      });
+      return true;
     } finally {
       rt.failoverInProgress = false;
     }
@@ -7252,7 +7260,7 @@ async function main() {
             }
             if (!authRetried && !retried && !contextRetried) {
               for (const ack of turnMeta?.acks || (turnMeta?.ack ? [turnMeta.ack] : [])) {
-                if (ack?.userInterrupted) continue;
+                if (ack?.userInterrupted || ack?.failoverTerminal) continue;
                 if (modelBusyResult.partialExecution) await ackManager?.update(ack, "upstreamPartial");
                 else if (modelBusyResult.exhausted) await ackManager?.update(ack, "modelBusy", {
                   position: Number(turnMeta?.modelRetryCount || MAX_UPSTREAM_RETRIES),
@@ -8936,6 +8944,21 @@ async function main() {
     return null;
   }
 
+  async function finishLifecycleFailure(chatId, reason, { requestId = null } = {}) {
+    const entries = activeRequests.list()
+      .filter(entry => String(entry.chatId) === String(chatId) && (entry.state === "running" || entry.state === "queued"));
+    const entry = (requestId && entries.find(item => item.requestId === requestId)) || entries[0];
+    const ack = entry && (ackManager.byRequestId.get(entry.requestId) || ackManager.restore(entry));
+    if (!ack) {
+      await telegram.sendMessage({ chat_id: chatId, text: reason });
+      return null;
+    }
+    ack.failoverTerminal = true;
+    await ackManager.update(ack, "failed", { reason });
+    if (ack.requestId) activeRequests.remove(ack.requestId);
+    return ack;
+  }
+
   async function ensureThread(session, chatId) {
     if (session.threadId) {
       return requestWithAccountFailover({
@@ -9305,7 +9328,7 @@ async function main() {
         return;
       }
     } catch (err) {
-      if (ack?.authTerminal || ack?.backendExitTerminal) return;
+      if (ack?.authTerminal || ack?.backendExitTerminal || ack?.failoverTerminal) return;
       if (isAccountAuthFailure(err)) {
         recordCodexBackendFailure(extractCodexErrorText(err), { auth: true });
         await finishAuthRecoveryRequest(chatId, rt, rt.pendingInputMeta || { ack },
