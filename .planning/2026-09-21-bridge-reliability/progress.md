@@ -572,6 +572,21 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 1. 三个 bot 各发 /status：确认新 codeVersion=f27db702、telegramState=ok、outboxQueued=0、outboxDiscarded=0、truthProfile 不变，并记录各自 codexBackend。
 2. 只在 rv-prediction 私聊执行无副作用长任务；看到「正在处理」后仅杀 app-server，确认同一条 ack 变为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」；确认无自动重跑。
 
+### T4.9 竞态护栏修正部署（2026-09-24）
+
+- 追加提交：2960dba（Guard terminal ack after backend exit）。
+- 原 app-server 退出 ack 在 request reject 竞态下可能被普通失败覆盖；新增 backendExitTerminal guard 后重新按 rv-prediction → 观察一轮 → default → strategy-observation 安装。
+- 新运行哈希：index.js=313d82d616a6、supervisor=7a7878924997；三实例 DEPLOYED_REF 均指向 2960dba，进程和三把持久锁正常。
+- 新启动日志均出现本次 Deployed ref、Telegram Codex Bridge started、Supervisor ready（start_grace=60）和 appServerSpawnedMs；supervisor 子 curl 仍为 0，bridge curl 仅报告数量。
+
+| 日期 | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | 结果 |
+|---|---|---|---|---|---|
+| 2026-09-24 11:18 (UTC+8) | rv-prediction | feat/phase-4-feedback-completion | 2960dba | 313d82d616a6 | 竞态护栏重装通过 |
+| 2026-09-24 11:19 (UTC+8) | default | feat/phase-4-feedback-completion | 2960dba | 313d82d616a6 | 竞态护栏重装通过 |
+| 2026-09-24 11:20 (UTC+8) | strategy-observation | feat/phase-4-feedback-completion | 2960dba | 313d82d616a6 | 竞态护栏重装通过 |
+
+维护者人工验收中的 codeVersion 预期值更新为 313d82d6。
+
 ## Error Log
 
 | Timestamp | Error | Attempt | Resolution |
