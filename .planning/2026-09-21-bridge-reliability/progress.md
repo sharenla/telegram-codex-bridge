@@ -1804,3 +1804,23 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - T4.8：`TelegramApi` 唯一的 curl 调用点已改为 `--config -` 经 stdin 传 URL（引号 / 反斜杠 / 换行转义）；
   线上复查（只输出计数，用 `telegram[.]org` 写法避免 grep 匹配到自身）：`api.telegram.org/bot<id>` 0、`/file/bot<id>` 0，当时有 3 个 curl 在跑
 - 注意：`ps | grep -c "<字面串>"` 会把 grep 自身与 ssh 的 shell 命令行算进去，复查时须用 `[.]` 之类写法，否则会误报非零
+
+### T4.7 与 Phase 4 收口（2026-09-24，UTC+8）—— 完成
+
+- 新建 [`docs/reliability-postmortem.md`](../../docs/reliability-postmortem.md)，共 77 行；包含目标结果、R1–R9 根因到任务/提交的映射、F16 断联覆盖矩阵、已知限制、运维要点和遗留事项。公开仓库敏感模式检查无输出，`findings.md` 未修改。
+- `docs/bridge-reliability.md` 已增加复盘文档入口；T4.7 单独提交为 `175488d`。维护者此前确认三 bot `/status` 的 `codeVersion=354e8ada`、`codexBackend=ok`，并确认 rv 私聊 `/stop` 在无任务时给出中文无任务提示。
+- Phase 4 清单全部未划线条目已勾选，`task_plan.md` 的 Phase 4 Status 为 `complete`、Current Phase 为「全部完成」。
+- `main` 以 `--no-ff` 合并 `feat/phase-4-feedback-completion`，合并提交为 `09e3b72f4490d69d8ae3a5289e1b123ec70616dc`；注解 tag `v0.4.0` 已创建，`git rev-list -n1 v0.4.0` 指向同一提交，未 push，分支保留。
+- tag/workspace/三实例 `index.js` SHA-256 前 12 位均为 `354e8adab3ec`；tag/workspace/三实例 supervisor 前 12 位均为 `7a7878924997`。
+
+**Phase 4 收口灰度部署台账（从 main / v0.4.0 重装）：**
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|
+| 2026-09-24 18:20 | rv-prediction | `main` / `v0.4.0` | `09e3b72f4490d69d8ae3a5289e1b123ec70616dc` | `354e8adab3ec` | `7a7878924997` | ✅ `appServerSpawnedMs=1659`；`DEPLOYED_REF` 为 v0.4.0；token argv 计数 0 |
+| 2026-09-24 18:21 | default | `main` / `v0.4.0` | `09e3b72f4490d69d8ae3a5289e1b123ec70616dc` | `354e8adab3ec` | `7a7878924997` | ✅ `appServerSpawnedMs=2652`；`DEPLOYED_REF` 为 v0.4.0；token argv 计数 0 |
+| 2026-09-24 18:22 | strategy-observation | `main` / `v0.4.0` | `09e3b72f4490d69d8ae3a5289e1b123ec70616dc` | `354e8adab3ec` | `7a7878924997` | ✅ `appServerSpawnedMs=1545`；`DEPLOYED_REF` 为 v0.4.0；token argv 计数 0 |
+
+- 三批均观察到 `Supervisor ready ... start_grace=60`、`Deployed ref`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=354e8ada`；进程存活、锁目录保持 3 把锁，命名角色文件未覆盖。
+- **计划完成小结**：按清单完成 43 个未划线任务条目（四个已删除的统计类任务保留为划线追溯项），全套测试 **248/248 pass，fail 0**；四个阶段 tag 为 `v0.1.1`、`v0.2.0`、`v0.3.0`、`v0.4.0`。
+- 遗留事项：openclaw 账号池重新登录与配置修复；凭证是否轮换；是否 push；Clash 外部控制器是否开启；命名实例在 codex-lb 下的 MCP 可用性。详细限制见 `docs/reliability-postmortem.md`。
