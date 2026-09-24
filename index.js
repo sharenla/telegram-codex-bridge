@@ -2206,6 +2206,10 @@ class TelegramUnreachableChatNotifier {
     const shouldNotify = chatId < 0 && (!entry.lastNotifiedAt || now - entry.lastNotifiedAt >= TelegramUnreachableChatNotifier.COOLDOWN_MS);
     if (shouldNotify && privateRecipients.length) {
       entry.lastNotifiedAt = now;
+    }
+    chats[key] = entry;
+    this._save();
+    if (shouldNotify && privateRecipients.length) {
       const text = `⚠️ ${this.getBotName()} 无法在「某个群」发消息（Telegram 拒绝：${entry.reason}），已有 ${entry.dropped} 条回复未送达。请检查 bot 是否还在群里、是否被禁言。`;
       for (const recipient of privateRecipients) {
         const noticeItem = this.outbox.enqueue({ chat_id: recipient, text }, {
@@ -2218,8 +2222,6 @@ class TelegramUnreachableChatNotifier {
         }
       }
     }
-    chats[key] = entry;
-    this._save();
   }
 
   async onDelivered(item) {
@@ -2734,7 +2736,7 @@ class TelegramStallMonitor {
 function createTelegramActionWait({
   kind, chatId, token, pendingActions, ackManager, ack, sendMessage,
   timeoutMs = 10 * 60 * 1000, reminderMs = 5 * 60 * 1000,
-  setTimer = setTimeout, clearTimer = clearTimeout, logger = () => {},
+  setTimer = setTimeout, clearTimer = clearTimeout, logger = () => {}, onResume = null,
 }) {
   const outcome = kind === "approval" ? "拒绝" : "跳过";
   let questionMessageId = null;
@@ -2749,6 +2751,7 @@ function createTelegramActionWait({
     clearTimer(timeoutTimer);
     pendingActions.delete(token);
     await ackManager.update(ack, "processing", { timeoutOutcome: timedOut ? outcome : "" });
+    if (!timedOut && onResume) await onResume();
     resolvePromise(value);
   };
   const reminderTimer = setTimer(async () => {
@@ -9614,6 +9617,7 @@ async function main() {
       ackManager, ack: entry ? ackManager.byRequestId.get(entry.requestId) : null,
       sendMessage: params => telegram.sendMessage(params),
       timeoutMs,
+      onResume: () => stallMonitor.noteProgress(chatId),
       logger: event => console.warn(JSON.stringify(event)),
     });
     await waiting.ready;

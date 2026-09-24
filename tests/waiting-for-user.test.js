@@ -104,3 +104,28 @@ test('ten-minute timeout resumes with Chinese skip note and waiting state suppre
   assert.match(edits.at(-1).text, /10 分钟未回复，已自动跳过，任务继续/);
   assert.equal(actions.size, 0);
 });
+
+test('answer resets the stall clock when processing resumes', async () => {
+  let now = 0;
+  const edits = [];
+  const manager = new _test.TelegramAckManager({
+    now: () => now, minEditIntervalMs: 0,
+    send: async () => ({ message_id: 41 }), edit: async params => { edits.push(params); },
+  });
+  const ack = await manager.start({ chatId: 7, requestId: 'wait04' });
+  await manager.update(ack, 'processing');
+  const entries = [{ requestId: 'wait04', chatId: 7, state: 'running' }];
+  const stall = new _test.TelegramStallMonitor({ activeRequests: { list: () => entries }, ackManager: manager, now: () => now });
+  stall.markRunning('wait04');
+  const actions = new Map();
+  const waiter = _test.createTelegramActionWait({
+    kind: 'userInputText', chatId: 7, token: 'tok4', pendingActions: actions,
+    ackManager: manager, ack, sendMessage: async () => {},
+    onResume: () => stall.noteProgress(7),
+  });
+  await waiter.ready;
+  now = 10 * 60 * 1000;
+  await actions.get('tok4').resolve('answer');
+  await stall.tick();
+  assert.doesNotMatch(edits.at(-1).text, /没有新进展/);
+});

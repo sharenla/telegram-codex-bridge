@@ -32,9 +32,9 @@ test('group permanent reject records and privately notifies without exposing ful
   assert.match(notices[0].params.text, /TestBot/);
   assert.match(notices[0].params.text, /bot 已被移出群或无发言权限/);
   assert.match(notices[0].params.text, /已有 1 条回复未送达/);
-  assert.doesNotMatch(notices[0].params.text, /1001234567890/);
+  assert.equal(notices[0].params.text.includes(String(GROUP_CHAT_ID)), false);
   assert.equal(Object.keys(store.data.telegram.unreachableChats).length, 1);
-  assert.equal(logs.some(line => JSON.stringify(line).includes('1001234567890')), false);
+  assert.equal(logs.some(line => JSON.stringify(line).includes(String(GROUP_CHAT_ID))), false);
 });
 
 test('same chat is rate limited for 24 hours and clears after a successful delivery', async t => {
@@ -78,4 +78,19 @@ test('outbox permanent reject invokes the maintainer notifier hook', async t => 
   const item = outbox.enqueue({ chat_id: GROUP_CHAT_ID, text: 'reply' });
   await assert.rejects(outbox.deliver(item));
   assert.equal(sent.some(params => params.chat_id === 123456789), true);
+});
+
+test('unreachable record is present when its notice enters the durable outbox', async t => {
+  const { dir, store, notifier } = fixture();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fixture.now = 3;
+  let recordedAtEnqueue = false;
+  notifier.outbox = {
+    enqueue: () => {
+      recordedAtEnqueue = Boolean(store.data.telegram.unreachableChats[String(GROUP_CHAT_ID)]?.lastNotifiedAt);
+      return {};
+    },
+  };
+  await notifier.handlePermanentReject({ chatId: GROUP_CHAT_ID }, { body: { error_code: 403 } });
+  assert.equal(recordedAtEnqueue, true);
 });
