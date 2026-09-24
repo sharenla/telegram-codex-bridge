@@ -997,7 +997,51 @@ npm run install:<instance>
   - 测试「4 分 59 秒 → 不提示」；「请求完成后定时器不再动它」；「TELEGRAM_STALL_NOTICE_MS 可覆盖默认值」
 - 部署后无需人工演练（线上难以安全制造 5 分钟卡死）；维护者日常遇到长任务时顺带观察即可
 
-T4.11 / T4.12 的规格在 T4.10 验收后补充。
+**T4.11 模型向用户提问时，ack 显示「等你回答」（2026-09-24）**
+- 现状（代码勘查）：四个等待点——`item/commandExecution/requestApproval`、`item/fileChange/requestApproval`、
+  `item/tool/requestUserInput`、`input/request`——另发一条**英文**问题消息（`Approve command?` / `Reply with: /answer …`）后，
+  经 `waitForTelegramAction` 等待，**10 分钟超时自动按拒绝 / 空答案继续**，用户不会被告知；
+  这期间 ack 仍是「⚙️ 正在处理」，T4.10 还会误报「X 分钟没有新进展」。多问题的 requestUserInput 直接发英文说明并返回空答案
+- 要做：
+  1. 进入任一等待点时，把该 chat 当前 running 请求的 ack 切到新状态 `waitingForUser`：
+     `❓ 等你回答：请看下方的问题，10 分钟内未回复将自动<拒绝|跳过>（#id）`（审批类写「拒绝」，提问类写「跳过」）。
+     T4.10 的无进展提示不作用于该状态（现实现只看 processing / steer，保持即可，补测试锁住）
+  2. 收到回答（按钮或 `/answer`）→ ack 回到 processing
+  3. 等待满 **5 分钟**仍未回答 → 以回复（reply_to）问题消息的方式发**一次**提醒：`⏰ 还在等你回答，5 分钟后将自动<拒绝|跳过>`
+  4. 超时 → ack 回到 processing 并在其后附一行 `⌛ 10 分钟未回复，已自动<拒绝|跳过>，任务继续`（该行在下一次终态时可丢弃）
+  5. 四处问题消息中文化（**只改文案，不改 callback_data 格式与 token 机制**）：
+     - 命令审批：`是否允许执行这条命令？` + 命令 + `原因：…` / `保护规则：…`；按钮 `允许` / `本会话都允许` / `拒绝`
+     - 文件修改审批：`是否允许修改文件？` + 标题 + `原因：…`；按钮同上
+     - 文本回答：`请直接回复：/answer <token> 你的回答`
+     - 多问题：`暂不支持一次回答多个问题，已跳过，任务继续`
+  6. **不做**：不改 10 分钟超时时长；不改自动审批（autoApprove）与 Deribit 相关的门禁及其文案（后者归 T4.4 评估）；不持久化等待状态（重启后按 T2.5 已有逻辑处理）
+- 验收：
+  - 测试「命令审批等待 → ack=waitingForUser，文案含『等你回答』与『拒绝』」（先在现代码上失败）
+  - 测试「点按钮回答 → ack 回 processing」；「5 分钟未答 → 恰好一条 reply_to 提醒」；「10 分钟超时 → ack 附自动拒绝说明」
+  - 测试「waitingForUser 期间 T4.10 不提示无进展」；四处问题消息快照为中文、callback_data 不变
+- 部署后维护者演练（rv 私聊，无副作用）：让 bot 执行一条需要审批的只读命令（例如「运行 ls 看一下当前目录，需要我批准」；
+  若该实例审批策略不触发审批则跳过并记录），确认 ack 显示「等你回答」、问题为中文、点「拒绝」后任务继续并收尾
+
+**T4.12 回复永久发不出去时私聊告知维护者（2026-09-24）**
+- 现状：`TelegramOutbox.deliver` 遇永久拒绝（结构化 403，或 description 为 chat not found / bot blocked / kicked / not a member）
+  只 `_remove(item, "telegram_permanent_reject")` 并计入 `discardedTotal`，**没有人被告知**；
+  bot 被移出群或被禁言后，群里用户和维护者都看不到任何说明
+- 要做：
+  1. 永久拒绝发生时记录 `store.data.telegram.unreachableChats[chatId] = { firstAt, lastAt, dropped, reason }`（`dropped` 累加）
+  2. 若该 chat **不是**维护者私聊：经 outbox 给维护者私聊（allowlist 中正数 chat id，同 T3.4 规则）发一次：
+     `⚠️ <bot 名> 无法在「<群名，取不到则写『某个群』>」发消息（Telegram 拒绝：<中文原因>），已有 N 条回复未送达。请检查 bot 是否还在群里、是否被禁言。`
+     中文原因映射：403 / kicked / not a member → 「bot 已被移出群或无发言权限」；blocked → 「bot 被对方屏蔽」；chat not found → 「找不到该会话」
+  3. 同一 chat **24 小时内最多通知一次**；之后该 chat 再有成功送达即清除记录并在日志记一行恢复（不另发消息）
+  4. **防止自我循环**：发往维护者私聊的消息本身被永久拒绝（维护者屏蔽了 bot）时只记日志，不再尝试通知
+  5. 群 ID 不写入通知正文与日志正文（日志可用 chat id 后 4 位）；`/status` 增加一行 `unreachableChats: N`
+  6. **不做**：不自动退群、不停止处理该群的入站消息、不改 `_isPermanentReject` 判定
+- 验收：
+  - 测试「群消息结构化 403 → 维护者私聊收到一条中文通知，含未送达条数」（先在现代码上失败）
+  - 测试「24 小时内再次 403 → 不重复通知，dropped 累加」；「该群恢复送达 → 记录清除」
+  - 测试「维护者私聊自身 403 → 不通知、不循环」；「通知与日志正文不含完整群 ID」；`/status` 显示 unreachableChats
+- 部署后无需人工演练（不应为测试把 bot 移出真实群）
+
+T4.4 的规格在 T4.11 / T4.12 验收后补充。
 
 ### （旧）Phase 4 — 错误分类与可观测指标
 （分支 `feat/phase-4-observability`）

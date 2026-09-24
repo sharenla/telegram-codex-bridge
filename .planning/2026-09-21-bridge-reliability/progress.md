@@ -1668,3 +1668,14 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 
 - **Phase 4 / T4.10 complete（待三实例灰度）**：单个 30 秒扫描器只检查 running activeRequests；同一 turn 的通知刷新内存中的 `lastProgressAt` 并清除提示。达到默认 300000 毫秒后，在同一条 ack 后加中文无进展提示，每五分钟更新显示时长；不杀任务、不自动重试。`TELEGRAM_STALL_NOTICE_MS` 可覆盖首次提示阈值；进程重启不恢复这份内存状态。
 - **Test Results**：新建 `tests/stall-notice.test.js`，旧代码先红后绿；假时钟覆盖 4:59 无提示、5/10 分钟同一 message_id 更新、收到进展后清除、终态不再编辑及环境变量覆盖。全套 **228/228 pass，fail 0**；`node -c`、四项 `zsh -n`、`git diff --check` 均通过。文件：`index.js`、`.env.example`、`tests/stall-notice.test.js`。
+
+### T4.9a / T4.9b / T4.10 人工验收（2026-09-24 14:19 UTC+8）—— 通过
+
+- Claude 复核代码：自拉总计 3 次（立即/1s/5s）、5 分钟跨崩溃额度、authFailure 提前返回不自拉、拉起期间新消息排队并显示「后端正在重启」；
+  T4.9b 仅在 codex-lb 下放过 models_manager / rmcp 两类 401；T4.10 单个 30 秒扫描器、只改同一条 ack。未发现需返工的问题
+  （遗留一个用不到的 30000 常量，无行为影响）
+- 三实例 index.js `345d09cab371`、DEPLOYED_REF `63b02a3`；维护者确认三 bot `/status` codeVersion=345d09ca、codexBackend=ok
+- **T4.9a 重演练（rv）**：杀 app-server 后 `#b37010` ack → backendInterrupted（维护者确认 Telegram 文案）；
+  **bridge PID 保持 16623**，新 app-server 自行拉起，supervisor **无新增** `unhealthy ... restarting`；随后「回复一个字：好」正常回复
+- **T4.9b 线上生效**：日志出现 `codex_auth_noise_ignored`（`rmcp_transport_401`），未误标 auth_failing
+- T4.10：线上未人为制造，日常观察
