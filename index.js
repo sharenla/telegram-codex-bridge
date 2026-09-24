@@ -152,19 +152,40 @@ function getCodexRestartDelayMs(retryIndex) {
   return CODEX_RESTART_BACKOFF_MS[Math.max(0, Number(retryIndex) || 0)] || CODEX_RESTART_BACKOFF_MS.at(-1);
 }
 
-async function retryCodexServerStart(start, { wait = sleep, onExhausted = async () => {} } = {}) {
+function createCodexRestartBudget({ now = Date.now, windowMs = 5 * 60 * 1000, limit = 3 } = {}) {
+  let windowStartedAt = null;
+  let attempts = 0;
+  return {
+    remaining() {
+      if (windowStartedAt !== null && now() - windowStartedAt >= windowMs) {
+        windowStartedAt = null;
+        attempts = 0;
+      }
+      return Math.max(0, limit - attempts);
+    },
+    consume() {
+      if (!this.remaining()) return false;
+      if (windowStartedAt === null) windowStartedAt = now();
+      attempts++;
+      return true;
+    },
+  };
+}
+
+async function retryCodexServerStart(start, { wait = sleep, onExhausted = async () => {}, budget = null } = {}) {
+  let lastError = null;
   for (let retry = 0; retry <= CODEX_RESTART_BACKOFF_MS.length; retry += 1) {
+    if (budget && !budget.remaining()) break;
     if (retry > 0) await wait(getCodexRestartDelayMs(retry - 1));
+    if (budget && !budget.consume()) break;
     try {
       await start();
       return true;
     } catch (error) {
-      if (retry === CODEX_RESTART_BACKOFF_MS.length) {
-        await onExhausted(error);
-        return false;
-      }
+      lastError = error;
     }
   }
+  await onExhausted(lastError || new Error("Codex app-server restart budget exhausted"));
   return false;
 }
 
@@ -5204,6 +5225,7 @@ async function main() {
   const processStartedAt = PROCESS_STARTED_AT;
   let codex = null;
   let codexRestartPromise = null;
+  const codexRestartBudget = createCodexRestartBudget();
   const deployedRefPath = path.join(__dirname, "DEPLOYED_REF");
   if (fs.existsSync(deployedRefPath)) {
     console.log(`Deployed ref: ${fs.readFileSync(deployedRefPath, "utf8").trim().replace(/\n/g, " ")}`);
@@ -7475,10 +7497,15 @@ async function main() {
       return { ok: false, error: { code: -32601, message: `Unhandled method: ${method}` } };
     });
 
-    await server.start();
-    await server.initialize();
-    codex = server;
-    recordCodexBackendHealthy();
+    try {
+      await server.start();
+      await server.initialize();
+      codex = server;
+      recordCodexBackendHealthy();
+    } catch (error) {
+      await server.stopAndWait();
+      throw error;
+    }
   }
 
   /** @type {Map<string, any>} */
@@ -8706,6 +8733,7 @@ async function main() {
     codexRestartPromise = retryCodexServerStart(
       startCodexServer,
       {
+        budget: codexRestartBudget,
         wait: async delayMs => sleep(delayMs),
         onExhausted: async error => {
           console.error(`Codex app-server self-restart exhausted: ${error.message || error}`);
@@ -10296,6 +10324,7 @@ module.exports = {
     MODEL_CAPACITY_PATTERNS,
     MAX_UPSTREAM_RETRIES,
     getCodexRestartDelayMs,
+    createCodexRestartBudget,
     retryCodexServerStart,
     turnHasToolActivity,
     retryClassifiedTurn,
