@@ -599,7 +599,7 @@ cb6c0b2 Auto-run Deribit strategy approval gates
 - 三个 bridge 与 app-server 子进程均存活；命名实例角色文件哈希不变；持久锁目录 3 把锁，各自 PID 与实例 index.js 进程匹配。最后核对 supervisor 发起的 curl 0 个、其 argv 含 token 0 个；bridge/其他 curl 仅计数 3 个，不打印命令行。真实 env、凭证、Clash 配置与 service/store 均未手工改动。
 - **人工验收待维护者执行，Codex 不代发消息**：
   1. 三个 bot 各发 `/status`：应显示 `codeVersion=345d09ca`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`，并核对 `truthProfile` 不变；请记录每个实例的实际值。旁路 401 可能随真实新建 thread 出现，T4.9b 只保证它不误标 `auth_failing`。
-  2. 仅在 rv-prediction 私聊发无副作用的长任务；看到「正在处理」后只杀该实例的 app-server 子进程。预期原 ack 改为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」、不自动重跑，app-server 自动拉起；**bridge PID 不变，supervisor 日志无新的 `unhealthy ... restarting`**。
+  2. 仅在 rv-prediction 私聊发无副作用的长任务；看到「正在处理」后先记下 bridge PID，再由维护者在 wukong 执行 `B=$(pgrep -f '/telegram-codex-bridge-rv-prediction-service/index.js' | head -n 1); pkill -P "$B" -f 'codex app-server'`，只杀该实例的 app-server 子进程。预期原 ack 改为「⚠️ Codex 后端意外退出，这条任务已中断，请确认后重发（#id）」、不自动重跑，app-server 自动拉起；复查 **bridge PID 不变，supervisor 日志无新的 `unhealthy ... restarting`**。诊断只打印 PID 或先脱敏，不输出完整 ps/curl 命令行。
   3. T4.10 无需制造五分钟卡死；日常长任务顺带观察同一条 ack 的无进展提示与恢复清除即可。
 
 ## Error Log
