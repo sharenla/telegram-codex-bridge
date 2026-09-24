@@ -9,13 +9,11 @@
 
 ## Next Step
 
-同一轮执行 **T3.6**（409 单独归类并告知）与 **T3.7**（Clash 控制器探测与可达性），分开提交。规格见 `handoff_codex.md`「T3.6 补充」「T3.7」。
-两项部署并经人工 `/status` 确认后，执行 **Phase 3 收口**：合并 main、打 `v0.3.0`、从 main 重装三实例。
-T3.4c / T3.5 §4.4 验收已于 2026-09-23 完成。
+开始 **T4.1**（先用 rollout jsonl 出一版基线数字）。Phase 3 已完成收口并发布 `v0.3.0`。
 
 ## Current Phase
 
-Phase 3
+Phase 4
 
 ## Phases
 
@@ -63,9 +61,9 @@ Phase 3
 - [x] T3.4b 【零输出，必修】认证恢复耗尽后请求必须收尾（❌ + 中文原因）；backend 健康状态须反映持续的认证失败
 - [x] T3.4c 切号验证成功也视为认证恢复（清 authFailureUnresolved，状态复位 ok）
 - [x] T3.5 supervisor 兜底直发（连续强杀 ≥3 次时自己 curl 通知）
-- [ ] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
-- [ ] T3.7 修复 Clash 控制 socket 探测（现路径 ENOENT，断网时自动换节点未生效）
-- **Status:** in_progress
+- [x] T3.6 409 Conflict 单独归类 `telegram_poll_conflict` 并播报
+- [x] T3.7 修复 Clash 控制 socket 探测（现路径 ENOENT，断网时自动换节点未生效）
+- **Status:** complete
 
 ### Phase 4: 错误分类与可观测指标
 

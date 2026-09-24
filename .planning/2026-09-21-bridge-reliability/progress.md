@@ -1468,6 +1468,15 @@ T3.5 告警路径未在线上主动制造，已由新增 supervisor 假 curl 测
 
 请对三个 bot 各发一次 `/status`，记录 `codeVersion=15f553e6`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变，并核对 `clashFailover: unavailable（找不到 Clash 控制器）`。维护者确认前，T3.6/T3.7 任务行保持未勾选，不进入 Phase 3 收口。
 
+### T3.6 / T3.7 人工验收（2026-09-24）—— 通过
+
+维护者确认三个 bot 的 `/status`：`codeVersion=15f553e6`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`clashFailover=unavailable（找不到 Clash 控制器）`，`truthProfile` 不变。Phase 3 全部任务已核对完成。
+
+### Phase 3 收口准备（2026-09-24）
+
+- T3.6/T3.7 已在 `feat/phase-3-restart-loop` 完成人工验收；task_plan 的 Phase 3 状态改为 `complete`，Current Phase 改为 Phase 4，Next Step 指向 T4.1。
+- 下一步按 handoff 执行：合并 `main`、创建 `v0.3.0`、用 tag 指向 commit 核对两份运行文件哈希，再从 main 灰度重装三实例。未 push。
+
 ### T3.4c / T3.5 验收（2026-09-23）—— 通过
 
 - 四份哈希一致：`index.js` `29cd2ee871`、supervisor `7a78789249`；**204 / 204**
