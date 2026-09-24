@@ -1604,13 +1604,16 @@ function truncateMiddle(text, maxLen) {
 
 function classifyUserFacingFailure(errorText = "") {
   const text = String(errorText || "");
+  if (/context deadline exceeded|context canceled|timed out|timeout/i.test(text)) return "网络连接超时";
   if (/ETIMEDOUT|ECONNRESET|fetch failed|socket hang up/i.test(text)) return "网络连接中断";
   if (/Codex backend is unavailable|app-server(?: process)? (?:is )?not (?:ready|available)|backend unavailable/i.test(text)) {
     return "Codex 后端暂时不可用";
   }
-  if (/context|token limit/i.test(text)) return "对话上下文过长，建议 /new 开启新对话后重发";
+  if (/context window|context length|maximum context|token limit|too many tokens/i.test(text)) {
+    return "对话上下文过长，建议 /new 开启新对话后重发";
+  }
   if (/thread not found/i.test(text)) return "对话已失效，请重发";
-  if (/\b(?:502|503)\b|Bad Gateway/i.test(text)) return "Telegram 服务端暂时不可用";
+  if (/\b(?:502|503)\b|Bad Gateway|Service Unavailable/i.test(text)) return "上游服务暂时不可用";
   return "处理失败，原因未知";
 }
 
@@ -1624,10 +1627,30 @@ function sanitizeUserFacingFailureDetail(errorText = "") {
 }
 
 function formatUserFacingFailure({ errorText = "", group = false } = {}) {
-  const reason = classifyUserFacingFailure(errorText);
+  const source = String(errorText || "");
+  // Telegram transport errors may include the API endpoint; keep that
+  // established user-facing category while Codex turn 502/503 stays upstream.
+  const reason = /\b502\b|Bad Gateway/i.test(source)
+    ? "Telegram 服务端暂时不可用"
+    : classifyUserFacingFailure(source);
   if (group) return reason;
   const detail = truncateMiddle(sanitizeUserFacingFailureDetail(errorText), 80);
   return detail ? `${reason}（${detail}）` : reason;
+}
+
+function formatTurnFailureNotification({ ackCount = 0, errorText = "", group = false, hint = "" } = {}) {
+  if (Number(ackCount) > 0) return null;
+  return [formatUserFacingFailure({ errorText, group }), hint].filter(Boolean).join("\n\n");
+}
+
+function formatCompactionFailureForChat({ status = "failed", errorText = "", group = false } = {}) {
+  const normalized = String(status || "").toLowerCase();
+  const base = normalized === "cancelled" || normalized === "canceled"
+    ? "已取消上下文压缩，继续使用当前对话"
+    : "上下文压缩失败，继续使用当前对话";
+  if (group) return base;
+  const detail = truncateMiddle(sanitizeUserFacingFailureDetail(errorText), 80);
+  return detail ? `${base}（${detail}）` : base;
 }
 
 function formatStopNotice({ active = false, clearedCount = 0 } = {}) {
@@ -7233,11 +7256,11 @@ async function main() {
                     partialExecution: Boolean(upstreamResult.partialExecution),
                     group: isGroupChat(chatId),
                   })
-                : status === "interrupted" || status === "cancelled"
-                ? "Context compaction cancelled. Staying on the current thread."
-                : detail
-                  ? `Context compaction ${status}: ${detail}`
-                  : `Context compaction ${status}. Staying on the current thread.`;
+                : formatCompactionFailureForChat({
+                    status: status === "interrupted" ? "cancelled" : status,
+                    errorText: detail || "",
+                    group: isGroupChat(chatId),
+                  });
               await telegram.sendMessage({ chat_id: chatId, text });
             } else if (!silentTurn) {
               if (modelBusyResult.partialExecution) {
@@ -7251,8 +7274,14 @@ async function main() {
                 const hint = isRemoteCompactTransportFailureText(rawDetail)
                   ? buildRemoteCompactFailureHint({ hasSpareAccounts: autoAccountFailover && accountProfiles.length > 1 })
                   : null;
-                const text = `${formatUserFacingFailure({ errorText: detail || status, group: isGroupChat(chatId) })}${hint ? `\n\n${hint}` : ""}`;
-                if (!(shouldRedactCodexTurnOutput(chatId) && hasSeenGroupVisibleText(rt, text))) {
+                const ackCount = turnMeta?.acks?.length || (turnMeta?.ack ? 1 : 0);
+                const text = formatTurnFailureNotification({
+                  ackCount,
+                  errorText: detail || status,
+                  group: isGroupChat(chatId),
+                  hint,
+                });
+                if (text && !(shouldRedactCodexTurnOutput(chatId) && hasSeenGroupVisibleText(rt, text))) {
                   await telegram.sendMessage({ chat_id: chatId, text });
                   if (shouldRedactCodexTurnOutput(chatId)) rememberGroupVisibleText(rt, text);
                 }
@@ -7268,7 +7297,14 @@ async function main() {
                 else if (upstreamResult.partialExecution) await ackManager?.update(ack, "upstreamPartial");
                 else if (upstreamResult.exhausted) await ackManager?.update(ack, "upstreamUnavailable");
                 else await ackManager?.update(ack, "failed", {
-                  reason: formatUserFacingFailure({ errorText: extractTurnErrorText(turn) || "执行未完成", group: isGroupChat(chatId) }),
+                  reason: formatTurnFailureNotification({
+                    ackCount: 0,
+                    errorText: extractTurnErrorText(turn) || "执行未完成",
+                    group: isGroupChat(chatId),
+                    hint: isRemoteCompactTransportFailureText(extractTurnErrorText(turn))
+                      ? buildRemoteCompactFailureHint({ hasSpareAccounts: autoAccountFailover && accountProfiles.length > 1 })
+                      : "",
+                  }) || formatUserFacingFailure({ errorText: extractTurnErrorText(turn) || "执行未完成", group: isGroupChat(chatId) }),
                 });
                 if (ack?.requestId) activeRequests.remove(ack.requestId);
               }
@@ -8924,7 +8960,6 @@ async function main() {
       text: [
         "这个会话还没有开通 bot。",
         `请把下面的 chat_id 发给维护者开通：${chatId}`,
-        "开通后请重启 bridge。",
       ].join("\n"),
     }).catch((err) => {
       console.warn(`Failed to notify unauthorized chat ${chatId}:`, err.message);
@@ -10614,6 +10649,8 @@ module.exports = {
     TelegramUnreachableChatNotifier,
     classifyUserFacingFailure,
     formatUserFacingFailure,
+    formatTurnFailureNotification,
+    formatCompactionFailureForChat,
     formatStopNotice,
     formatApprovalCallbackLabel,
     resolveTelegramStallNoticeMs,

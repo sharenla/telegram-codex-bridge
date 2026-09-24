@@ -1763,3 +1763,11 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 问题 2（重复）：普通 turn 失败时，除 ack 终态 `❌ 处理失败：<原因>` 外，还**另发一条**同样原因的消息（沿用旧的 `Turn failed:` 单发路径）；
   上下文压缩失败的单发仍是英文（`Context compaction …`）
 - 问题 3（文案）：白名单提示「开通后请重启 bridge」是给维护者的操作，对陌生会话无意义
+
+### T4.4c 实现与 Test Results（2026-09-24）
+
+- 收窄失败分类：`context deadline exceeded` / `context canceled` / `timed out` / `timeout` 归为「网络连接超时」；上下文超限只匹配明确的窗口/长度/令牌模式；Codex turn 的 502/503 归为「上游服务暂时不可用」。既有 Telegram 502 兼容文案保持不变。
+- 普通 turn 失败有 ack 时只编辑 ack 终态，不再另发重复消息；无 ack 才单发。remote compact hint 会附在 ack 终态原因后。
+- 上下文压缩取消/失败改为中文；白名单提示去掉要求陌生会话重启 bridge 的多余行。
+- 新增 `tests/feedback-review.test.js`，先在旧代码上失败后通过；全套 **245/245 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
+- T4.4c 已完成，下一项为 T4.8；未修改 findings.md。
