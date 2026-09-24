@@ -1727,3 +1727,16 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 新增 `tests/feedback-copy.test.js`，先在旧代码上失败后通过；全套 **242/242 pass，fail 0**。`node -c`、四项 `zsh -n`、`git diff --check` 均通过。
 - T4.4a、T4.4b 与总项 T4.4 均已完成，待统一灰度部署；未修改 findings.md。
 - 部署后人工验收：三个 bot 各发 `/status`，确认新 `codeVersion`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变；rv 私聊 `/stop`（无任务）应显示「当前没有进行中的任务」。
+
+### T4.4 灰度部署（2026-09-24，UTC+8）
+
+| 日期（UTC+8） | 目标实例 | 分支 / tag | commit sha | index.js sha256 前 12 | supervisor sha256 前 12 | 结果 |
+|---|---|---|---|---|---|---|
+| 2026-09-24 16:38 | rv-prediction | `feat/phase-4-feedback-completion` | `3dd0f7770be6c575096ef83136bdb9220ca7dd28` | `72d6d4ed3fad` | `7a7878924997` | ✅ 首批观察通过；appServerSpawnedMs=1158 |
+| 2026-09-24 16:40 | default | `feat/phase-4-feedback-completion` | `3dd0f7770be6c575096ef83136bdb9220ca7dd28` | `72d6d4ed3fad` | `7a7878924997` | ✅ 第二批观察通过；appServerSpawnedMs=2100 |
+| 2026-09-24 16:41 | strategy-observation | `feat/phase-4-feedback-completion` | `3dd0f7770be6c575096ef83136bdb9220ca7dd28` | `72d6d4ed3fad` | `7a7878924997` | ✅ 第三批观察通过；appServerSpawnedMs=1156 |
+
+- 三实例启动日志均含本次 `Deployed ref`、`Supervisor ready ... start_grace=60`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=72d6d4ed`；3 把锁分别由对应 bridge PID 持有，角色文件哈希未变化。
+- supervisor 父进程 curl 数量为 `0 / 0 / 0`，其中含 token 数量均为 0；bridge curl 仅报告数量 `1 / 1 / 1`，未打印命令行。未触碰真实 `.env`、凭证、Clash 配置、service/store 文件。
+- **维护者人工验收待执行**：三个 bot 各发 `/status`，确认 `codeVersion=72d6d4ed`、`telegramState=ok`、`outboxQueued=0`、`outboxDiscarded=0`、`codexBackend=ok`、`truthProfile` 不变。
+- **T4.4b rv 私聊演练**：维护者在 rv 私聊发送 `/stop`（无进行中任务），预期收到「当前没有进行中的任务」；若有排队任务，预期追加「已清空排队的 N 条」。不修改线上审批或其他配置。
