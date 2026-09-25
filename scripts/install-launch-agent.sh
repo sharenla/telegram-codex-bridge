@@ -203,6 +203,10 @@ cat > "${PLIST_PATH}" <<PLIST
       <string>${SERVICE_ROOT}/data/store.json</string>
       <key>CODEX_HOME</key>
       <string>${SERVICE_ROOT}/data/codex-home</string>
+      <key>CODEX_MODEL</key>
+      <string>gpt-6-sol</string>
+      <key>CODEX_EFFORT</key>
+      <string>high</string>
       <key>PATH</key>
       <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>

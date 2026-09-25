@@ -1824,3 +1824,10 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 三批均观察到 `Supervisor ready ... start_grace=60`、`Deployed ref`、`startup phase`、`Telegram Codex Bridge started` 和 `codeVersion=354e8ada`；进程存活、锁目录保持 3 把锁，命名角色文件未覆盖。
 - **计划完成小结**：按清单完成 43 个未划线任务条目（四个已删除的统计类任务保留为划线追溯项），全套测试 **248/248 pass，fail 0**；四个阶段 tag 为 `v0.1.1`、`v0.2.0`、`v0.3.0`、`v0.4.0`。
 - 遗留事项：openclaw 账号池重新登录与配置修复；凭证是否轮换；是否 push；Clash 外部控制器是否开启；命名实例在 codex-lb 下的 MCP 可用性。详细限制见 `docs/reliability-postmortem.md`。
+
+### 用户请求：统一切换模型（2026-09-26）
+
+- 将桥接默认模型改为 `gpt-6-sol`、默认思考等级改为 `high`。
+- 启动时对每个实例的现有会话执行一次版本化迁移，避免仅改默认值而遗留旧会话模型；迁移版本写入 `store.json`，后续仍可用 `/model` 和 `/effort` 手动调整。
+- 安装脚本生成的三个 LaunchAgent 均显式注入 `CODEX_MODEL=gpt-6-sol`、`CODEX_EFFORT=high`，不修改真实 `.env` 文件。
+- 模板与多实例文档同步更新；新增迁移测试。验证：`249/249` 测试通过，`node -c` 与四个 `zsh -n` 通过。

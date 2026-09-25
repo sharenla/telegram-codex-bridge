@@ -33,6 +33,7 @@ const QUICK_MODELS = RECOMMENDED_MODELS.map((model) => model.id);
 const QUICK_EFFORTS = ["low", "medium", "high", "xhigh"];
 const AUTO_ROUTE_MODES = ["off", "suggest", "auto"];
 const DEFAULT_AUTO_ROUTE_MODE = "off";
+const SESSION_DEFAULTS_MIGRATION_VERSION = "gpt-6-sol-high-2026-09-26";
 const AUTO_ROUTE_PRESETS = {
   simple: { model: "gpt-5.2", effort: "low", label: "simple" },
   coding: { model: "gpt-5.4", effort: "high", label: "coding" },
@@ -5146,6 +5147,22 @@ function normalizeSessionState(session, defaults) {
   return session;
 }
 
+function migrateSessionModelDefaults(storeData, { model, effort, version = SESSION_DEFAULTS_MIGRATION_VERSION } = {}) {
+  if (!storeData || typeof storeData !== "object") return false;
+  if (storeData.sessionDefaultsMigrationVersion === version) return false;
+  for (const session of Object.values(storeData.sessions || {})) {
+    if (!session || typeof session !== "object") continue;
+    if (typeof model === "string" && model.trim() && session.model !== model.trim()) {
+      session.model = model.trim();
+    }
+    if (typeof effort === "string" && effort.trim() && session.effort !== effort.trim()) {
+      session.effort = effort.trim();
+    }
+  }
+  storeData.sessionDefaultsMigrationVersion = version;
+  return true;
+}
+
 function clearSessionContextTracking(session, {
   clearSummary = true,
   clearHistory = false,
@@ -6045,8 +6062,8 @@ async function main() {
 
   const defaults = {
     cwd: process.env.CODEX_CWD || process.cwd(),
-    model: process.env.CODEX_MODEL || "gpt-5.4",
-    effort: process.env.CODEX_EFFORT || "xhigh",
+    model: process.env.CODEX_MODEL || "gpt-6-sol",
+    effort: process.env.CODEX_EFFORT || "high",
     summary: process.env.CODEX_SUMMARY || "concise",
     personality: process.env.CODEX_PERSONALITY || "friendly",
     autoRouteMode: normalizeAutoRouteMode(process.env.CODEX_AUTO_ROUTE, DEFAULT_AUTO_ROUTE_MODE),
@@ -6054,6 +6071,14 @@ async function main() {
     sandboxMode: process.env.CODEX_SANDBOX || "workspace-write",
     autoApprove: process.env.AUTO_APPROVE === "1" || process.env.AUTO_APPROVE === "true",
   };
+  if (migrateSessionModelDefaults(store.data, {
+    model: defaults.model,
+    effort: defaults.effort,
+  })) {
+    store.markDirty();
+    store.saveThrottled();
+    console.log(`Migrated all sessions to model=${defaults.model} effort=${defaults.effort}.`);
+  }
   const contextThresholds = {
     soft: parseRatioEnv(process.env.CONTEXT_SOFT_RATIO, DEFAULT_CONTEXT_SOFT_RATIO),
     hard: parseRatioEnv(process.env.CONTEXT_HARD_RATIO, DEFAULT_CONTEXT_HARD_RATIO),
@@ -10736,6 +10761,7 @@ module.exports = {
     buildCompactionBootstrapText,
     countQueuedTasks,
     normalizeSessionState,
+    migrateSessionModelDefaults,
     normalizeModelId,
     normalizeEffortLevel,
     normalizeAutoRouteMode,
