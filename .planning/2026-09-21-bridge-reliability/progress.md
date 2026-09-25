@@ -1831,3 +1831,13 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 - 启动时对每个实例的现有会话执行一次版本化迁移，避免仅改默认值而遗留旧会话模型；迁移版本写入 `store.json`，后续仍可用 `/model` 和 `/effort` 手动调整。
 - 安装脚本生成的三个 LaunchAgent 均显式注入 `CODEX_MODEL=gpt-6-sol`、`CODEX_EFFORT=high`，不修改真实 `.env` 文件。
 - 模板与多实例文档同步更新；新增迁移测试。验证：`249/249` 测试通过，`node -c` 与四个 `zsh -n` 通过。
+
+#### 模型切换部署台账（2026-09-26，UTC+8）
+
+| 目标实例 | commit / ref | index.js sha256 前 12 | 结果 |
+|---|---|---|---|
+| rv-prediction | `172890f26b2fb002b885d068054990c187e8b756` / `v0.4.0-2-g172890f` | `c875a70317b5` | ✅ 灰度通过，进程与 LaunchAgent 存活 |
+| default | `172890f26b2fb002b885d068054990c187e8b756` / `v0.4.0-2-g172890f` | `c875a70317b5` | ✅ 灰度通过，进程与 LaunchAgent 存活 |
+| strategy-observation | `172890f26b2fb002b885d068054990c187e8b756` / `v0.4.0-2-g172890f` | `c875a70317b5` | ✅ 灰度通过，进程与 LaunchAgent 存活 |
+
+三实例均确认 plist 为 `CODEX_MODEL=gpt-6-sol`、`CODEX_EFFORT=high`；持久化会话共 8 个，`bad=0`。
