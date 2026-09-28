@@ -1841,3 +1841,17 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
 | strategy-observation | `172890f26b2fb002b885d068054990c187e8b756` / `v0.4.0-2-g172890f` | `c875a70317b5` | ✅ 灰度通过，进程与 LaunchAgent 存活 |
 
 三实例均确认 plist 为 `CODEX_MODEL=gpt-6-sol`、`CODEX_EFFORT=high`；持久化会话共 8 个，`bad=0`。
+
+### 遗留事项裁决与推送（2026-09-28）
+
+- **push**：推送前 Claude 扫描 `origin/main..main`（119 提交）：无 bot token、API key、邮箱；新增的群 ID 仅测试占位符，
+  两个真实群 ID 早已在远程历史（F15），无新增暴露。维护者在 wukong 本机推送 `main` 与 `v0.1.1`–`v0.4.0`；
+  核对：origin/main=`ff789f0` 与本地一致，五个 tag 远程与本地一致；功能分支未推
+- **bot token 轮换**：维护者决定不轮换（知悉 2026-09-22 三个完整 token 曾进入会话记录）
+- **Clash 外部控制器**：不开启。bot 的 Telegram 流量已走本机 Clash 混合端口 1082（且 TUN 全局接管），出口与节点切换跟随本机 Clash；
+  `clashFailover: unavailable` 仅为提示
+- **openclaw 重新登录**：不做。openclaw 默认模型走 codex-lb，三 bot 亦走 codex-lb，账号池过期不影响运行。
+  注意：PATH 中 `openclaw` 为旧版 openclaw-cn 0.1.8，网关实际运行 `~/.openclaw/vendor/openclaw-mainline-2026.5.6`；
+  旧版报的「9 项未识别配置」是版本不匹配，**不要**运行 `openclaw-cn doctor --fix`
+- **迁移 hermes 时的 bot 侧清单**：三实例 `.env` 的 `CODEX_ACCOUNTS_SOURCE` 指向 `~/.openclaw/...`，卸载 openclaw 前删去或置空，
+  重启一个实例后 `/status` 确认（代码预期文件缺失时账号池为空、codex-lb 下不影响，未实测）。codex-lb 为独立项目，不受影响
