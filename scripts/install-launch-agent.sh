@@ -204,7 +204,7 @@ cat > "${PLIST_PATH}" <<PLIST
       <key>CODEX_HOME</key>
       <string>${SERVICE_ROOT}/data/codex-home</string>
       <key>CODEX_MODEL</key>
-      <string>gpt-6-sol</string>
+      <string>gpt-6.1-sol</string>
       <key>CODEX_EFFORT</key>
       <string>high</string>
       <key>PATH</key>

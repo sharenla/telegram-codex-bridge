@@ -33,7 +33,7 @@ const QUICK_MODELS = RECOMMENDED_MODELS.map((model) => model.id);
 const QUICK_EFFORTS = ["low", "medium", "high", "xhigh"];
 const AUTO_ROUTE_MODES = ["off", "suggest", "auto"];
 const DEFAULT_AUTO_ROUTE_MODE = "off";
-const SESSION_DEFAULTS_MIGRATION_VERSION = "gpt-6-sol-high-2026-09-26";
+const SESSION_DEFAULTS_MIGRATION_VERSION = "gpt-6.1-sol-high-2026-09-30";
 const AUTO_ROUTE_PRESETS = {
   simple: { model: "gpt-5.2", effort: "low", label: "simple" },
   coding: { model: "gpt-5.4", effort: "high", label: "coding" },
@@ -6062,7 +6062,7 @@ async function main() {
 
   const defaults = {
     cwd: process.env.CODEX_CWD || process.cwd(),
-    model: process.env.CODEX_MODEL || "gpt-6-sol",
+    model: process.env.CODEX_MODEL || "gpt-6.1-sol",
     effort: process.env.CODEX_EFFORT || "high",
     summary: process.env.CODEX_SUMMARY || "concise",
     personality: process.env.CODEX_PERSONALITY || "friendly",

@@ -24,7 +24,7 @@ This repository includes two profiles:
 
 Both profiles:
 
-- use `gpt-6-sol` with `high` reasoning;
+- use `gpt-6.1-sol` with `high` reasoning;
 - start in `read-only` sandbox mode;
 - automatically accept routine Codex command, file, and permission requests so research turns do not pause on Telegram approval buttons; existing Deribit live hot-patch, deploy-gate, and restart guards still apply;
 - point at `/Users/wukong/trading-deribit` and the shared source registry;
