@@ -1855,3 +1855,10 @@ T4.9 线上演练因认证失败被干扰。default 走 codex-lb 一直正常。
   旧版报的「9 项未识别配置」是版本不匹配，**不要**运行 `openclaw-cn doctor --fix`
 - **迁移 hermes 时的 bot 侧清单**：三实例 `.env` 的 `CODEX_ACCOUNTS_SOURCE` 指向 `~/.openclaw/...`，卸载 openclaw 前删去或置空，
   重启一个实例后 `/status` 确认（代码预期文件缺失时账号池为空、codex-lb 下不影响，未实测）。codex-lb 为独立项目，不受影响
+
+### 用户请求：切换至 GPT-6.1（2026-09-30）
+
+- 默认模型与三个 LaunchAgent 生效环境更新为 `gpt-6.1-sol`，思考等级保持并确认 `high`。
+- 三实例启动迁移版本为 `gpt-6.1-sol-high-2026-09-30`；持久化会话共 8 个，全部为 `gpt-6.1-sol/high`。
+- 灰度顺序 rv-prediction → default → strategy-observation 全部通过；三份安装副本与工作区 `index.js` SHA-256 前 12 位均为 `d91ca905e420`，LaunchAgent 与进程存活。
+- 验证：`249/249` 测试通过，`node -c`、四项 `zsh -n`、`git diff --check` 通过。
