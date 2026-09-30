@@ -4932,7 +4932,9 @@ function buildTruthBootstrapText(resolvedTruth, userText) {
 function filterDesktopCodexConfigToml(text) {
   const dropRootKeys = new Set(["approval_policy", "sandbox_mode", "notify"]);
   let inRoot = true;
+  let inFeaturesTable = false;
   let skipDroppedValueDepth = 0;
+  let skipFeatureTable = false;
   const bracketDelta = (value) => {
     let delta = 0;
     let inSingle = false;
@@ -4965,6 +4967,16 @@ function filterDesktopCodexConfigToml(text) {
     .split(/\r?\n/)
     .filter((line) => {
       const trimmed = line.trim();
+      if (skipFeatureTable) {
+        if (/^\[/.test(trimmed)) {
+          const tablePath = trimmed
+            .replace(/^\[+|\]+$/g, "")
+            .replace(/["']/g, "")
+            .trim();
+          if (!tablePath.startsWith("features.")) skipFeatureTable = false;
+        }
+        if (skipFeatureTable) return false;
+      }
       if (skipDroppedValueDepth > 0) {
         if (/^\[/.test(trimmed)) {
           skipDroppedValueDepth = 0;
@@ -4974,7 +4986,27 @@ function filterDesktopCodexConfigToml(text) {
         skipDroppedValueDepth = Math.max(0, skipDroppedValueDepth + bracketDelta(trimmed));
         return false;
       }
-      if (/^\[/.test(trimmed)) inRoot = false;
+      if (/^\[/.test(trimmed)) {
+        const tablePath = trimmed
+          .replace(/^\[+|\]+$/g, "")
+          .replace(/["']/g, "")
+          .trim();
+        if (tablePath.startsWith("features.")) {
+          skipFeatureTable = true;
+          inFeaturesTable = false;
+          return false;
+        }
+        inFeaturesTable = tablePath === "features";
+        inRoot = false;
+      }
+      if (/^(?:features\.)?[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+\s*=/.test(trimmed)) return false;
+      if (inFeaturesTable) {
+        const featureValue = trimmed.match(/^[A-Za-z0-9_-]+\s*=\s*(.*)$/);
+        if (featureValue && /^[\[{]/.test(featureValue[1])) {
+          skipDroppedValueDepth = Math.max(0, bracketDelta(featureValue[1]));
+          return false;
+        }
+      }
       if (!inRoot) return true;
       const match = trimmed.match(/^([A-Za-z0-9_-]+)\s*=(.*)$/);
       if (!match || !dropRootKeys.has(match[1])) return true;
