@@ -26,6 +26,7 @@ test("desktop feature subtables cannot invalidate the bridge provider after repe
     assert.match(synced, /memories = true/);
     assert.match(synced, /model_provider = "codex-lb"/);
     assert.match(synced, /env_key = "CODEX_LB_API_KEY"/);
+    assert.match(synced, /supports_websockets = false/);
     assert.match(synced, /\[desktop\]\nselected-avatar-id/);
     assert.equal(fs.readFileSync(path.join(desktop, "config.toml"), "utf8"), rewritten);
     assert.equal(fs.readFileSync(path.join(bridge, "auth.json"), "utf8"), '{"fixture":true}\n');

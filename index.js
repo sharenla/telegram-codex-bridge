@@ -1449,6 +1449,7 @@ function configureCodexLbProvider({
   baseUrl = "http://127.0.0.1:2455/backend-api/codex",
   provider = "codex-lb",
   envKey = "",
+  supportsWebsockets = false,
   logger = () => {},
 } = {}) {
   if (!enabled) return { configured: false, reason: "disabled" };
@@ -1481,7 +1482,7 @@ function configureCodexLbProvider({
     `base_url = "${safeBaseUrl}"`,
     'wire_api = "responses"',
     envKeyLine.trimEnd(),
-    "supports_websockets = true",
+    `supports_websockets = ${Boolean(supportsWebsockets) ? "true" : "false"}`,
     "requires_openai_auth = true",
     providerMarkerEnd,
     "",
@@ -6041,6 +6042,7 @@ async function main() {
     baseUrl: codexLbBaseUrl,
     provider: codexLbProvider,
     envKey: process.env.CODEX_LB_ENV_KEY || (process.env.CODEX_LB_API_KEY ? "CODEX_LB_API_KEY" : ""),
+    supportsWebsockets: parseBooleanEnv(process.env.CODEX_LB_SUPPORTS_WEBSOCKETS, false),
     logger: (line) => console.log(line),
   });
   const defaultSourceRegistryPath = path.join(__dirname, "config", "source-registry.json");
